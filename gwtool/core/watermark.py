@@ -55,7 +55,7 @@ _VML_TPL = """<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2
   mso-position-horizontal:center;mso-position-horizontal-relative:margin;
   mso-position-vertical:center;mso-position-vertical-relative:margin"
   o:allowincell="f" fillcolor="silver" stroked="f">
-<v:fill opacity=".5"/>
+<v:fill opacity="%s"/>
 <v:textpath style="font-family:&quot;宋体&quot;;font-size:%dpt" string="%s"/>
 </v:shape>
 </w:pict>
@@ -63,9 +63,9 @@ _VML_TPL = """<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2
 
 
 def add_watermark_docx(docx_path: str, text: str, out_path: str = "",
-                       angle: float = 315.0, fontsize: float = 1) -> str:
+                       angle: float = 315.0, fontsize: float = 1,
+                       opacity: float = 0.5) -> str:
     """页眉 VML 艺术字水印（Word/WPS 标准做法），默认覆盖原文件。"""
-    import re
     from docx import Document
     from docx.oxml import parse_xml
 
@@ -73,7 +73,8 @@ def add_watermark_docx(docx_path: str, text: str, out_path: str = "",
     for i, sec in enumerate(doc.sections):
         header = sec.header
         header.is_linked_to_previous = False
-        xml = _VML_TPL % (i + 1, 49 + i, 420, 180, angle, fontsize, text)
+        xml = _VML_TPL % (i + 1, 49 + i, 420, 180, angle,
+                          f"{max(0.0, min(opacity, 1.0)):.2f}", fontsize, text)
         header._element.append(parse_xml(xml))
     out = out_path or docx_path
     if out != docx_path:

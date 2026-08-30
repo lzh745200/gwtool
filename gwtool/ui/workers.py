@@ -36,7 +36,12 @@ class ImportWorker(QThread):
                 if self._stop:
                     break
                 self.progress.emit(i, total, path)
-                r = importer.parse_any(path)
+
+                def ocr_progress(page, n_pages, _i=i, _path=path):
+                    # 扫描件整本 OCR 可能耗时数分钟，把页级进度并入进度文本
+                    self.progress.emit(_i, total, f"{_path}（OCR 第{page}/{n_pages}页）")
+
+                r = importer.parse_any(path, ocr_progress_cb=ocr_progress)
                 if not r.ok or r.tree is None:
                     skip += 1
                     continue

@@ -119,13 +119,14 @@ jobs:
           cp -r dist/gwtool/* pkg/opt/gwtool/
           cat > pkg/DEBIAN/control <<'EOF'
           Package: gwtool
-          Version: 1.0.0
+          Version: 1.1.0
           Section: office
           Priority: optional
           Architecture: arm64
           Maintainer: lzh745200 <lzh745200@users.noreply.github.com>
           Depends: libgl1, libegl1, libglib2.0-0, libxkbcommon0,
            libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libdbus-1-3
+          Recommends: tesseract-ocr, tesseract-ocr-chi-sim
           Description: 公文汇编助手 - 单机离线版智能公文汇编与写作辅助工具
            多格式材料导入、一键汇编（红头/目录/页码）、文字纠错、
            GB/T 9704 格式体检、A3骑马钉小册子、全文检索、写作参考。
@@ -139,8 +140,8 @@ jobs:
           Terminal=false
           Categories=Office;
           EOF
-          dpkg-deb --build pkg gwtool_1.0.0_arm64.deb
-          dpkg-deb -I gwtool_1.0.0_arm64.deb | head -8
+          dpkg-deb --build pkg gwtool_1.1.0_arm64.deb
+          dpkg-deb -I gwtool_1.1.0_arm64.deb | head -8
 
       - name: 生成 ARM64 便携版 tar.gz
         run: tar -czf gwtool_linux_arm64_便携版.tar.gz -C dist gwtool
@@ -150,5 +151,5 @@ jobs:
         with:
           name: gwtool-arm64-packages
           path: |
-            gwtool_1.0.0_arm64.deb
+            gwtool_1.1.0_arm64.deb
             gwtool_linux_arm64_便携版.tar.gz

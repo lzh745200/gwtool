@@ -16,7 +16,12 @@ def create_backup(note: str = "", password: str = "") -> str:
     """备份当前数据库到 backups 目录，返回备份文件路径。
 
     password 非空时使用 AES 加密（pyzipper）；未安装 pyzipper 时报错提示。
+    备份前先做 WAL checkpoint，确保后台线程连接中未落盘的事务进入备份包。
     """
+    try:
+        dbconn.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
     dbconn.close_current_thread()  # 确保落盘（WAL checkpoint 在连接关闭时完成）
     src = dbconn.current_db_file()
     if not src.exists():
@@ -126,4 +131,23 @@ def restore_backup(zip_path: str, password: str = "") -> bool:
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
         conn.close()
         tmp.replace(target)
+        # 模板迁移包回写（旧版只写不读）
+        if "templates.json" in names:
+            try:
+                _restore_templates(zf)
+            except Exception:
+                pass
     return True
+
+
+def _restore_templates(zf) -> int:
+    """备份包内 templates.json -> 模板表（upsert，便于跨机迁移后补齐模板）。"""
+    from ..db import dao
+    cfgs = json.loads(zf.read("templates.json").decode("utf-8"))
+    n = 0
+    for c in cfgs:
+        if isinstance(c, dict) and c.get("name") and c.get("config_json"):
+            dao.save_template(c["name"], c["config_json"],
+                              is_default=bool(c.get("is_default")))
+            n += 1
+    return n

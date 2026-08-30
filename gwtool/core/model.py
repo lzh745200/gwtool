@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 
-# 块类型：heading=标题(level 1..4) paragraph=正文 list_item=列表 quote=引用
+# 块类型：heading=标题(level 1..4) paragraph=正文 list_item=列表 quote=引用 table=表格
 HEADING = "heading"
 PARAGRAPH = "paragraph"
 LIST_ITEM = "list_item"
+TABLE = "table"
 
 
 @dataclass
@@ -16,6 +17,7 @@ class Block:
     level: int = 0          # 标题级别 1-4
     text: str = ""
     align: str = "left"     # left/center/right
+    rows: list[list[str]] | None = None   # type=table 时为单元格文本
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -29,7 +31,11 @@ class DocTree:
 
     def plain_text(self) -> str:
         parts = [self.title] if self.title else []
-        parts.extend(b.text for b in self.blocks if b.text)
+        for b in self.blocks:
+            if b.type == TABLE and b.rows:
+                parts.extend(" | ".join(cell for cell in row) for row in b.rows)
+            elif b.text:
+                parts.append(b.text)
         return "\n".join(parts)
 
     def effective_blocks(self, insert_titles: bool) -> list["Block"]:

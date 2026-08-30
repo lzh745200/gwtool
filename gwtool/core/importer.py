@@ -26,7 +26,13 @@ class ImportResult:
     error: str = ""
 
 
-def parse_any(path: str) -> ImportResult:
+_OCR_LANG_HINT = ("检测到 Tesseract 但缺少中文语言包 chi_sim，无法识别中文扫描件。\n"
+                  "安装：Windows 重装 Tesseract 安装包并勾选 Chinese Simplified；\n"
+                  "麒麟：sudo apt install tesseract-ocr-chi-sim")
+
+
+def parse_any(path: str, ocr_progress_cb=None) -> ImportResult:
+    """解析单文件。ocr_progress_cb(page, total)：扫描件 OCR 逐页进度（可为 None）。"""
     ext = Path(path).suffix.lower()
     try:
         if ext == ".docx":
@@ -36,16 +42,20 @@ def parse_any(path: str) -> ImportResult:
         elif ext == ".pdf":
             tree = parse_pdf(path)
             if (tree is None or not tree.blocks) and ocr_available():
-                # 扫描版 PDF -> OCR
-                from .ocr import ocr_pdf
-                tree = ocr_pdf(path)
+                # 扫描版 PDF -> OCR（先预检中文包，避免静默空结果）
+                from .ocr import has_chi_sim, ocr_pdf
+                if not has_chi_sim():
+                    return ImportResult(path, False, None, _OCR_LANG_HINT)
+                tree = ocr_pdf(path, progress_cb=ocr_progress_cb)
         elif ext in IMAGE_EXTS:
             if not ocr_available():
                 return ImportResult(
                     path, False, None,
                     "图片识别需安装 Tesseract OCR（含中文包 chi_sim），"
                     "安装后在「设置 → 系统与安全」中指定路径")
-            from .ocr import ocr_image
+            from .ocr import has_chi_sim, ocr_image
+            if not has_chi_sim():
+                return ImportResult(path, False, None, _OCR_LANG_HINT)
             text = ocr_image(path)
             tree = _text_to_tree(text, title_hint=Path(path).stem)
         elif ext == ".txt":

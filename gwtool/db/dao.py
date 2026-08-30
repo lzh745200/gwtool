@@ -186,6 +186,8 @@ def delete_document(doc_id: int) -> None:
     conn = dbconn.get_conn()
     conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     conn.execute("DELETE FROM documents_fts WHERE ref_id=?", (doc_id,))
+    # 级联清理历史快照，避免孤儿快照无限累积
+    conn.execute("DELETE FROM snapshots WHERE doc_id=?", (doc_id,))
     conn.commit()
 
 
@@ -198,15 +200,14 @@ def get_document(doc_id: int) -> Document | None:
 def list_documents(category_id: int | None = None) -> list[Document]:
     """category_id=None 返回全部（标题列表用，不含正文以省内存）。"""
     conn = dbconn.get_conn()
+    cols = "id,title,tags,category_id,file_type,word_count,import_time,updated_time"
     if category_id is None:
         rows = conn.execute(
-            "SELECT id,title,tags,category_id,file_type,word_count,import_time"
-            " FROM documents ORDER BY import_time DESC,id DESC").fetchall()
+            f"SELECT {cols} FROM documents ORDER BY import_time DESC,id DESC").fetchall()
     else:
         rows = conn.execute(
-            "SELECT id,title,tags,category_id,file_type,word_count,import_time"
-            " FROM documents WHERE category_id=? ORDER BY import_time DESC,id DESC",
-            (category_id,)).fetchall()
+            f"SELECT {cols} FROM documents WHERE category_id=?"
+            " ORDER BY import_time DESC,id DESC", (category_id,)).fetchall()
     return [Document(**dict(r)) for r in rows]
 
 

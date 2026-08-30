@@ -258,8 +258,8 @@ def test_batch_compile(tmp_db, tmp_path):
             title=tree.title, content_text=tree.plain_text(),
             blocks_json=tree.to_json())))
     out = tmp_path / "batch"
-    paths = batch_compile_each(ids, default_template(), str(out))
-    assert len(paths) == 3
+    paths, failures = batch_compile_each(ids, default_template(), str(out))
+    assert len(paths) == 3 and failures == []
     for p in paths:
         assert Path(p).exists() and Path(p).stat().st_size > 5000
 

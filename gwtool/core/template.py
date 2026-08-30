@@ -93,7 +93,7 @@ class DocTemplate:
     colophon: Colophon = field(default_factory=Colophon)
     # 汇编选项
     insert_material_titles: bool = True     # 每份材料标题作为一级标题
-    material_title_prefix: str = ""         # 如 “材料一：”留空则直接用标题
+    material_title_prefix: str = ""         # 如 “材料{n}：”，{n} 替换为中文数字；留空则直接用标题
     # 水印/密级标注
     watermark_text: str = ""                # 空=无水印，如“征求意见稿”“秘密★1年”
     watermark_opacity: float = 0.12
@@ -126,6 +126,31 @@ class DocTemplate:
         obj = DocTemplate.from_json(self.to_json())
         obj.name = new_name
         return obj
+
+
+def material_label(prefix: str, index: int) -> str:
+    """汇编材料自动编号前缀。prefix 形如 “材料{n}：”，{n} 替换为中文数字；
+    不含 {n} 时原样用于每份材料；prefix 为空返回空串。"""
+    if not (prefix or "").strip():
+        return ""
+    if "{n}" in prefix:
+        return prefix.replace("{n}", _cn_num(index))
+    return prefix
+
+
+def _cn_num(n: int) -> str:
+    """1-99 转中文数字（材料编号常规范围），超出回退阿拉伯数字。"""
+    digits = "零一二三四五六七八九"
+    if 1 <= n < 10:
+        return digits[n]
+    if n == 10:
+        return "十"
+    if 10 < n < 20:
+        return "十" + digits[n % 10]
+    if 20 <= n < 100:
+        tens, ones = divmod(n, 10)
+        return digits[tens] + "十" + (digits[ones] if ones else "")
+    return str(n)
 
 
 def default_template() -> DocTemplate:

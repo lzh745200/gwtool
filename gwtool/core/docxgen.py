@@ -19,8 +19,8 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Mm, Pt, RGBColor
 
-from .model import DocTree, HEADING, LIST_ITEM, PARAGRAPH
-from .template import DocTemplate, HeadingStyle
+from .model import DocTree, HEADING, LIST_ITEM, PARAGRAPH, TABLE
+from .template import DocTemplate, HeadingStyle, material_label
 
 _ALIGN = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -162,13 +162,16 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
         doc.add_page_break()
 
     # 4) 正文
-    for tree in trees:
+    for mat_no, tree in enumerate(trees, 1):
         if tpl.insert_material_titles and tree.title:
-            _add_heading(doc, tree.title, 1, tpl.h1, tpl.line_spacing_pt)
+            label = material_label(tpl.material_title_prefix, mat_no)
+            _add_heading(doc, f"{label}{tree.title}", 1, tpl.h1, tpl.line_spacing_pt)
         for blk in tree.effective_blocks(tpl.insert_material_titles):
             if blk.type == HEADING:
                 hs = {1: tpl.h1, 2: tpl.h2, 3: tpl.h3}.get(blk.level, tpl.h4)
                 _add_heading(doc, blk.text, min(blk.level, 3), hs, tpl.line_spacing_pt)
+            elif blk.type == TABLE and blk.rows:
+                _add_table(doc, blk.rows, tpl)
             elif blk.type == LIST_ITEM:
                 _add_body(doc, blk.text, tpl, indent=tpl.first_line_indent_chars)
             else:
@@ -183,10 +186,12 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
 
-    # 水印（页眉 VML 艺术字）
+    # 水印（页眉 VML 艺术字），透明度/角度取模板参数
     if tpl.watermark_text.strip():
         from .watermark import add_watermark_docx
-        add_watermark_docx(str(out), tpl.watermark_text.strip())
+        add_watermark_docx(str(out), tpl.watermark_text.strip(),
+                           opacity=tpl.watermark_opacity,
+                           angle=(360 - tpl.watermark_angle) % 360)
     return str(out)
 
 
@@ -285,6 +290,28 @@ def _add_body(doc, text: str, tpl: DocTemplate, indent: float | None = None) -> 
         _set_first_line_chars(par, ind)
     run = par.add_run(text)
     _set_run_font(run, tpl.body_font, tpl.body_size_pt)
+
+
+def _add_table(doc, rows: list[list[str]], tpl: DocTemplate) -> None:
+    """表格：全框线（公文常用），字号比正文小两号，单元格文字左对齐。"""
+    if not rows:
+        return
+    ncols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=ncols)
+    try:
+        table.style = "Table Grid"
+    except Exception:
+        pass  # 样式缺失时保留默认表格
+    for i, row in enumerate(rows):
+        for j in range(ncols):
+            cell = table.cell(i, j)
+            par = cell.paragraphs[0]
+            par.text = ""
+            run = par.add_run(row[j] if j < len(row) else "")
+            _set_run_font(run, tpl.body_font, max(tpl.body_size_pt - 2, 9))
+    # 表格与后续正文留一行间隙
+    p = doc.add_paragraph()
+    _set_line_exact(p, tpl.line_spacing_pt * 0.6)
 
 
 def _build_colophon(doc, tpl: DocTemplate) -> None:

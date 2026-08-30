@@ -4,7 +4,7 @@
 ; ============================================================
 [Setup]
 AppName=公文汇编助手
-AppVersion=1.0.0
+AppVersion=1.1.0
 AppPublisher=单机离线版
 DefaultDirName={autopf}\gwtool
 DefaultGroupName=公文汇编助手
@@ -28,3 +28,11 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Run]
 Filename: "{app}\gwtool.exe"; Description: "立即运行"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function InitializeSetup(): Boolean;
+begin
+  MsgBox('提示：扫描件/图片 OCR 为可选功能，需自行安装 Tesseract 5 并勾选中文包 chi_sim，'
+         + '安装后在程序「设置 → 系统与安全」中指定 tesseract.exe 路径。', mbInformation, MB_OK);
+  Result := True;
+end;

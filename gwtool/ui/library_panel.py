@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMenu, QPushButton, QSplitter, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu, QPushButton, QSplitter,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from ..db import dao
 from ..ui.widgets import ask, info
@@ -62,12 +63,23 @@ class LibraryPanel(QWidget):
         self.btn_import.clicked.connect(self._import)
         self.btn_all = QPushButton("全部文档")
         self.btn_all.clicked.connect(self._show_all)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["按导入时间", "按标题", "按字数", "按最近更新"])
+        self.sort_combo.setToolTip("列表排序方式")
+        self.type_filter = QComboBox()
+        self.type_filter.addItem("全部类型")
+        self.type_filter.setToolTip("按文件类型过滤")
         self.count_label = QLabel("0 篇")
         bottom.addWidget(self.btn_import)
         bottom.addWidget(self.btn_all)
         bottom.addStretch(1)
+        bottom.addWidget(QLabel("排序"))
+        bottom.addWidget(self.sort_combo)
+        bottom.addWidget(self.type_filter)
         bottom.addWidget(self.count_label)
         layout.addLayout(bottom)
+        self.sort_combo.currentTextChanged.connect(lambda _t: self._reload_docs())
+        self.type_filter.currentTextChanged.connect(lambda _t: self._reload_docs())
 
     # ------------------------------------------------ 数据
     def reload(self):
@@ -79,6 +91,11 @@ class LibraryPanel(QWidget):
         if item is None:
             return None
         return item.data(0, Qt.UserRole)
+
+    def focus_search(self):
+        """F3 兑现：聚焦全文检索框（主窗口 QShortcut 调用）。"""
+        self.search_box.setFocus(Qt.ShortcutFocusReason)
+        self.search_box.selectAll()
 
     def selected_doc_ids(self) -> list[int]:
         return [item.data(Qt.UserRole) for item in self.doc_list.selectedItems()]
@@ -110,12 +127,36 @@ class LibraryPanel(QWidget):
     def _reload_docs(self):
         cat = self.current_category()
         docs = dao.list_documents(cat)
+        # 类型过滤下拉随数据更新（保留当前选择；blockSignals 防回环）
+        types = sorted({(d.file_type or "文本") for d in docs})
+        cur_type = self.type_filter.currentText()
+        self.type_filter.blockSignals(True)
+        self.type_filter.clear()
+        self.type_filter.addItem("全部类型")
+        for t in types:
+            self.type_filter.addItem(t)
+        if cur_type in types:
+            self.type_filter.setCurrentText(cur_type)
+        self.type_filter.blockSignals(False)
+        if self.type_filter.currentText() != "全部类型":
+            docs = [d for d in docs
+                    if (d.file_type or "文本") == self.type_filter.currentText()]
+        key = self.sort_combo.currentText()
+        if key == "按标题":
+            docs.sort(key=lambda d: d.title)
+        elif key == "按字数":
+            docs.sort(key=lambda d: -d.word_count)
+        elif key == "按最近更新":
+            docs.sort(key=lambda d: (d.updated_time or d.import_time or ""),
+                      reverse=True)
         self.doc_list.clear()
         for d in docs:
             label = f"{d.title}    [{d.file_type or '文本'}] {d.word_count}字"
+            if d.tags:
+                label += f"  #{d.tags.replace(',', ' #').replace('，', ' #')}"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, d.id)
-            item.setToolTip(d.title)
+            item.setToolTip(f"{d.title}\n标签：{d.tags or '无'}")
             self.doc_list.addItem(item)
         self.count_label.setText(f"{len(docs)} 篇")
 
@@ -176,9 +217,57 @@ class LibraryPanel(QWidget):
     def _doc_menu(self, pos):
         menu = QMenu(self)
         menu.addAction("打开", lambda: self._open_selected())
+        if len(self.doc_list.selectedItems()) == 1:
+            menu.addAction("重命名", self._rename_selected)
+            menu.addAction("移动到分类…", self._move_selected)
+            menu.addAction("编辑标签…", self._tag_selected)
+            menu.addSeparator()
         menu.addAction("导出为 TXT", self._export_selected_txt)
         menu.addAction("删除", self._delete_selected)
         menu.exec(self.doc_list.mapToGlobal(pos))
+
+    def _single_doc(self):
+        items = self.doc_list.selectedItems()
+        return items[0].data(Qt.UserRole) if len(items) == 1 else None
+
+    def _rename_selected(self):
+        did = self._single_doc()
+        if not did:
+            return
+        d = dao.get_document(did)
+        if not d:
+            return
+        name, ok = QInputDialog.getText(self, "重命名文档", "新标题：", text=d.title)
+        if ok and name.strip():
+            dao.update_document_meta(did, title=name.strip())
+            self._reload_docs()
+
+    def _move_selected(self):
+        did = self._single_doc()
+        if not did:
+            return
+        cats = dao.list_categories()
+        names = [c.name for c in cats] + ["全部文档（未分类）"]
+        cat_ids = [c.id for c in cats] + [0]
+        name, ok = QInputDialog.getItem(self, "移动到分类", "选择目标分类：",
+                                        names, 0, False)
+        if ok:
+            dao.update_document_meta(did, category_id=cat_ids[names.index(name)])
+            self._reload_docs()
+
+    def _tag_selected(self):
+        did = self._single_doc()
+        if not did:
+            return
+        d = dao.get_document(did)
+        if not d:
+            return
+        text, ok = QInputDialog.getText(self, "编辑标签",
+                                        "标签（逗号分隔，可留空清除）：",
+                                        text=d.tags or "")
+        if ok:
+            dao.update_document_meta(did, tags=text.strip())
+            self._reload_docs()
 
     def _open_selected(self):
         items = self.doc_list.selectedItems()

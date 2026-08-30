@@ -187,6 +187,14 @@ class CompileWizard(QWizard):
         if not any_output:
             info(self, "请至少勾选一种输出。")
             return
+        # 防静默覆盖：同名输出已存在时追加时间戳
+        base_name = base.name
+        if ((self.chk_docx.isChecked() and base.with_suffix(".docx").exists())
+                or (self.chk_pdf.isChecked() and base.with_suffix(".pdf").exists())):
+            from datetime import datetime as _dt
+            base = Path(str(export_dir() / f"{base_name}_"
+                            f"{_dt.now().strftime('%Y%m%d_%H%M%S')}"))
+            info(self, "同名输出已存在，本次输出将追加时间戳。")
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)  # 忙碌指示
         self.btn_start.setEnabled(False)
@@ -220,15 +228,15 @@ class CompileWizard(QWizard):
 
         class _BatchThread(QThread):
             progress = Signal(int, int)
-            done = Signal(list)
+            done = Signal(list, list)      # 成功路径, 失败清单[(标题, 原因)]
             error = Signal(str)
 
             def run(self_inner):
                 try:
-                    paths = batch_compile_each(
+                    paths, failures = batch_compile_each(
                         ids, tpl, str(outdir), cover=cover,
                         progress_cb=lambda i, n: self_inner.progress.emit(i, n))
-                    self_inner.done.emit(paths)
+                    self_inner.done.emit(paths, failures)
                 except Exception as exc:  # noqa: BLE001
                     self_inner.error.emit(str(exc))
 
@@ -241,13 +249,22 @@ class CompileWizard(QWizard):
             self.progress.setValue(i)
             self.lbl_result.setText(f"批量生成中 {i}/{n}…")
 
-        def on_done(paths):
+        def on_done(paths, failures):
             self.progress.setVisible(False)
             self.btn_start.setEnabled(True)
-            self.lbl_result.setText(
-                "批量生成完成！\n" + "\n".join(Path(p).name for p in paths[:10])
-                + (f"\n… 共 {len(paths)} 份" if len(paths) > 10 else ""))
-            info(self, f"批量生成完成：{len(paths)} 份，输出目录：\n{outdir}")
+            msg = f"批量生成完成：成功 {len(paths)} 份"
+            if failures:
+                msg += f"，失败 {len(failures)} 份：\n" + "\n".join(
+                    f"· {t}：{r}" for t, r in failures[:10])
+                if len(failures) > 10:
+                    msg += f"\n… 共失败 {len(failures)} 份"
+            listing = "\n".join(Path(p).name for p in paths[:10])
+            if listing:
+                msg += "\n\n成功输出（前10份）：\n" + listing
+                if len(paths) > 10:
+                    msg += f"\n… 共 {len(paths)} 份"
+            self.lbl_result.setText(msg + f"\n输出目录：{outdir}")
+            info(self, msg + f"\n\n输出目录：\n{outdir}")
 
         def on_err(msg):
             self.progress.setVisible(False)

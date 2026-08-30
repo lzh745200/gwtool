@@ -7,14 +7,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem,
-                               QPlainTextEdit, QProgressBar, QPushButton,
-                               QRadioButton, QSpinBox, QSplitter, QTabWidget,
-                               QTableWidget, QTableWidgetItem, QTextBrowser,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+                               QFileDialog, QHBoxLayout, QHeaderView,
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QPlainTextEdit, QProgressBar,
+                               QPushButton, QRadioButton, QSpinBox, QSplitter,
+                               QTabWidget, QTableWidget, QTableWidgetItem,
+                               QTextBrowser, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from ..core import inspector, simhash, toolbox
 from ..core import skeletons as skeleton
@@ -101,6 +101,13 @@ class SkeletonDialog(QDialog):
     @property
     def draft_text(self) -> str:
         return self._build()
+
+    @property
+    def draft_title(self) -> str:
+        """入库标题：文种 + 事由（无事由时仅文种）。"""
+        matter = self.ed_matter.text().strip()
+        kind = self.kind_combo.currentText()
+        return f"{kind}：{matter}" if matter else kind
 
 
 # ================================================================ 格式体检
@@ -470,6 +477,19 @@ class SecurityDialog(QDialog):
         self.chk_auto_backup.toggled.connect(
             lambda on: dao.set_setting("auto_backup", "1" if on else "0"))
         v.addWidget(self.chk_auto_backup)
+        row_bk = QHBoxLayout()
+        row_bk.addWidget(QLabel("定时备份间隔（小时，0=关闭）："))
+        self.sp_backup_hours = QDoubleSpinBox()
+        self.sp_backup_hours.setRange(0, 168)
+        self.sp_backup_hours.setDecimals(1)
+        self.sp_backup_hours.setSingleStep(0.5)
+        self.sp_backup_hours.setValue(
+            float(dao.get_setting("backup_interval_hours", "0") or 0))
+        self.sp_backup_hours.valueChanged.connect(
+            lambda val: dao.set_setting("backup_interval_hours", f"{val:g}"))
+        row_bk.addWidget(self.sp_backup_hours)
+        row_bk.addStretch(1)
+        v.addLayout(row_bk)
 
         g3 = QLabel("OCR（扫描件识别，需已安装 Tesseract）")
         g3.setStyleSheet("font-weight:bold;margin-top:8pt;")

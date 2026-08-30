@@ -22,10 +22,30 @@ from PySide6.QtCore import QMarginsF, QSizeF
 from PySide6.QtGui import QColor, QFont, QPainter, QPageLayout, QPageSize, QPdfWriter, QTextDocument
 from PySide6.QtCore import Qt
 
-from .model import DocTree, HEADING, LIST_ITEM
-from .template import DocTemplate
+from .model import DocTree, HEADING, LIST_ITEM, TABLE
+from .template import DocTemplate, material_label
 
 _MM = 2.834645669  # mm -> pt
+
+# 目录每页行数（28磅行距 A4 经验值；首页扣除目录标题约占 2 行）
+_TOC_LINES_PER_PAGE = 22
+
+
+def _toc_chunks(n_rows: int) -> list[int]:
+    """目录行分页切片：首页约 20 行，其后每页 22 行。
+    返回每页行数切片列表（两遍渲染据此保证目录页数一致）。"""
+    if n_rows <= 0:
+        return []
+    first = max(1, _TOC_LINES_PER_PAGE - 2)
+    if n_rows <= first:
+        return [n_rows]
+    rest = n_rows - first
+    full = rest // _TOC_LINES_PER_PAGE
+    tail = rest % _TOC_LINES_PER_PAGE
+    pages = [first] + [_TOC_LINES_PER_PAGE] * full
+    if tail:
+        pages.append(tail)
+    return pages
 
 
 def _font_family(candidate: str, fallback: str = "SimSun") -> str:
@@ -82,7 +102,7 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
                 parts.append(f"<p style='text-align:center;text-indent:0'>{line}</p>")
         has_front = True
 
-    # ---- 目录（独立页） ----
+    # ---- 目录（独立页；行数超一页时按 _toc_chunks 分页） ----
     if tpl.toc_enabled:
         brk = "page-break-before:always;" if tpl.cover.enabled else ""
         parts.append(f"<h1 style='text-align:center;text-indent:0;{brk}'>{tpl.toc_title}</h1>")
@@ -93,12 +113,21 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
         rows = []
         for toc in (toc_pages or []):
             for text, level, page in toc:
-                page_str = "00" if toc_placeholder else str(page)
+                page_str = "00" if toc_placeholder else (str(page) if page > 0 else "—")
                 rows.append(
                     f"<tr><td width='{text_w}' "
                     f"style='padding-left:{(level-1)*indent_px}px'>{_esc(text)}</td>"
                     f"<td width='60' align='right'>{page_str}</td></tr>")
-        parts.append(f"<table class='toc' border='0'>{''.join(rows)}</table>")
+        # 分片渲染：Qt 表格不跨页，长目录拆成多页
+        chunks = _toc_chunks(len(rows))
+        pos = 0
+        for ci, size in enumerate(chunks):
+            if ci > 0:
+                parts.append("<p style='page-break-before:always;font-size:2pt;"
+                             "margin:0'>&nbsp;</p>")
+            parts.append(f"<table class='toc' border='0'>"
+                         f"{''.join(rows[pos:pos + size])}</table>")
+            pos += size
         has_front = True
 
     # ---- 红头（正文首页顶部；无封面时紧随目录） ----
@@ -122,8 +151,19 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
         # 组装 (tag, inner_html, extra_style) 元素序列
         elems: list[tuple[str, str, str]] = []
         if tpl.insert_material_titles and tree.title:
-            elems.append(("h1", _esc(tree.title), ""))
+            label = material_label(tpl.material_title_prefix, idx + 1)
+            elems.append(("h1", _esc(f"{label}{tree.title}"), ""))
         for blk in blocks:
+            if blk.type == TABLE and blk.rows:
+                ncols = max(len(r) for r in blk.rows)
+                trs = []
+                for row in blk.rows:
+                    tds = "".join(
+                        f"<td>{_esc(row[j]) if j < len(row) else ''}</td>"
+                        for j in range(ncols))
+                    trs.append(f"<tr>{tds}</tr>")
+                elems.append(("table", "".join(trs), ""))
+                continue
             t = _esc(blk.text)
             if blk.type == HEADING:
                 elems.append((f"h{min(blk.level, 3)}", t, ""))
@@ -135,7 +175,10 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
             style = extra
             if i == 0 and first_break:
                 style = ("page-break-before:always;" + style)
-            if style:
+            if tag == "table":
+                parts.append(f"<table border='1' cellspacing='0' cellpadding='2' "
+                             f"style='{style}'>{inner}</table>")
+            elif style:
                 parts.append(f"<{tag} style='{style}'>{inner}</{tag}>")
             else:
                 parts.append(f"<{tag}>{inner}</{tag}>")
@@ -198,14 +241,23 @@ def _page_count(pdf_path: str) -> int:
 
 
 def _locate_headings(pdf_path: str, headings: list[str], start_page: int = 0) -> list[int]:
-    """按顺序在 PDF 中定位标题所在页（1 基，从 start_page 起跳过前置页）。"""
+    """按顺序在 PDF 中定位标题所在页（1 基，从 start_page 起跳过前置页）。
+
+    未找到返回 0（目录页码显示“—”），不再强归第 1 页；
+    匹配先全标题、再 12 字前缀，重名标题靠单调游标按顺序消歧。
+    """
     d = fitz.open(pdf_path)
     pages = []
     cursor = start_page
     for h in headings:
         found = 0
+        needle = h.strip()
         for pno in range(cursor, d.page_count):
-            if d[pno].search_for(h[:20] if len(h) > 20 else h):
+            page = d[pno]
+            hits = page.search_for(needle)
+            if not hits and len(needle) > 12:
+                hits = page.search_for(needle[:12])
+            if hits:
                 found = pno + 1
                 cursor = pno  # 标题单调不回退
                 break
@@ -215,19 +267,16 @@ def _locate_headings(pdf_path: str, headings: list[str], start_page: int = 0) ->
 
 
 def collect_headings(trees: list[DocTree], tpl: DocTemplate) -> list[tuple[str, int]]:
-    """[(标题文本, 级别)]，含材料标题（若启用）；与渲染时相同的去重逻辑。"""
+    """[(标题文本, 级别)]，含材料标题（若启用）；与渲染时相同的去重与编号逻辑。"""
     out = []
-    for tree in trees:
+    for mat_no, tree in enumerate(trees, 1):
         if tpl.insert_material_titles and tree.title:
-            out.append((tree.title, 1))
+            label = material_label(tpl.material_title_prefix, mat_no)
+            out.append((f"{label}{tree.title}", 1))
         for blk in tree.effective_blocks(tpl.insert_material_titles):
             if blk.type == HEADING and blk.level <= 3:
                 out.append((blk.text, blk.level))
     return out
-
-
-# 每页目录约容纳行数（28磅行距 A4 经验值）
-_TOC_LINES_PER_PAGE = 22
 
 
 def render_compiled_pdf(trees: list[DocTree], tpl: DocTemplate, out_pdf: str) -> str:
@@ -239,25 +288,19 @@ def render_compiled_pdf(trees: list[DocTree], tpl: DocTemplate, out_pdf: str) ->
     html1 = trees_to_html(trees, tpl, toc_pages=toc_placeholder, toc_placeholder=True)
     _render_html_to_pdf(html1, tpl, out_pdf)
 
-    # 计算正文起始页（跳过封面/目录前置页，避免目录条目文本干扰标题定位）：
-    # 第一遍目录页的页码占位为 "00"，据此定位最后一个目录页。
+    # 前置页数解析式计算（与 trees_to_html 的分片逻辑一致）：
+    # 封面固定 1 页；目录页数 = _toc_chunks 的分片数
     body_start = 0
+    if tpl.cover.enabled:
+        body_start += 1
     if tpl.toc_enabled:
-        d = fitz.open(out_pdf)
-        for pno in range(d.page_count):
-            if "00" in d[pno].get_text():
-                body_start = pno + 1  # 0 基：指向目录后的第一页
-        d.close()
-        if body_start == 0:  # 兜底：未找到占位页则从第2页起
-            body_start = 1
-    elif tpl.cover.enabled:
-        body_start = 1
+        body_start += max(1, len(_toc_chunks(len(headings))))
 
     # 定位正文标题页码（占位渲染已含完整目录页，页码无需偏移）
     pages = _locate_headings(out_pdf, [t for t, _ in headings], start_page=body_start)
 
-    # ---- 第二遍：真实页码渲染 ----
-    toc_real = [[(t, lv, max(1, p)) for (t, lv), p in zip(headings, pages)]]
+    # ---- 第二遍：真实页码渲染（未命中的标题目录页码显示“—”） ----
+    toc_real = [[(t, lv, p) for (t, lv), p in zip(headings, pages)]]
     html2 = trees_to_html(trees, tpl, toc_pages=toc_real, toc_placeholder=False)
     _render_html_to_pdf(html2, tpl, out_pdf)
 

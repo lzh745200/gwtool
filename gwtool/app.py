@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from . import APP_NAME, __version__
 from .paths import bundled_db_seed_path, db_path
+from .ui.feature_dialogs import LockDialog  # noqa: F401  口令锁解锁框（顶层导入防路径拼写错误）
 
 
 def ensure_database_seeded() -> None:
@@ -74,7 +75,6 @@ def run(import_path: str = "") -> int:
     if dao.get_setting("lock_enabled") == "1":
         from .core.security import has_password
         if has_password():
-            from .ui.lock_dialog import LockDialog
             dlg = LockDialog()
             if dlg.exec() != dlg.Accepted:
                 return 0

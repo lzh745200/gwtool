@@ -2,8 +2,8 @@
 """主窗口：三栏布局（资料库 | 编辑器 | 纠错与参考）+ 全部功能入口。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel, QMainWindow,
                                QSplitter, QStatusBar)
 
@@ -15,7 +15,7 @@ from ..paths import db_path, export_dir
 from .compile_wizard import CompileWizard
 from .dict_manager import DictManager
 from .editor_panel import EditorPanel
-from .feature_dialogs import (BulkReplaceDialog, InspectorDialog, LockDialog,
+from .feature_dialogs import (BulkReplaceDialog, InspectorDialog,
                               SecurityDialog, SimilarityDialog,
                               SkeletonDialog, SnapshotsDialog)
 from .import_dialog import ImportDialog
@@ -35,7 +35,26 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._wire()
         self._first_run_checks()
+        self._setup_backup_timer()
         self._update_status()
+
+    def _setup_backup_timer(self):
+        """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。"""
+        self._backup_timer = QTimer(self)
+        self._backup_timer.timeout.connect(self._scheduled_backup)
+        try:
+            hours = float(dao.get_setting("backup_interval_hours", "0") or 0)
+        except ValueError:
+            hours = 0.0
+        if hours > 0:
+            self._backup_timer.start(int(hours * 3600 * 1000))
+
+    def _scheduled_backup(self):
+        try:
+            create_backup(note="定时备份")
+            self.status.showMessage("已完成定时备份", 5000)
+        except Exception:
+            pass
 
     # ------------------------------------------------ UI
     def _build_ui(self):
@@ -132,29 +151,45 @@ class MainWindow(QMainWindow):
         self.library.import_requested.connect(self.import_materials)
         self.reference.insert_text.connect(self._insert_at_cursor)
         self.reference.apply_edit.connect(self._apply_edit)
+        self.editor.content_modified.connect(self._on_editor_saved)
+        sc_f3 = QShortcut(QKeySequence("F3"), self)
+        sc_f3.activated.connect(self.library.focus_search)
+
+    def _on_editor_saved(self):
+        """编辑器内容落库（另存/更新）后联动刷新资料库列表。"""
+        self.library.reload()
+        self._update_status()
 
     def _insert_at_cursor(self, text: str):
         cur = self.editor.editor.textCursor()
         cur.insertText(text)
         self.editor.editor.setTextCursor(cur)
-        self.editor._on_text_changed()
 
     def _apply_edit(self, start: int, end: int, replacement: str):
-        text = self.editor.editor.toPlainText()
-        new_text = text[:start] + replacement + text[end:]
-        self.editor.editor.setPlainText(new_text)
-        self.editor._on_text_changed()
+        """纠错定位替换：光标区间操作，保留撤销栈（Ctrl+Z 可反悔单次替换）。"""
+        ed = self.editor.editor
+        cur = ed.textCursor()
+        cur.setPosition(start)
+        cur.setPosition(end, QTextCursor.KeepAnchor)
+        cur.insertText(replacement)
 
     # ------------------------------------------------ 功能入口
     def new_skeleton_doc(self):
         dlg = SkeletonDialog(self)
-        if dlg.exec() == dlg.Accepted:
-            self.editor.doc_id = None
-            self.editor.editor.setPlainText(dlg.draft_text)
-            self.editor._dirty = True
-            self.editor.rebuild_outline()
-            self.editor._update_status("● 新建公文（未保存）")
-            self.editor.tabs.setCurrentWidget(self.editor.editor.parentWidget())
+        if dlg.exec() != dlg.Accepted:
+            return
+        from ..db import dao
+        text = dlg.draft_text
+        title = dlg.draft_title
+        did = dao.add_document(dao.Document(title=title, content_text=text))
+        self.library.reload()
+        self._update_status()
+        if did > 0:
+            self.editor.load_document(did)
+            self.editor.tabs.setCurrentIndex(0)
+            self.editor._update_status(f"已新建公文：{title}")
+        else:
+            info(self, "相同内容此前已入库（重复），未重复创建。")
 
     def import_materials(self, category_id: int = 0):
         dlg = ImportDialog(category_id, self)
@@ -235,7 +270,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _restore_snapshot(self, content: str):
-        self.editor.editor.setPlainText(content)
+        self.editor.replace_document_text(content)
         self.editor._dirty = True
         self.editor._update_status("● 已回滚到历史快照（未保存）")
 
@@ -360,6 +395,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------ 关闭
     def closeEvent(self, event):
+        # 未保存修改三选：保存 / 放弃 / 取消退出
+        if not self.editor.confirm_discard_changes():
+            event.ignore()
+            return
         # 退出自动备份
         if dao.get_setting("auto_backup", "1") == "1":
             try:
