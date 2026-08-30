@@ -12,6 +12,7 @@ import http.client
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO = "lzh745200/gwtool"
@@ -56,11 +57,14 @@ def api(method: str, path: str, token: str, payload: dict | None = None) -> dict
         except (http.client.HTTPException, ConnectionError, TimeoutError) as exc:
             if attempt == 3:
                 raise RuntimeError(f"{method} {path} 网络失败：{exc}") from exc
-            import time
             time.sleep(3)
 
 
 def main() -> int:
+    if len(sys.argv) < 3:
+        print("用法：python scripts/api_commit.py <提交说明> <文件1> [文件2 ...]",
+              file=sys.stderr)
+        return 2
     message = sys.argv[1]
     files = [Path(p) for p in sys.argv[2:]]
     token = get_token()

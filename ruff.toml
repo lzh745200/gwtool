@@ -1,0 +1,6 @@
+# 静态检查门槛：只拦截语法错误与未定义名称
+# （如 UI 类漏导入控件导致的 NameError——构造对话框即崩的那类缺陷）
+target-version = "py39"
+
+[lint]
+select = ["E9", "F821"]
