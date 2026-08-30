@@ -1,4 +1,4 @@
-name: Build Windows Packages
+name: Build Packages
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,3 +61,83 @@ jobs:
           path: |
             dist/gwtool_便携版.zip
             dist/gwtool_setup_win64.exe
+
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装系统依赖（Qt offscreen 运行库 + 打包工具）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 \
+            libdbus-1-3 libglib2.0-0t64 patchelf
+
+      - name: 安装依赖
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: 运行测试
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .venv/bin/python -m pytest tests/ -q --timeout=300
+
+      - name: PyInstaller 打包（ARM64 原生）
+        run: >
+          .venv/bin/pyinstaller --noconfirm --clean --name gwtool --windowed
+          --add-data "gwtool/resources/data/seed.db:gwtool/resources/data"
+          --collect-data opencc
+          --exclude-module PySide6.QtWebEngineCore
+          --exclude-module PySide6.QtWebEngineWidgets
+          --exclude-module PySide6.QtWebChannel
+          --exclude-module PySide6.QtQuick3D
+          --exclude-module PySide6.QtQuick
+          --exclude-module PySide6.QtQml
+          --exclude-module PySide6.QtCharts
+          --exclude-module PySide6.QtMultimedia
+          --exclude-module PySide6.QtSql
+          --exclude-module tkinter
+          --exclude-module numpy
+          --exclude-module pandas
+          main.py
+
+      - name: 组装 .deb 安装包（麒麟 V10 / Debian 系）
+        run: |
+          mkdir -p pkg/DEBIAN pkg/opt/gwtool pkg/usr/share/applications
+          cp -r dist/gwtool/* pkg/opt/gwtool/
+          cat > pkg/DEBIAN/control <<'EOF'
+          Package: gwtool
+          Version: 1.0.0
+          Section: office
+          Priority: optional
+          Architecture: arm64
+          Maintainer: lzh745200 <lzh745200@users.noreply.github.com>
+          Depends: libgl1, libegl1, libxkbcommon0, libfontconfig1, libdbus-1-3
+          Description: 公文汇编助手 - 单机离线版智能公文汇编与写作辅助工具
+           多格式材料导入、一键汇编（红头/目录/页码）、文字纠错、
+           GB/T 9704 格式体检、A3骑马钉小册子、全文检索、写作参考。
+          EOF
+          cat > pkg/usr/share/applications/gwtool.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=公文汇编助手
+          Comment=单机离线版智能公文汇编与写作辅助工具
+          Exec=/opt/gwtool/gwtool
+          Terminal=false
+          Categories=Office;
+          EOF
+          dpkg-deb --build pkg gwtool_1.0.0_arm64.deb
+          dpkg-deb -I gwtool_1.0.0_arm64.deb | head -8
+
+      - name: 生成 ARM64 便携版 tar.gz
+        run: tar -czf gwtool_linux_arm64_便携版.tar.gz -C dist gwtool
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwtool-arm64-packages
+          path: |
+            gwtool_1.0.0_arm64.deb
+            gwtool_linux_arm64_便携版.tar.gz

@@ -8,4 +8,5 @@ wheels_aarch64/
 .pytest_cache/
 dist_samples/
 *.tmp
-Data/
+# 仅忽略仓库根目录的便携模式数据目录（不匹配子目录里的 data/）
+/Data/
