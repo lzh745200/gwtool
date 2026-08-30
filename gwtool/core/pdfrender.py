@@ -165,7 +165,6 @@ def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
     res = 96  # 设备像素与 QTextDocument 逻辑像素 1:1，避免单位换算
     writer.setResolution(res)
     page_rect = writer.pageLayout().paintRectPixels(res)      # 内容区（设备像素）
-    margin_px = writer.pageLayout().marginsPixels(res)
 
     doc = QTextDocument()
     doc.setDefaultFont(QFont(_font_family(tpl.body_font), int(tpl.body_size_pt)))
