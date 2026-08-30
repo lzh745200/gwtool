@@ -1,0 +1,61 @@
+name: Build Windows Packages
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行测试
+        run: python -m pytest tests/ -q --timeout=300
+
+      - name: PyInstaller 打包
+        run: >
+          pyinstaller --noconfirm --clean --name gwtool --windowed
+          --add-data "gwtool\resources\data\seed.db;gwtool/resources/data"
+          --collect-data opencc
+          --exclude-module PySide6.QtWebEngineCore
+          --exclude-module PySide6.QtWebEngineWidgets
+          --exclude-module PySide6.QtWebChannel
+          --exclude-module PySide6.QtQuick3D
+          --exclude-module PySide6.QtQuick
+          --exclude-module PySide6.QtQml
+          --exclude-module PySide6.QtCharts
+          --exclude-module PySide6.QtMultimedia
+          --exclude-module PySide6.QtSql
+          --exclude-module tkinter
+          --exclude-module numpy
+          --exclude-module pandas
+          --hidden-import win32timezone
+          main.py
+
+      - name: 生成便携版 zip
+        run: python -c "import shutil; shutil.make_archive('dist/gwtool_便携版','zip','.','dist/gwtool')"
+
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: 生成安装程序
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\setup_windows.iss'
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwtool-windows-packages
+          path: |
+            dist/gwtool_便携版.zip
+            dist/gwtool_setup_win64.exe

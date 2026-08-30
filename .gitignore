@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.spec
+wheels_aarch64/
+.pytest_cache/
+dist_samples/
+*.tmp
+Data/

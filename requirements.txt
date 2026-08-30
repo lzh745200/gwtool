@@ -1,0 +1,16 @@
+PySide6>=6.6
+PyMuPDF>=1.24
+python-docx>=1.1
+jieba>=0.42
+pypinyin>=0.51
+striprtf>=0.0.26
+markdown>=3.5
+beautifulsoup4>=4.12
+lxml>=4.9
+chardet>=5.2
+olefile>=0.46
+pyinstaller>=6.0
+pytest>=8.0
+pywin32>=306; sys_platform == 'win32'
+opencc-python-reimplemented>=0.1.7
+pyzipper>=0.3.6

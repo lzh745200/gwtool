@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=公文汇编助手
+Comment=单机离线版智能公文汇编与写作辅助工具
+# 请按实际安装路径修改 Exec（打包版：dist/gwtool/gwtool）
+Exec=/opt/gwtool/gwtool
+Icon=applications-office
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/pdf;text/plain;application/rtf;text/html;text/markdown;
