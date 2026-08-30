@@ -71,39 +71,47 @@ class MainWindow(QMainWindow):
 
         tb = self.addToolBar("主工具栏")
         tb.setMovable(False)
-        act_new = QAction("📄 新建公文", self)
+        from . import icons
+        act_new = QAction("新建公文", self)
         act_new.setShortcut("Ctrl+Shift+N")
         act_new.triggered.connect(self.new_skeleton_doc)
-        act_import = QAction("📥 导入材料", self)
+        act_import = QAction("导入材料", self)
         act_import.triggered.connect(self.import_materials)
-        act_compile = QAction("🧾 一键汇编", self)
+        act_compile = QAction("一键汇编", self)
         act_compile.setShortcut("Ctrl+N")
         act_compile.triggered.connect(self.open_compile_wizard)
-        act_tpl = QAction("📐 模板管理", self)
+        act_tpl = QAction("模板管理", self)
         act_tpl.triggered.connect(self.open_template_editor)
-        act_check = QAction("🔍 文字纠错", self)
+        act_check = QAction("文字纠错", self)
         act_check.setShortcut("F7")
         act_check.triggered.connect(lambda: self.reference.run_check())
-        act_inspect = QAction("🩺 格式体检", self)
+        act_inspect = QAction("格式体检", self)
         act_inspect.triggered.connect(self.open_inspector)
-        act_tts = QAction("🔊 朗读/停止", self)
+        act_tts = QAction("朗读/停止", self)
         act_tts.setShortcut("F9")
         act_tts.triggered.connect(self.toggle_tts)
-        act_clip = QAction("📋 剪贴板入库", self)
+        act_clip = QAction("剪贴板入库", self)
         act_clip.setShortcut("Ctrl+Shift+B")
         act_clip.triggered.connect(self.import_clipboard)
-        act_fmt = QAction("🧹 排版微调", self)
+        act_fmt = QAction("排版微调", self)
         act_fmt.triggered.connect(lambda: self.editor.run_formatter())
-        act_compare = QAction("🆚 文档对比", self)
+        act_compare = QAction("文档对比", self)
         act_compare.triggered.connect(self.open_compare)
-        act_dict = QAction("📚 词典与词库", self)
+        act_dict = QAction("词典与词库", self)
         act_dict.triggered.connect(self.open_dict_manager)
-        act_backup = QAction("💾 备份/恢复", self)
+        act_backup = QAction("备份/恢复", self)
         act_backup.triggered.connect(self.backup_restore)
-        for a in (act_new, act_import, act_compile, act_tpl, act_check,
-                  act_inspect, act_tts, act_clip, act_fmt, act_compare,
-                  act_dict, act_backup):
+        for a, ic in ((act_new, "new_doc"), (act_import, "import"),
+                      (act_compile, "compile"), (act_tpl, "template"),
+                      (act_check, "check"), (act_inspect, "inspect"),
+                      (act_tts, "tts"), (act_clip, "clipboard"),
+                      (act_fmt, "cleanup"), (act_compare, "compare"),
+                      (act_dict, "book"), (act_backup, "backup")):
+            ic_obj = icons.icon(ic)
+            if not ic_obj.isNull():
+                a.setIcon(ic_obj)
             tb.addAction(a)
+        tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)

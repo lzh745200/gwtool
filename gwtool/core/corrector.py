@@ -129,6 +129,10 @@ def _check_exact(text: str) -> list[Correction]:
                 if any(re.search(rx, text[:i]) for rx in neg):
                     i += 1
                     continue
+                # 书名号内的文件标题按原文引用，不作纠错提示
+                if text[:i].count("《") > text[:i].count("》"):
+                    i += len(hit)
+                    continue
                 raw.append((i, i + len(hit), hit, correct, cat, conf))
                 i += len(hit)
                 continue
@@ -141,8 +145,16 @@ def _suppress_inside_common_words(
     """词边界保护：命中片段两端都不落在分词边界上（即横跨多个常用词的内部），
     判定为词内误报并抑制。例：'安全生产'（分词为 安全|生产）内的 '全生'
     不应报 '全生→全省'；而独立成词的 '布署' 两端均为边界，正常报出。
+
+    低置信命中（如生成的混淆对 0.55）执行更严的门控：
+      1) 两端都必须落在分词边界（原规则只要求"非双内"）——
+         拦截跨词命中（如 '全厂生产' 分词 全厂|生产，'厂生' 右端在边界）；
+      2) 命中不得严格位于任何分词 token 内部；
+      3) 例外：命中本身是 jieba 高频词（词频≥30）时退回原规则，
+         避免误伤"同为真实词的易混对"（如 度过/渡过 类）。
     """
     boundaries: set[int] = set()
+    token_spans: list[tuple[int, int]] = []
     if raw:
         try:
             import jieba
@@ -151,12 +163,19 @@ def _suppress_inside_common_words(
             for _w, a, b in jieba.tokenize(text):
                 boundaries.add(a)
                 boundaries.add(b)
+                token_spans.append((a, b))
         except Exception:
             boundaries = set()
     out: list[Correction] = []
     for s, e, hit, correct, cat, conf in raw:
-        if boundaries and s not in boundaries and e not in boundaries:
-            continue  # 两端均在词内部 -> 误报
+        both_ends = s in boundaries and e in boundaries
+        if conf < 0.7 and jieba_freq(hit) < 30:
+            inside = any(ts < s and te > e for ts, te in token_spans)
+            if not (both_ends and not inside):
+                continue  # 低置信：跨词/词内命中 -> 误报
+        else:
+            if boundaries and s not in boundaries and e not in boundaries:
+                continue  # 两端均在词内部 -> 误报
         out.append(Correction(s, e, hit, correct, cat, "词库匹配", conf))
     return out
 

@@ -41,9 +41,9 @@ class CompareDialog(QDialog):
         row2.addWidget(btn_b)
         v.addLayout(row2)
 
-        btn_run = QPushButton("开始对比")
-        btn_run.clicked.connect(self._run)
-        v.addWidget(btn_run)
+        self.btn_run = QPushButton("开始对比")
+        self.btn_run.clicked.connect(self._run)
+        v.addWidget(self.btn_run)
 
         self.browser = QTextBrowser()
         self.browser.setOpenExternalLinks(False)
@@ -79,11 +79,27 @@ class CompareDialog(QDialog):
         return Path(val).name, ""
 
     def _run(self):
+        from .workers import FnWorker
         t1, txt1 = self._text_of(self.combo_a)
         t2, txt2 = self._text_of(self.combo_b)
         if not txt1 and not txt2:
             self.lbl_stat.setText("请先选择两个有效文档。")
             return
-        html = differ.diff_to_html(txt1, txt2, t1 or "文档一", t2 or "文档二")
-        self.browser.setHtml(html)
-        self.lbl_stat.setText("红色=删除/原文，绿色=新增/修改后；双栏对应。")
+        # 文本抽取已在主线程完成（本地文件解析较快），diff 与 HTML 生成放后台
+        self.btn_run.setEnabled(False)
+        self.lbl_stat.setText("正在对比…")
+        self._worker = FnWorker(differ.diff_to_html, txt1, txt2,
+                                t1 or "文档一", t2 or "文档二", parent=self)
+
+        def on_ok(html):
+            self.browser.setHtml(html)
+            self.lbl_stat.setText("红色=删除/原文，绿色=新增/修改后；双栏对应。")
+
+        def on_done():
+            self.btn_run.setEnabled(True)
+
+        self._worker.ok.connect(on_ok)
+        self._worker.failed.connect(
+            lambda m: self.lbl_stat.setText(f"对比失败：{m}"))
+        self._worker.finished.connect(on_done)
+        self._worker.start()

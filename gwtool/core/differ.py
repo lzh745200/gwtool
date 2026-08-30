@@ -1,9 +1,23 @@
 # -*- coding: utf-8 -*-
-"""文档对比：段落级 + 字级差异，输出红绿 HTML。"""
+"""文档对比：段落级 + 词级差异，输出红绿 HTML。"""
 from __future__ import annotations
 
 import difflib
 import html
+
+
+def _tokens(s: str) -> list[str]:
+    """词级切分（jieba）；短串或 jieba 不可用时退回字符级。
+
+    注意保留全部 token（含空白），保证 "".join(tokens) == 原串。
+    """
+    if len(s) <= 4:
+        return list(s)
+    try:
+        import jieba
+        return jieba.lcut(s)
+    except Exception:
+        return list(s)
 
 
 def diff_to_html(old_text: str, new_text: str,
@@ -18,19 +32,23 @@ def diff_to_html(old_text: str, new_text: str,
         return html.escape(s)
 
     def inline_diff(a: str, b: str) -> tuple[str, str]:
-        cm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+        # 词级行内 diff（jieba 分词），删改标示比字符级更完整可读
+        ta, tb = _tokens(a), _tokens(b)
+        cm = difflib.SequenceMatcher(a=ta, b=tb, autojunk=False)
         la, lb = [], []
         for op, i1, i2, j1, j2 in cm.get_opcodes():
+            sa = "".join(ta[i1:i2])
+            sb = "".join(tb[j1:j2])
             if op == "equal":
-                la.append(esc(a[i1:i2]))
-                lb.append(esc(b[j1:j2]))
+                la.append(esc(sa))
+                lb.append(esc(sb))
             elif op == "delete":
-                la.append(f"<span class='del'>{esc(a[i1:i2])}</span>")
+                la.append(f"<span class='del'>{esc(sa)}</span>")
             elif op == "insert":
-                lb.append(f"<span class='ins'>{esc(b[j1:j2])}</span>")
+                lb.append(f"<span class='ins'>{esc(sb)}</span>")
             elif op == "replace":
-                la.append(f"<span class='del'>{esc(a[i1:i2])}</span>")
-                lb.append(f"<span class='ins'>{esc(b[j1:j2])}</span>")
+                la.append(f"<span class='del'>{esc(sa)}</span>")
+                lb.append(f"<span class='ins'>{esc(sb)}</span>")
         return "".join(la), "".join(lb)
 
     for tag, i1, i2, j1, j2 in sm.get_opcodes():

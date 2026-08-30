@@ -46,6 +46,15 @@ def hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
 
+def to_db(h: int) -> int:
+    """64 位无符号 -> SQLite 有符号 64 位（超范围整数无法直接入库）。"""
+    return h - (1 << 64) if h >= (1 << 63) else h
+
+
+def from_db(v: int) -> int:
+    return v + (1 << 64) if v < 0 else v
+
+
 def _trigrams(text: str) -> set[str]:
     s = "".join(text.split())
     if len(s) < 3:
@@ -68,14 +77,17 @@ def similarity(a: str, b: str) -> float:
     return jaccard(a, b)
 
 
-def find_similar(docs: dict[int, str], threshold: float = 0.7) -> list[tuple[int, int, float]]:
+def find_similar(docs: dict[int, str], threshold: float = 0.7,
+                 hashes: dict[int, int] | None = None) -> list[tuple[int, int, float]]:
     """docs: {id: 正文}；返回 [(id1, id2, 相似度)] 按相似度降序。
 
+    hashes: 已持久化的 SimHash 表（缺省则现算）——资料库较大时避免全库重算。
     两级策略：SimHash（快）做粗筛（阈值放宽 0.25），
     粗筛命中的对再算字符三元组 Jaccard（准）作为最终相似度。
     """
     ids = list(docs.keys())
-    hashes = {i: simhash(docs[i]) for i in ids}
+    known = hashes or {}
+    hashes = {i: known.get(i) or simhash(docs[i]) for i in ids}
     out: list[tuple[int, int, float]] = []
     for x in range(len(ids)):
         for y in range(x + 1, len(ids)):

@@ -21,6 +21,7 @@ from ..core import skeletons as skeleton
 from ..core.backup import create_backup, restore_backup
 from ..core.security import clear_password, has_password, set_password
 from ..db import dao
+from . import theme
 from .widgets import ask, info, warn
 
 # ================================================================ 骨架向导
@@ -61,7 +62,7 @@ class SkeletonDialog(QDialog):
 
         self.lbl_note = QLabel("")
         self.lbl_note.setWordWrap(True)
-        self.lbl_note.setStyleSheet("color:#555;")
+        self.lbl_note.setStyleSheet(f"color:{theme.MUTED};")
         v.addWidget(self.lbl_note)
 
         btns = QHBoxLayout()
@@ -158,7 +159,7 @@ class InspectorDialog(QDialog):
         else:
             findings = inspector.inspect_text(self._get_text())
         self.result_list.clear()
-        colors = {"error": "#b00020", "warn": "#b26a00", "info": "#444"}
+        colors = {"error": theme.DANGER, "warn": theme.WARN, "info": theme.INFO}
         for f in findings:
             item = QListWidgetItem(f.label)
             item.setForeground(QColor(colors.get(f.severity, "#000000")))
@@ -265,32 +266,56 @@ class BulkReplaceDialog(QDialog):
         if not find:
             warn(self, "请输入查找内容")
             return
-        import re as _re
+        from .workers import FnWorker
+
+        def work():
+            """后台：逐文档统计命中数与上下文（正则编译在 worker 内完成）。"""
+            import re as _re
+            rows = []
+            total = 0
+            regex_error = None
+            for did in self._docs():
+                d = dao.get_document(did)
+                if not d:
+                    continue
+                try:
+                    if self.chk_regex.isChecked():
+                        n = len(_re.findall(find, d.content_text))
+                    else:
+                        n = d.content_text.count(find)
+                    if n:
+                        idx = d.content_text.find(
+                            find if not self.chk_regex.isChecked()
+                            else _re.search(find, d.content_text).group(0))
+                        ctx = d.content_text[max(0, idx - 15): idx + 40].replace(
+                            "\n", " ")
+                        rows.append((did, d.title, n, ctx))
+                        total += n
+                except _re.error as exc:
+                    regex_error = str(exc)
+                    break
+            return rows, total, regex_error
+
+        self.btn_preview.setEnabled(False)
+        self.btn_apply.setEnabled(False)
         self.preview_list.clear()
-        total = 0
-        for did in self._docs():
-            d = dao.get_document(did)
-            if not d:
-                continue
-            try:
-                if self.chk_regex.isChecked():
-                    n = len(_re.findall(find, d.content_text))
-                else:
-                    n = d.content_text.count(find)
-                if n:
-                    idx = d.content_text.find(
-                        find if not self.chk_regex.isChecked()
-                        else _re.search(find, d.content_text).group(0))
-                    ctx = d.content_text[max(0, idx - 15): idx + 40].replace("\n", " ")
-                    item = QListWidgetItem(f"{d.title}（{n} 处）：…{ctx}…")
-                    item.setData(Qt.UserRole, did)
-                    self.preview_list.addItem(item)
-                    total += n
-            except _re.error as exc:
-                warn(self, f"正则错误：{exc}")
-                return
+        self._preview_worker = FnWorker(work, parent=self)
+        self._preview_worker.ok.connect(self._on_preview_done)
+        self._preview_worker.finished.connect(
+            lambda: self.btn_preview.setEnabled(True))
+        self._preview_worker.start()
+
+    def _on_preview_done(self, result):
+        rows, total, regex_error = result
+        if regex_error:
+            warn(self, f"正则错误：{regex_error}")
+            return
+        for did, title, n, ctx in rows:
+            item = QListWidgetItem(f"{title}（{n} 处）：…{ctx}…")
+            item.setData(Qt.UserRole, did)
+            self.preview_list.addItem(item)
         self.btn_apply.setEnabled(total > 0)
-        info(self, f"预览完成：{self.preview_list.count()} 篇文档、{total} 处命中。")
+        info(self, f"预览完成：{len(rows)} 篇文档、{total} 处命中。")
 
     def _apply(self):
         if not ask(self, "替换将直接写入资料库（可先备份），确定执行？"):
@@ -406,6 +431,7 @@ class SimilarityDialog(QDialog):
         row.addWidget(self.sp_thresh)
         btn = QPushButton("开始查重")
         btn.clicked.connect(self._run)
+        self._run_btn = btn
         row.addWidget(btn)
         row.addStretch(1)
         v.addLayout(row)
@@ -415,19 +441,32 @@ class SimilarityDialog(QDialog):
         v.addWidget(self.lbl)
 
     def _run(self):
-        from ..db.connection import get_conn
-        docs = {d.id: d.title for d in dao.list_documents()}
-        if len(docs) < 2:
+        if len(dao.list_documents()) < 2:
             info(self, "资料库中至少需要 2 篇材料。")
             return
-        texts = {}
-        for did in docs:
-            texts[did] = dao.get_document(did).content_text
-        pairs = simhash.find_similar(texts, self.sp_thresh.value() / 100)
+        from .workers import FnWorker
+
+        def work():
+            """后台：读正文 + 查表 SimHash 粗筛 + 精算 Jaccard。"""
+            docs = {d.id: d.title for d in dao.list_documents()}
+            texts = {did: dao.get_document(did).content_text for did in docs}
+            pairs = simhash.find_similar(texts, self.sp_thresh.value() / 100,
+                                         hashes=dao.all_simhashes())
+            return docs, pairs
+
+        self.lbl.setText("正在比对（大库可能需要片刻）…")
+        self._run_btn.setEnabled(False)
+        self._worker = FnWorker(work, parent=self)
+        self._worker.ok.connect(self._on_done)
+        self._worker.failed.connect(lambda m: self.lbl.setText(f"查重失败：{m}"))
+        self._worker.finished.connect(lambda: self._run_btn.setEnabled(True))
+        self._worker.start()
+
+    def _on_done(self, result):
+        docs, pairs = result
         self.result_list.clear()
-        by_id = {d.id: d for d in dao.list_documents()}
         for a, b, sim in pairs:
-            t = f"相似度 {sim * 100:.0f}%：{by_id[a].title}  ↔  {by_id[b].title}"
+            t = f"相似度 {sim * 100:.0f}%：{docs[a]}  ↔  {docs[b]}"
             item = QListWidgetItem(t)
             item.setData(Qt.UserRole, (a, b))
             self.result_list.addItem(item)
@@ -505,6 +544,58 @@ class SecurityDialog(QDialog):
         self.lbl_tess = QLabel("")
         v.addWidget(self.lbl_tess)
 
+        g4 = QLabel("外观")
+        g4.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        v.addWidget(g4)
+        self.chk_dark = QCheckBox("跟随系统深浅色（重启生效）")
+        self.chk_dark.setChecked(dao.get_setting("follow_system_theme", "0") == "1")
+        self.chk_dark.toggled.connect(
+            lambda on: dao.set_setting("follow_system_theme", "1" if on else "0"))
+        v.addWidget(self.chk_dark)
+
+        g5 = QLabel("朗读校对（语速/音色）")
+        g5.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        v.addWidget(g5)
+        self.sp_tts_rate = QSpinBox()
+        self.sp_tts_rate.setRange(-10, 10)
+        self.sp_tts_rate.setValue(int(dao.get_setting("tts_rate", "0") or 0))
+        self.sp_tts_rate.setPrefix("语速 ")
+        self.sp_tts_rate.setToolTip("SAPI 语速等级（-10 最慢，10 最快）")
+        self.sp_tts_rate.valueChanged.connect(
+            lambda val: dao.set_setting("tts_rate", str(val)))
+        row_tts = QHBoxLayout()
+        row_tts.addWidget(self.sp_tts_rate)
+        self.cmb_tts_voice = QComboBox()
+        from ..core.tts import list_voices
+        voices = list_voices()
+        if voices:
+            self.cmb_tts_voice.addItem("系统默认", "")
+            cur = dao.get_setting("tts_voice", "")
+            idx = 0
+            for i, desc in enumerate(voices):
+                self.cmb_tts_voice.addItem(desc, desc)
+                if cur and cur in desc:
+                    idx = i + 1
+            self.cmb_tts_voice.setCurrentIndex(idx)
+            self.cmb_tts_voice.currentIndexChanged.connect(
+                lambda: dao.set_setting("tts_voice",
+                                        self.cmb_tts_voice.currentData() or ""))
+        else:
+            self.cmb_tts_voice.addItem("跟随系统默认（无可选音色）", "")
+            self.cmb_tts_voice.setEnabled(False)
+        row_tts.addWidget(self.cmb_tts_voice, 1)
+        v.addLayout(row_tts)
+
+        g6 = QLabel("数据维护")
+        g6.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        v.addWidget(g6)
+        self.lbl_fts = QLabel("全文检索异常（搜不到已导入材料）时可重建索引。")
+        self.lbl_fts.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_fts)
+        btn_fts = QPushButton("重建全文索引")
+        btn_fts.clicked.connect(self._rebuild_fts)
+        v.addWidget(btn_fts, 0, Qt.AlignLeft)
+
         v.addStretch(1)
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.accept)
@@ -528,6 +619,14 @@ class SecurityDialog(QDialog):
             self.ed_tess.setText(path)
             dao.set_setting("tesseract_path", path)
             self._check_tess()
+
+    def _rebuild_fts(self):
+        if not ask(self, "重建全文索引可能需要片刻（与资料库大小相关），继续？"):
+            return
+        from ..db import dao as dao_mod
+        counts = dao_mod.rebuild_fts()
+        self.lbl_fts.setText(
+            f"索引已重建：资料 {counts['documents']} 篇、句式 {counts['phrases']} 条。")
 
     def _set_pw(self):
         pw = self.ed_pw.text()
@@ -562,7 +661,7 @@ class LockDialog(QDialog):
         self.ed_pw.returnPressed.connect(self._try)
         v.addWidget(self.ed_pw)
         self.lbl = QLabel("")
-        self.lbl.setStyleSheet("color:#b00020;")
+        self.lbl.setStyleSheet(f"color:{theme.DANGER};")
         v.addWidget(self.lbl)
         btn = QPushButton("解锁")
         btn.clicked.connect(self._try)

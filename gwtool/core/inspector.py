@@ -165,6 +165,40 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
     if kind and n_chars > 3000:
         out.append(Finding("info", "篇幅",
                            f"全文约 {n_chars} 字，一般性「{kind}」建议精炼篇幅"))
+
+    out.extend(_check_classification(lines))
+    out.extend(_check_attachments(lines))
+    return out
+
+
+def _check_classification(lines: list[str]) -> list[Finding]:
+    """密级标注：绝密/机密/秘密 开头的行应采用“密级★保密期限”格式。"""
+    for idx, ln in enumerate(lines[:6]):
+        m = re.match(r"^(绝密|机密|秘密)", ln)
+        if m and "★" not in ln:
+            return [Finding(
+                "error", "密级标注",
+                f"第{idx + 1}行“{ln[:20]}”疑为密级标注，应采用“{m.group(1)}★保密期限”"
+                f"格式（如：秘密★1年），并置于首页版心左上角")]
+    return []
+
+
+def _check_attachments(lines: list[str]) -> list[Finding]:
+    """附件说明：名称后应使用全角冒号；多个附件须用阿拉伯数字编号。"""
+    out = []
+    for idx, ln in enumerate(lines):
+        if re.match(r"^附件[ \u3000]+\S", ln):
+            out.append(Finding(
+                "warn", "附件说明",
+                f"第{idx + 1}行：附件名称后应使用全角冒号（附件：1. ×××）"))
+            break
+    colon_lines = [i for i, ln in enumerate(lines) if re.match(r"^附件\s*[:：]", ln)]
+    if len(colon_lines) > 1 and not any(
+            re.match(r"^附件\s*[:：]\s*\d", lines[i]) for i in colon_lines):
+        out.append(Finding(
+            "warn", "附件说明",
+            f"第{colon_lines[0] + 1}行：多个附件说明应使用阿拉伯数字编号"
+            "（附件：1. ×××）"))
     return out
 
 

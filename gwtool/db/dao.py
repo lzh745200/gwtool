@@ -40,6 +40,7 @@ class Document:
     word_count: int = 0
     import_time: str = ""
     updated_time: str = ""
+    simhash: int | None = None
 
 
 @dataclass
@@ -143,12 +144,16 @@ def add_document(doc: Document) -> int:
         return -1
     if not doc.word_count:
         doc.word_count = len(doc.content_text)
+    if doc.simhash is None:
+        from ..core.simhash import simhash as _simhash, to_db
+        doc.simhash = to_db(_simhash(doc.content_text))
     cur = conn.execute(
         "INSERT INTO documents(title,content_text,blocks_json,file_path,file_type,"
-        "tags,category_id,text_hash,word_count,import_time,updated_time)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "tags,category_id,text_hash,word_count,import_time,updated_time,simhash)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (doc.title, doc.content_text, doc.blocks_json, doc.file_path, doc.file_type,
-         doc.tags, doc.category_id, doc.text_hash, doc.word_count, now(), now()))
+         doc.tags, doc.category_id, doc.text_hash, doc.word_count, now(), now(),
+         doc.simhash))
     doc_id = int(cur.lastrowid)
     _fts_update_documents(doc_id, doc.title, doc.content_text)
     conn.commit()
@@ -158,11 +163,13 @@ def add_document(doc: Document) -> int:
 def update_document_content(doc_id: int, title: str, content: str,
                             blocks_json: str | None = None) -> None:
     conn = dbconn.get_conn()
+    from ..core.simhash import simhash as _simhash, to_db
     conn.execute(
         "UPDATE documents SET title=?,content_text=?,blocks_json=?,text_hash=?,"
-        "word_count=?,updated_time=? WHERE id=?",
+        "word_count=?,updated_time=?,simhash=? WHERE id=?",
         (title, content, blocks_json if blocks_json is not None else "[]",
-         text_hash(content), len(content), now(), doc_id))
+         text_hash(content), len(content), now(),
+         to_db(_simhash(content)), doc_id))
     _fts_update_documents(doc_id, title, content)
     conn.commit()
 
@@ -213,6 +220,43 @@ def list_documents(category_id: int | None = None) -> list[Document]:
 
 def count_documents() -> int:
     return int(dbconn.get_conn().execute("SELECT count(*) FROM documents").fetchone()[0])
+
+
+def all_simhashes() -> dict[int, int]:
+    """全库已持久化的 SimHash（查重粗筛用，避免每次全库重算）。"""
+    rows = dbconn.get_conn().execute(
+        "SELECT id, simhash FROM documents WHERE simhash IS NOT NULL").fetchall()
+    from ..core.simhash import from_db
+    return {int(r["id"]): from_db(int(r["simhash"])) for r in rows}
+
+
+def rebuild_fts() -> dict[str, int]:
+    """全量重建 FTS 索引（documents/phrases）。
+
+    FTS 行由 DAO 在写入时同步维护，任何绕过 DAO 的写入（如种子 ATTACH 直插、
+    手工改库）都会造成索引静默失配；此函数是用户可见的自救入口。
+    返回各源重建条数。
+    """
+    conn = dbconn.get_conn()
+    from . import tokenize as tok
+    counts: dict[str, int] = {}
+    conn.execute("DELETE FROM documents_fts")
+    rows = conn.execute("SELECT id, title, content_text FROM documents").fetchall()
+    for r in rows:
+        conn.execute(
+            "INSERT INTO documents_fts(title,tokenized,ref_id) VALUES(?,?,?)",
+            (tok.tokenize(r["title"]), tok.tokenize(r["content_text"]), int(r["id"])))
+    counts["documents"] = len(rows)
+    conn.execute("DELETE FROM phrases_fts")
+    rows = conn.execute("SELECT id, phrase, context FROM user_phrases").fetchall()
+    for r in rows:
+        text = r["phrase"] + "\n" + (r["context"] or "")
+        conn.execute(
+            "INSERT INTO phrases_fts(phrase,tokenized,ref_id) VALUES(?,?,?)",
+            (tok.tokenize(r["phrase"]), tok.tokenize(text), int(r["id"])))
+    counts["phrases"] = len(rows)
+    conn.commit()
+    return counts
 
 
 # ---------------------------------------------------------------- dictionary

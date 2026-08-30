@@ -59,9 +59,27 @@ def ensure_database_seeded() -> None:
         dao.set_setting("seeded_version", __version__)
 
 
+def _follow_system_theme() -> bool:
+    """直接只读查询设置（QApplication 构造前需确定 darkmode 参数）。"""
+    try:
+        import sqlite3
+        from .paths import db_path
+        p = db_path()
+        if not p.exists():
+            return False
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=3)
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='follow_system_theme'").fetchone()
+        conn.close()
+        return row is not None and row[0] == "1"
+    except Exception:
+        return False
+
+
 def run(import_path: str = "") -> int:
-    # 高分屏适配
-    sys.argv += ["-platform", "windows:darkmode=0"] if sys.platform == "win32" else []
+    # 高分屏适配：默认强制浅色；设置「跟随系统深浅色」后交由系统决定
+    if sys.platform == "win32" and not _follow_system_theme():
+        sys.argv += ["-platform", "windows:darkmode=0"]
     QApplication.setApplicationName(APP_NAME)
     app = QApplication.instance() or QApplication(sys.argv)
 

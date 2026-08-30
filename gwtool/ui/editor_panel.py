@@ -20,6 +20,24 @@ _HEADING_RE = re.compile(
     r"第[一二三四五六七八九十百\d]+[章节条])")
 
 
+def _render_pdf_images(pdf_path: str, max_pages: int = 8):
+    """后台渲染 PDF 页面为 QImage 列表（QImage 可跨线程传递，QPixmap 不行）。"""
+    try:
+        import pymupdf as fitz
+    except ImportError:  # pragma: no cover
+        import fitz as fitz  # type: ignore
+    doc = fitz.open(pdf_path)
+    n = min(doc.page_count, max_pages)
+    images = []
+    for i in range(n):
+        pix = doc[i].get_pixmap(dpi=80)
+        img = QImage(pix.samples, pix.width, pix.height,
+                     pix.stride, QImage.Format_RGB888)
+        images.append(img.copy())
+    doc.close()
+    return images, n, pdf_path
+
+
 class EditorPanel(QWidget):
     """中间编辑器：加载资料库文档、保存回库；预览标签页。"""
     content_modified = Signal()
@@ -400,9 +418,9 @@ class EditorPanel(QWidget):
                 cursor.insertText(result)
             return run
 
-        menu.addAction("📝 金额转大写（选区）", op(self._op_amount, "金额"))
-        menu.addAction("📅 日期转大写（选区）", op(self._op_date, "日期"))
-        menu.addAction("🔢 数字转大写码（选区）", op(self._op_num, "数字"))
+        menu.addAction("金额转大写（选区）", op(self._op_amount, "金额"))
+        menu.addAction("日期转大写（选区）", op(self._op_date, "日期"))
+        menu.addAction("数字转大写码（选区）", op(self._op_num, "数字"))
         menu.addSeparator()
         menu.addAction("简→繁（选区）", op(self._op_s2t, "文字"))
         menu.addAction("繁→简（选区）", op(self._op_t2s, "文字"))
@@ -412,7 +430,7 @@ class EditorPanel(QWidget):
         menu.addAction("半角→全角（全文）",
                        lambda: self._apply_transform(toolbox.half_to_full))
         menu.addSeparator()
-        menu.addAction("🧹 一键排版微调（全文）", self.run_formatter)
+        menu.addAction("一键排版微调（全文）", self.run_formatter)
         menu.exec(self.editor.viewport().mapToGlobal(pos))
 
     def _apply_transform(self, fn):
@@ -468,20 +486,17 @@ class EditorPanel(QWidget):
         self.preview.setHtml(html)
 
     def show_pdf(self, pdf_path: str):
-        """把生成的 PDF 渲染成页面图片展示。"""
-        try:
-            import pymupdf as fitz
-        except ImportError:  # pragma: no cover
-            import fitz as fitz  # type: ignore
-        doc = fitz.open(pdf_path)
-        n = min(doc.page_count, 8)  # 最多预览前8页
-        images = []
-        for i in range(n):
-            pix = doc[i].get_pixmap(dpi=80)
-            img = QImage(pix.samples, pix.width, pix.height,
-                         pix.stride, QImage.Format_RGB888)
-            images.append(img.copy())
-        doc.close()
+        """把生成的 PDF 渲染成页面图片展示（后台渲染，避免长文档卡 UI）。"""
+        from .workers import FnWorker
+        self._update_status("输出预览渲染中…")
+        self._pdf_worker = FnWorker(_render_pdf_images, pdf_path, parent=self)
+        self._pdf_worker.ok.connect(self._on_pdf_images)
+        self._pdf_worker.failed.connect(
+            lambda m: self._update_status(f"输出预览失败：{m}"))
+        self._pdf_worker.start()
+
+    def _on_pdf_images(self, result):
+        images, n, pdf_path = result
         combined = QImage(0, 0) if not images else None
         from PySide6.QtGui import QPainter
         if images:

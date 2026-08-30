@@ -13,6 +13,27 @@ from ..db import dao
 from ..core.model import Block
 
 
+class FnWorker(QThread):
+    """通用函数工作器：在后台线程执行 fn(*args, **kwargs)。
+
+    用于纠错检查、查重、对比、PDF 预览渲染等原本阻塞主线程的调用，
+    结果经 ok 信号回到主线程（回调里只做 UI 更新）。
+    """
+    ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn, *args, parent=None, **kwargs):
+        super().__init__(parent)
+        self._fn, self._args, self._kwargs = fn, args, kwargs
+
+    def run(self):
+        try:
+            self.ok.emit(self._fn(*self._args, **self._kwargs))
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+
+
 class ImportWorker(QThread):
     """批量导入：解析 -> 入库（去重）。"""
     progress = Signal(int, int, str)      # i, total, path

@@ -55,11 +55,16 @@ class ReferencePanel(QWidget):
         btn_apply.clicked.connect(self._apply_one)
         btn_apply_all = QPushButton("全部替换")
         btn_apply_all.clicked.connect(self._apply_all)
-        btn_ignore = QPushButton("忽略所选")
+        btn_ignore = QPushButton("忽略本次")
+        btn_ignore.setToolTip("仅本次列表中不再显示")
         btn_ignore.clicked.connect(self._ignore_one)
+        btn_remember = QPushButton("永久忽略…")
+        btn_remember.setToolTip("加入忽略名单并持久化，纠错不再提示该词")
+        btn_remember.clicked.connect(self._remember_ignore)
         bar2.addWidget(btn_apply)
         bar2.addWidget(btn_apply_all)
         bar2.addWidget(btn_ignore)
+        bar2.addWidget(btn_remember)
         bar2.addStretch(1)
         v1.addLayout(bar2)
         split.addWidget(corr_widget)
@@ -100,11 +105,31 @@ class ReferencePanel(QWidget):
 
     # ------------------------------------------------ 纠错
     def run_check(self):
+        """后台线程执行全文纠错（jieba 分词 + 逐条匹配），避免长文档卡 UI。"""
+        from .workers import FnWorker
+        if getattr(self, "_check_worker", None) is not None \
+                and self._check_worker.isRunning():
+            return
         self._checked_text = self._editor_getter()
-        self._corrections = corrector.check_text(self._checked_text)
+        self.btn_check.setEnabled(False)
+        self.lbl_count.setText("检查中…")
+        self._check_worker = FnWorker(corrector.check_text,
+                                      self._checked_text, parent=self)
+        self._check_worker.ok.connect(self._on_check_done)
+        self._check_worker.failed.connect(self._on_check_failed)
+        self._check_worker.start()
+
+    def _on_check_done(self, corrections):
+        self._corrections = corrections
+        self.btn_check.setEnabled(True)
         self._fill_corr_list()
 
+    def _on_check_failed(self, msg):
+        self.btn_check.setEnabled(True)
+        self.lbl_count.setText(f"检查失败：{msg}")
+
     def _fill_corr_list(self):
+        from . import theme
         min_conf = self.chk_min_conf.value()
         text = getattr(self, "_checked_text", "") or self._editor_getter()
         self.corr_list.clear()
@@ -115,8 +140,11 @@ class ReferencePanel(QWidget):
             ctx_a = max(0, c.start - 10)
             ctx = ("…" if ctx_a > 0 else "") + \
                 text[ctx_a:c.end + 12].replace("\n", " ")
+            tier = "确认错误" if c.confidence >= 0.8 else "疑似错误"
             item = QListWidgetItem(f"[{c.category}] {c.wrong} → {c.suggestion}\n"
-                                   f"    上下文：{ctx}…  ({c.confidence:.2f})")
+                                   f"    上下文：{ctx}…  ({c.confidence:.2f}，{tier})")
+            item.setForeground(theme.severity_color(
+                "error" if c.confidence >= 0.8 else "warn"))
             item.setData(Qt.UserRole, i)
             item.setToolTip(c.reason)
             self.corr_list.addItem(item)
@@ -147,6 +175,22 @@ class ReferencePanel(QWidget):
                 self._corrections[i] = None  # 占位
         self._corrections = [c for c in self._corrections if c is not None]
         self._fill_corr_list()
+
+    def _remember_ignore(self):
+        """纠错反馈闭环：把误报词写入持久忽略名单（词库管理中可撤销）。"""
+        from .widgets import ask
+        from ..core.corrector import invalidate_cache
+        sel = self._selected_corrections()
+        if not sel:
+            return
+        words = sorted({c.wrong for c in sel})
+        if not ask(self, "将以下词加入忽略名单（纠错不再提示）？\n"
+                   + "、".join(words)):
+            return
+        for w in words:
+            dao.add_ignore_word(w, note="纠错面板永久忽略")
+        invalidate_cache()
+        self._ignore_one()
 
     # ------------------------------------------------ 写作参考
     def run_reference(self):

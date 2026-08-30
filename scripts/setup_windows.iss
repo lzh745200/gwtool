@@ -2,9 +2,12 @@
 ;  公文汇编助手 —— Windows 安装包（Inno Setup 脚本）
 ;  使用：安装 Inno Setup 6 后，编译本脚本。
 ; ============================================================
+#ifndef APP_VERSION
+#define APP_VERSION "1.2.0"
+#endif
 [Setup]
 AppName=公文汇编助手
-AppVersion=1.1.0
+AppVersion={#APP_VERSION}
 AppPublisher=单机离线版
 DefaultDirName={autopf}\gwtool
 DefaultGroupName=公文汇编助手

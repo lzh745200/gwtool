@@ -35,6 +35,7 @@ def get_conn() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
         _db_file.parent.mkdir(parents=True, exist_ok=True)
+        _pre_migrate_backup()
         conn = sqlite3.connect(str(_db_file), timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
@@ -42,6 +43,39 @@ def get_conn() -> sqlite3.Connection:
         init_schema(conn)
         _local.conn = conn
     return conn
+
+
+def _pre_migrate_backup() -> None:
+    """老库升级（schema 迁移）前自动做一次原始文件备份，作为安全网。
+
+    直接打包 db/-wal 原始文件，不走 get_conn（避免在初始化中递归触发迁移）。
+    """
+    from .schema import SCHEMA_VERSION
+    if not _db_file or not _db_file.exists():
+        return
+    try:
+        raw = sqlite3.connect(f"file:{_db_file.as_posix()}?mode=ro", uri=True,
+                              timeout=5)
+        ver = raw.execute("PRAGMA user_version").fetchone()[0]
+        raw.close()
+    except sqlite3.Error:
+        return
+    if not (0 < ver < SCHEMA_VERSION):
+        return
+    try:
+        import datetime
+        import zipfile
+        backups = _db_file.parent / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = backups / f"gwtool_backup_{stamp}_premigrate_v{ver}.zip"
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(_db_file, "gwtool.db")
+            wal = _db_file.with_name(_db_file.name + "-wal")
+            if wal.exists():
+                zf.write(wal, "gwtool.db-wal")
+    except OSError:
+        pass
 
 
 def close_current_thread() -> None:

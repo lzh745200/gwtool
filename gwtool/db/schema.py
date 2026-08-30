@@ -11,7 +11,16 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级；
+# 语句要求幂等容错（新库建表已含新列时 ALTER 会重复报错，由调用方忽略）。
+MIGRATIONS = {
+    2: [
+        "ALTER TABLE documents ADD COLUMN simhash INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_documents_simhash ON documents(simhash)",
+    ],
+}
 
 TABLES = [
     # 分类树（资料归档）
@@ -35,7 +44,8 @@ TABLES = [
         text_hash TEXT NOT NULL DEFAULT '',
         word_count INTEGER NOT NULL DEFAULT 0,
         import_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-        updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        simhash INTEGER
     )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_hash ON documents(text_hash)""",
     """CREATE INDEX IF NOT EXISTS idx_documents_cat ON documents(category_id)""",
@@ -110,13 +120,21 @@ FTS_TABLES = [
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """建库建表；设置用户版本号以支持后续迁移。"""
+    """建库建表并执行版本化迁移；设置用户版本号以支持后续迁移。"""
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA foreign_keys=ON")
+    old_ver = cur.execute("PRAGMA user_version").fetchone()[0]
     for ddl in TABLES:
         cur.execute(ddl)
     for ddl in FTS_TABLES:
         cur.execute(ddl)
+    # 老库逐版本迁移；新库建表已含新列时 ALTER 重复报错属预期，忽略
+    for v in range(old_ver + 1, SCHEMA_VERSION + 1):
+        for stmt in MIGRATIONS.get(v, []):
+            try:
+                cur.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
     cur.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
     conn.commit()

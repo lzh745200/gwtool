@@ -13,37 +13,9 @@ if exist dist rmdir /s /q dist
 echo [2/4] 检查依赖...
 .venv\Scripts\python -m pip show pyinstaller >nul 2>&1 || .venv\Scripts\python -m pip install pyinstaller
 
-echo [3/4] PyInstaller 打包（onedir，排除未用 Qt 模块以控制体积）...
-.venv\Scripts\pyinstaller ^
-  --noconfirm --clean ^
-  --name gwtool ^
-  --windowed ^
-  --add-data "gwtool\resources\data\seed.db;gwtool/resources/data" ^
-  --collect-data opencc ^
-  --exclude-module PySide6.QtWebEngineCore ^
-  --exclude-module PySide6.QtWebEngineWidgets ^
-  --exclude-module PySide6.QtWebChannel ^
-  --exclude-module PySide6.QtQuick3D ^
-  --exclude-module PySide6.QtQuick ^
-  --exclude-module PySide6.QtQml ^
-  --exclude-module PySide6.Qt3DCore ^
-  --exclude-module PySide6.QtCharts ^
-  --exclude-module PySide6.QtDataVisualization ^
-  --exclude-module PySide6.QtMultimedia ^
-  --exclude-module PySide6.QtNetworkAuth ^
-  --exclude-module PySide6.QtPositioning ^
-  --exclude-module PySide6.QtSensors ^
-  --exclude-module PySide6.QtSerialPort ^
-  --exclude-module PySide6.QtTest ^
-  --exclude-module PySide6.QtDesigner ^
-  --exclude-module PySide6.QtSql ^
-  --exclude-module tkinter ^
-  --exclude-module matplotlib ^
-  --exclude-module numpy ^
-  --exclude-module pandas ^
-  --hidden-import win32timezone ^
-  main.py
-
+echo [3/4] PyInstaller 打包（参数统一于 gwtool.spec）...
+.venv\Scripts\pyinstaller --noconfirm --clean gwtool.spec
+
 echo [4/4] 生成便携版 zip...
 .venv\Scripts\python -c "import shutil; shutil.make_archive('dist/gwtool_便携版','zip','.','dist/gwtool')"
 

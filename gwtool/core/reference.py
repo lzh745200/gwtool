@@ -22,18 +22,48 @@ class ReferenceItem:
 
 
 def lookup(query: str, limit_each: int = 12) -> list[ReferenceItem]:
-    """按 BM25 相关度归一后合并排序。"""
+    """三源检索后组内归一化再合并排序。
+
+    BM25 分数跨表量纲不可比（且词典源走 LIKE 人工分级），直接合并有偏；
+    这里在每源内部做 min-max 归一到 [0,1]，词典源直接用其 0.9/0.8/0.7 分级，
+    再叠加标题命中与标签命中加权。
+    """
     if not (query or "").strip():
         return []
-    items: list[ReferenceItem] = []
+    q = query.strip()
+    raw: list[tuple[str, list]] = []
     for searcher, src in ((dao.search_documents, "documents"),
                           (dao.search_dictionary, "dictionary"),
                           (dao.search_phrases, "phrases")):
-        for r in searcher(query, limit_each):
-            items.append(ReferenceItem(src, r.ref_id, r.title, r.snippet, r.rank))
-    # bm25 越小越相关 -> 相关度 = 1/(1+|rank|)
-    for it in items:
-        it.rank = 1.0 / (1.0 + abs(it.rank))
+        raw.append((src, searcher(q, limit_each)))
+
+    items: list[ReferenceItem] = []
+    tag_map: dict[int, str] = {}
+    for src, results in raw:
+        if not results:
+            continue
+        if src == "dictionary":
+            for r in results:
+                items.append(ReferenceItem(src, r.ref_id, r.title, r.snippet,
+                                           max(0.0, min(r.rank, 1.0))))
+            continue
+        scores = [abs(r.rank) for r in results]
+        lo, hi = min(scores), max(scores)
+        span = (hi - lo) or 1.0
+        for r in results:
+            base = 1.0 - (abs(r.rank) - lo) / span     # 组内相对相关度 0..1
+            boost = 0.0
+            if r.title and q in r.title:
+                boost += 0.15                           # 标题命中加权
+            if src == "documents":
+                if not tag_map:
+                    tag_map = _document_tags()
+                tags = tag_map.get(r.ref_id) or ""
+                if tags and any(t.strip() and (t.strip() in q or q in t.strip())
+                                for t in tags.replace("，", ",").split(",")):
+                    boost += 0.10                       # 标签命中加权
+            items.append(ReferenceItem(src, r.ref_id, r.title, r.snippet,
+                                       min(base + boost, 1.0)))
     items.sort(key=lambda x: x.rank, reverse=True)
     # 去重（同源同 id）
     seen = set()
@@ -44,6 +74,13 @@ def lookup(query: str, limit_each: int = 12) -> list[ReferenceItem]:
             seen.add(key)
             out.append(it)
     return out
+
+
+def _document_tags() -> dict[int, str]:
+    """id -> tags（轻量查询，供标签命中加权）。"""
+    from ..db.connection import get_conn
+    rows = get_conn().execute("SELECT id, tags FROM documents WHERE tags<>''").fetchall()
+    return {int(r["id"]): r["tags"] for r in rows}
 
 
 def document_full_text(ref_id: int) -> str:
