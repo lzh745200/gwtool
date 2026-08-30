@@ -34,7 +34,7 @@ jobs:
         run: pyinstaller --noconfirm --clean gwtool.spec
 
       - name: 生成便携版 zip
-        run: python -c "import shutil; shutil.make_archive('dist/gwtool_便携版','zip','.','dist/gwtool')"
+        run: python -c "import shutil; shutil.make_archive('dist/gwtool_portable_win64','zip','.','dist/gwtool')"
 
       - name: 安装 Inno Setup
         run: choco install innosetup -y --no-progress
@@ -47,7 +47,7 @@ jobs:
         with:
           name: gwtool-windows-packages
           path: |
-            dist/gwtool_便携版.zip
+            dist/gwtool_portable_win64.zip
             dist/gwtool_setup_win64.exe
 
   build-arm64:
@@ -112,7 +112,7 @@ jobs:
           dpkg-deb -I gwtool_${VERSION}_arm64.deb | head -8
 
       - name: 生成 ARM64 便携版 tar.gz
-        run: tar -czf gwtool_linux_arm64_便携版.tar.gz -C dist gwtool
+        run: tar -czf gwtool_linux_arm64_portable.tar.gz -C dist gwtool
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -120,7 +120,7 @@ jobs:
           name: gwtool-arm64-packages
           path: |
             gwtool_*_arm64.deb
-            gwtool_linux_arm64_便携版.tar.gz
+            gwtool_linux_arm64_portable.tar.gz
 
   release:
     runs-on: ubuntu-latest
