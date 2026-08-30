@@ -32,7 +32,7 @@ def test_jianku_100_curated_pairs(tmp_db):
         "截止": "活动截止本月底。", "报怨": "他一肚子报怨。",  # 规则类单独测
     }
     tested = 0
-    for wrong, correct, cat, conf in CURATED_PAIRS:
+    for wrong, correct, _cat, conf in CURATED_PAIRS:
         if conf < 0.85 or wrong == correct or wrong in sentence_tpl:
             continue
         text = f"文中出现了{wrong}一词，需要修改。"

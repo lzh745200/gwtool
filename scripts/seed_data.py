@@ -85,7 +85,7 @@ def main() -> None:
     two_char.sort(key=lambda x: -x[1])
 
     n_generated = 0
-    for word, f in two_char:
+    for word, _freq in two_char:
         if n_generated >= args.target:
             break
         py0 = lazy_pinyin(word[0], style=Style.NORMAL)[0]

@@ -100,7 +100,7 @@ def main() -> int:
 
     # 4) 内置渲染 A4 PDF（含目录页码与页码盖章）
     from PySide6.QtWidgets import QApplication
-    qapp = QApplication.instance() or QApplication([])
+    _qapp = QApplication.instance() or QApplication([])
     from gwtool.core import pdfrender
     trees = __import__("gwtool.core.compiler", fromlist=["load_trees"]).load_trees(ids, [])
     out_pdf = sample_dir / "汇编成果.pdf"

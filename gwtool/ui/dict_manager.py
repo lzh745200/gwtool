@@ -6,9 +6,9 @@ import csv
 from pathlib import Path
 
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QTabWidget, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout)
+                               QLabel, QLineEdit, QListWidget, QMessageBox,
+                               QPushButton, QTabWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout)
 
 from ..core.corrector import invalidate_cache
 from ..db import dao

@@ -274,7 +274,7 @@ class MainWindow(QMainWindow):
         if pos >= 0:
             cur = ed.textCursor()
             cur.setPosition(pos)
-            cur.setPosition(min(pos + len(sentence), len(text := ed.toPlainText())),
+            cur.setPosition(min(pos + len(sentence), len(ed.toPlainText())),
                             Qt.KeepAnchor)
             ed.setTextCursor(cur)
         self.status.showMessage(f"朗读中 {idx + 1}/{total}（F9 停止）")

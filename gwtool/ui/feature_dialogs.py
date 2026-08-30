@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
@@ -153,7 +154,7 @@ class InspectorDialog(QDialog):
         colors = {"error": "#b00020", "warn": "#b26a00", "info": "#444"}
         for f in findings:
             item = QListWidgetItem(f.label)
-            item.setForeground(Qt.GlobalColor.black)
+            item.setForeground(QColor(colors.get(f.severity, "#000000")))
             item.setToolTip(f"等级：{f.severity}")
             self.result_list.addItem(item)
             self.result_list.item(self.result_list.count() - 1).setData(
@@ -178,7 +179,6 @@ class _BulkReplaceWorker(QThread):
     def run(self):
         import re as _re
         results = []
-        flags = 0 if self.use_regex else 0
         for i, did in enumerate(self.doc_ids):
             self.progress.emit(i + 1, len(self.doc_ids))
             d = dao.get_document(did)
@@ -268,7 +268,6 @@ class BulkReplaceDialog(QDialog):
             try:
                 if self.chk_regex.isChecked():
                     n = len(_re.findall(find, d.content_text))
-                    snippet = d.content_text[:0]
                 else:
                     n = d.content_text.count(find)
                 if n:

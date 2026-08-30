@@ -48,7 +48,9 @@ def ensure_database_seeded() -> None:
                      "VALUES('generated_conf_v2','1')")
         conn.commit()
 
-        # 默认模板
+    # 默认模板：绑定"首启未完成"标记而非上面的迁移标记——
+    # 若模板写入失败，seeded_version 未落库，下次启动可重试
+    if conn.execute("SELECT value FROM settings WHERE key='seeded_version'").fetchone() is None:
         from .core.template import default_template
         from .db import dao
         tpl = default_template()

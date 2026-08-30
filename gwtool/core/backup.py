@@ -30,7 +30,8 @@ def create_backup(note: str = "", password: str = "") -> str:
         try:
             import pyzipper
         except ImportError:
-            raise RuntimeError("未安装 pyzipper，无法创建加密备份（pip install pyzipper）")
+            raise RuntimeError(
+                "未安装 pyzipper，无法创建加密备份（pip install pyzipper）") from None
         with pyzipper.AESZipFile(out, "w", compression=pyzipper.ZIP_DEFLATED,
                                  encryption=pyzipper.WZ_AES) as zf:
             zf.setpassword(password.encode("utf-8"))
@@ -100,7 +101,7 @@ def restore_backup(zip_path: str, password: str = "") -> bool:
         try:
             import pyzipper
         except ImportError:
-            raise RuntimeError("未安装 pyzipper，无法读取加密备份")
+            raise RuntimeError("未安装 pyzipper，无法读取加密备份") from None
         zf_obj = pyzipper.AESZipFile(zip_path)
         zf_obj.setpassword(password.encode("utf-8"))
     else:
