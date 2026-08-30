@@ -20,6 +20,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 静态检查（ruff：语法错误/未定义名称）
+        run: |
+          pip install ruff
+          ruff check gwtool/ scripts/ tests/
+
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen
@@ -79,6 +84,11 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
+      - name: 静态检查（ruff：语法错误/未定义名称）
+        run: |
+          .venv/bin/pip install ruff
+          .venv/bin/ruff check gwtool/ scripts/ tests/
+
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen
@@ -114,7 +124,8 @@ jobs:
           Priority: optional
           Architecture: arm64
           Maintainer: lzh745200 <lzh745200@users.noreply.github.com>
-          Depends: libgl1, libegl1, libxkbcommon0, libfontconfig1, libdbus-1-3
+          Depends: libgl1, libegl1, libglib2.0-0, libxkbcommon0,
+           libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libdbus-1-3
           Description: 公文汇编助手 - 单机离线版智能公文汇编与写作辅助工具
            多格式材料导入、一键汇编（红头/目录/页码）、文字纠错、
            GB/T 9704 格式体检、A3骑马钉小册子、全文检索、写作参考。
