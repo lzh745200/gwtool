@@ -14,3 +14,4 @@ pytest>=8.0
 pywin32>=306; sys_platform == 'win32'
 opencc-python-reimplemented>=0.1.7
 pyzipper>=0.3.6
+pytest-timeout>=2.1

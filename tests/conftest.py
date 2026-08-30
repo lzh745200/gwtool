@@ -26,13 +26,15 @@ def tmp_db(tmp_path, monkeypatch):
 def qapp():
     """进程内 QApplication（渲染/字体测试需要）。
 
-    Windows 会话内直接用原生平台（字体系统完整，PDF 文本层正常）；
+    Windows 会话内默认用原生平台（字体系统完整，PDF 文本层正常）；
+    若 CI 显式设置了 QT_QPA_PLATFORM（如 offscreen）则尊重该设置；
     Linux 无显示环境时退回 offscreen。
     """
     import os
     import sys as _sys
     if _sys.platform.startswith("win"):
-        os.environ.pop("QT_QPA_PLATFORM", None)
+        if "QT_QPA_PLATFORM" not in os.environ:
+            pass  # 用原生 windows 平台
     else:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
