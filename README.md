@@ -103,6 +103,7 @@ bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | 打开报 `version 'GLIBC_2.3x' not found` | 安装包在比麒麟更老的 glibc 上打包（旧版 CI 在 ubuntu-24.04 打包） | 升级到 v1.2.1+（CI 已改为 glibc 2.28 容器构建） |
+| 双击 deb 报 `local variable 'deb' referenced before assignment` | 麒麟自带图形安装器的内部缺陷（该报错措辞为 Python ≤3.10 特征；经逐一核查，本项目 v1.0.0–v1.2.1 全部源码中不存在 `deb` 变量，非本应用问题） | 改用命令行安装：`sudo dpkg -i gwtool_*_linux_*.deb && sudo apt-get -f install`；或直接使用 `.run` 安装包 / 便携版 tar.gz |
 | 报 `Could not load the Qt platform plugin "xcb"` | 缺 Qt6 xcb 所需系统库；`dpkg -i` 不会自动装依赖 | `sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1` |
 | 报"无法执行二进制文件" | ARM64 包装到了 x86_64 机器（或反之） | 下载与 `uname -m` 一致的安装包（v1.2.1 起 .run 会主动校验架构） |
 | 双击无反应 | 错误被桌面入口吞掉 | 运行 `/opt/gwtool/gwtool.sh`（终端可诊断）或看 `~/gwtool_启动诊断.log` |
