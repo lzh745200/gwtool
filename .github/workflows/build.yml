@@ -78,7 +78,7 @@ jobs:
             libXrender libXext libXfixes libXi libXrandr libXcursor \
             libXinerama libSM libICE \
             xcb-util-wm xcb-util-image xcb-util-keysyms \
-            xcb-util-renderutil xcb-util-cursor
+            xcb-util-renderutil
           dnf clean all
           echo "== Python 诊断 =="
           echo "PATH=$PATH"
@@ -132,10 +132,16 @@ jobs:
           for target in pkgsrc/gwtool/gwtool $(find pkgsrc/gwtool -name 'libqxcb.so' 2>/dev/null); do
             MISSING="$MISSING$(ldd "$target" 2>/dev/null | grep 'not found' || true)"
           done
-          if [ -n "$MISSING" ]; then
+          # EL8 容器不含 xcb-util-cursor（Qt6 xcb 插件依赖）；该库由 deb Depends
+          # 声明 + 启动器预检兜底，麒麟桌面（Ubuntu 20.04 底层）有 libxcb-cursor0
+          FILTERED=$(echo "$MISSING" | grep -v 'libxcb-cursor' || true)
+          if [ -n "$FILTERED" ]; then
             echo "以下系统库在打包环境缺失（成品将同样缺失，属致命问题）："
-            echo "$MISSING"
+            echo "$FILTERED"
             exit 1
+          fi
+          if [ -n "$MISSING" ]; then
+            echo "注：libxcb-cursor 在 EL8 容器缺失属预期（deb 已声明 libxcb-cursor0 依赖）"
           fi
           echo "运行库自检通过"
 
