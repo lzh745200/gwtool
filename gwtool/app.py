@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QApplication
@@ -10,6 +11,11 @@ from PySide6.QtWidgets import QApplication
 from . import APP_NAME, __version__
 from .paths import bundled_db_seed_path, db_path
 from .ui.feature_dialogs import LockDialog  # noqa: F401  口令锁解锁框（顶层导入防路径拼写错误）
+
+# 麒麟/Ubuntu 下补齐 Qt6 xcb 平台插件所需的系统运行库
+XCB_HINT = ("sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 "
+            "libxcb-image0 libxcb-keysyms1 libxcb-render-util0 "
+            "libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1")
 
 
 def ensure_database_seeded() -> None:
@@ -76,12 +82,32 @@ def _follow_system_theme() -> bool:
         return False
 
 
+def _launch_qapp(argv: list[str]) -> "QApplication | None":
+    """构造 QApplication；失败（平台插件初始化异常等）时输出可操作的诊断。"""
+    try:
+        return QApplication(argv)
+    except Exception as exc:  # 打包版双击启动时错误不可见，落到日志
+        lines = ["启动失败：Qt 图形环境初始化异常。", f"原始错误：{exc}"]
+        if "xcb" in str(exc).lower():
+            lines += ["通常是缺少系统运行库，麒麟/Ubuntu 下执行：", "  " + XCB_HINT]
+        text = "\n".join(lines)
+        print(text, file=sys.stderr)
+        try:
+            (Path.home() / "gwtool_启动诊断.log").write_text(
+                text + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return None
+
+
 def run(import_path: str = "") -> int:
     # 高分屏适配：默认强制浅色；设置「跟随系统深浅色」后交由系统决定
     if sys.platform == "win32" and not _follow_system_theme():
         sys.argv += ["-platform", "windows:darkmode=0"]
     QApplication.setApplicationName(APP_NAME)
-    app = QApplication.instance() or QApplication(sys.argv)
+    app = QApplication.instance() or _launch_qapp(sys.argv)
+    if app is None:
+        return 1
 
     from .db import connection as dbconn
     dbconn.configure(db_path())

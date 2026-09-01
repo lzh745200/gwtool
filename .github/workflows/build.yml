@@ -50,81 +50,184 @@ jobs:
             dist/gwtool_portable_win64.zip
             dist/gwtool_setup_win64.exe
 
-  build-arm64:
-    runs-on: ubuntu-24.04-arm
+  # ------------------------------------------------------------
+  # Linux 构建（麒麟 V10 等）：在 AlmaLinux 8 容器（glibc 2.28）内打包，
+  # 产物可运行于 glibc >= 2.28 的系统 —— 覆盖麒麟服务器版（EL8 底层，
+  # glibc 2.28）与麒麟桌面版（Ubuntu 20.04 底层，glibc 2.31）。
+  # 之前在 ubuntu-24.04（glibc 2.39）上打包，麒麟上打开即报
+  # "version 'GLIBC_2.3x' not found"，此为本次修复的核心。
+  # ------------------------------------------------------------
+  build-linux:
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: almalinux:8
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装系统依赖（Qt offscreen 运行库 + 打包工具）
+      - name: 安装构建工具链（Python 3.9 + Qt 离屏运行库）
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 \
-            libdbus-1-3 libglib2.0-0t64 patchelf
+          dnf install -y python39 python39-pip git file \
+            mesa-libGL mesa-libEGL fontconfig dbus-libs glib2 \
+            libxkbcommon libxkbcommon-x11 libX11 libxcb \
+            libXrender libXext libXfixes libXi libXrandr libXcursor \
+            libSM libICE
+          dnf clean all
+
+      - uses: actions/checkout@v4
 
       - name: 安装依赖
         run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt
+          python39 -m pip install --upgrade pip
+          python39 -m pip install -r requirements.txt ruff
 
       - name: 静态检查（ruff：语法错误/未定义名称）
-        run: |
-          .venv/bin/pip install ruff
-          .venv/bin/ruff check gwtool/ scripts/ tests/
+        run: python39 -m ruff check gwtool/ scripts/ tests/
 
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen
-        run: .venv/bin/python -m pytest tests/ -q --timeout=300
+        run: python39 -m pytest tests/ -q --timeout=300
 
-      - name: PyInstaller 打包（ARM64 原生，参数统一于 gwtool.spec）
-        run: .venv/bin/pyinstaller --noconfirm --clean gwtool.spec
+      - name: PyInstaller 打包（glibc 2.28 目标，参数统一于 gwtool.spec）
+        run: python39 -m PyInstaller --noconfirm --clean gwtool.spec
+
+      - name: 整理产物目录（统一 pkgsrc/，规避 artifact 根路径歧义）
+        run: |
+          mkdir -p pkgsrc
+          mv dist/gwtool pkgsrc/gwtool
+          cp scripts/gwtool.sh pkgsrc/gwtool/gwtool.sh
+          chmod +x pkgsrc/gwtool/gwtool pkgsrc/gwtool/gwtool.sh
+
+      - name: 自检运行库（缺库即失败，问题在发布前暴露）
+        run: |
+          MISSING=""
+          for target in pkgsrc/gwtool/gwtool $(find pkgsrc/gwtool -name 'libqxcb.so' 2>/dev/null); do
+            MISSING="$MISSING$(ldd "$target" 2>/dev/null | grep 'not found' || true)"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "以下系统库在打包环境缺失（成品将同样缺失，属致命问题）："
+            echo "$MISSING"
+            exit 1
+          fi
+          echo "运行库自检通过"
+
+      - name: 记录版本号
+        run: python39 -c "from gwtool import __version__; open('pkgsrc/VERSION.txt','w').write(__version__)"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwtool-linux-${{ matrix.arch }}
+          path: pkgsrc
+
+  # ------------------------------------------------------------
+  # Linux 安装包组装（在宿主机上做：需要 dpkg-deb / makeself）
+  # ------------------------------------------------------------
+  package-linux:
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            debarch: arm64
+            pkgarch: arm64
+          - arch: amd64
+            runner: ubuntu-latest
+            debarch: amd64
+            pkgarch: x86_64
+    runs-on: ${{ matrix.runner }}
+    needs: build-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: gwtool-linux-${{ matrix.arch }}
+
+      - name: 安装打包工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y makeself
+
+      - name: 还原可执行权限并读取版本号
+        run: |
+          chmod +x gwtool/gwtool gwtool/gwtool.sh
+          echo "VERSION=$(cat VERSION.txt)" >> "$GITHUB_ENV"
 
       - name: 组装 .deb 安装包（麒麟 V10 / Debian 系）
+        env:
+          DEBARCH: ${{ matrix.debarch }}
         run: |
-          VERSION=$(.venv/bin/python -c 'from gwtool import __version__; print(__version__)')
           mkdir -p pkg/DEBIAN pkg/opt/gwtool pkg/usr/share/applications
-          cp -r dist/gwtool/* pkg/opt/gwtool/
+          cp -r gwtool/. pkg/opt/gwtool/
           cat > pkg/DEBIAN/control <<EOF
           Package: gwtool
-          Version: $VERSION
+          Version: ${VERSION}
           Section: office
           Priority: optional
-          Architecture: arm64
+          Architecture: ${DEBARCH}
           Maintainer: lzh745200 <lzh745200@users.noreply.github.com>
           Depends: libgl1, libegl1, libglib2.0-0, libxkbcommon0,
-           libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libdbus-1-3
+           libxkbcommon-x11-0, libfontconfig1, libdbus-1-3, libx11-6,
+           libx11-xcb1, libxcb1, libxcb-cursor0, libxcb-xinerama0,
+           libxcb-icccm4, libxcb-image0, libxcb-keysyms1,
+           libxcb-render-util0, libxcb-render0, libxcb-shape0,
+           libxcb-randr0, libxcb-xfixes0, libxcb-xkb1, libxext6, libxrender1
           Recommends: tesseract-ocr, tesseract-ocr-chi-sim
           Description: 公文汇编助手 - 单机离线版智能公文汇编与写作辅助工具
            多格式材料导入、一键汇编（红头/目录/页码）、文字纠错、
            GB/T 9704 格式体检、A3骑马钉小册子、全文检索、写作参考。
           EOF
+          cat > pkg/DEBIAN/postinst <<'EOS'
+          #!/bin/sh
+          # artifact 传输可能丢失可执行位，这里统一兜底
+          chmod +x /opt/gwtool/gwtool /opt/gwtool/gwtool.sh 2>/dev/null || true
+          exit 0
+          EOS
+          chmod 755 pkg/DEBIAN/postinst
           cat > pkg/usr/share/applications/gwtool.desktop <<EOF
           [Desktop Entry]
           Type=Application
           Name=公文汇编助手
           Comment=单机离线版智能公文汇编与写作辅助工具
-          Exec=/opt/gwtool/gwtool
+          Exec=/opt/gwtool/gwtool.sh
+          Path=/opt/gwtool
+          Icon=applications-office
           Terminal=false
           Categories=Office;
           EOF
-          dpkg-deb --build pkg gwtool_${VERSION}_arm64.deb
-          dpkg-deb -I gwtool_${VERSION}_arm64.deb | head -8
+          dpkg-deb --build --root-owner-group pkg "gwtool_${VERSION}_linux_${DEBARCH}.deb"
+          dpkg-deb -I "gwtool_${VERSION}_linux_${DEBARCH}.deb" | head -8
 
-      - name: 生成 ARM64 便携版 tar.gz
-        run: tar -czf gwtool_linux_arm64_portable.tar.gz -C dist gwtool
+      - name: 生成便携版 tar.gz
+        run: tar -czf "gwtool_linux_${{ matrix.pkgarch }}_portable.tar.gz" gwtool
 
-      - name: 上传构建产物
+      - name: 生成 .run 自解压安装包（makeself，含架构校验）
+        run: |
+          cp scripts/install_kylin_run.sh gwtool/gwtool-install.sh
+          sed -i "s/__TARGET_ARCH__/${{ matrix.pkgarch }}/" gwtool/gwtool-install.sh
+          chmod +x gwtool/gwtool-install.sh
+          makeself gwtool "gwtool_kylin_${{ matrix.pkgarch }}.run" \
+            "公文汇编助手 安装程序" ./gwtool-install.sh
+
+      - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
-          name: gwtool-arm64-packages
+          name: gwtool-linux-pkgs-${{ matrix.arch }}
           path: |
-            gwtool_*_arm64.deb
-            gwtool_linux_arm64_portable.tar.gz
+            gwtool_*_linux_*.deb
+            gwtool_linux_*_portable.tar.gz
+            gwtool_kylin_*.run
 
   release:
     runs-on: ubuntu-latest
-    needs: [build-windows, build-arm64]
+    needs: [build-windows, package-linux]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -143,4 +246,5 @@ jobs:
             --title "公文汇编助手 $GITHUB_REF_NAME" \
             --generate-notes \
             artifacts/gwtool-windows-packages/* \
-            artifacts/gwtool-arm64-packages/*
+            artifacts/gwtool-linux-pkgs-arm64/* \
+            artifacts/gwtool-linux-pkgs-amd64/*

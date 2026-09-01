@@ -1,9 +1,12 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.2.0**。
 
 核心解决四大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考。
+
+> 📖 新接触本项目？请先阅读 [项目文件结构说明.md](项目文件结构说明.md)——
+> 逐文件讲解每个目录/文件的职责、代码数据流与"我想改 X 该去哪个文件"速查表。
 
 ---
 
@@ -24,15 +27,17 @@
 | 词典/词库扩充 | 自定义词条、纠错对、常用句式、忽略名单，支持批量导入，立即生效 |
 | 文档对比 | 两文档红绿差异视图（增/删/改 + 相似度统计） |
 | 相似查重 | SimHash 粗筛 + 字符三元组 Jaccard 精判，找出高度相似的材料对 |
+| 跨文档批量替换 | 支持正则，按全部/当前分类范围，先预览命中再执行 |
 | 排版微调 | 一键处理首行缩进、多余空格、全半角、段间空行、标题编号 |
 | 历史版本 | 每 3 分钟自动快照（每文档保留 30 版），差异预览一键回滚 |
 | 朗读校对 | 离线 TTS 逐句朗读（Win SAPI / 麒麟 espeak-ng），F9 开停 |
 | 便携模式 | `main.py --portable` 数据存程序同级 Data/，U 盘随带随走 |
-| 安全 | 启动口令锁（PBKDF2）、AES 加密备份（pyzipper）、退出自动备份+轮转 |
+| 安全 | 启动口令锁（PBKDF2·12万次迭代）、AES 加密备份（pyzipper）、退出自动备份+轮转保留 20 份 |
 | 系统集成 | Windows 右键菜单（`scripts/install_context_menu.bat`）、剪贴板一键入库 |
 
-离线数据：错别字/混淆对 ≥3 万条（构建期程序化生成+人工精标）；
-词典为开源 CC-CEDICT（12 万词条）；简繁转换用 OpenCC（MIT）；全程不发起网络请求。
+离线数据（实测 seed.db，15.7 MB 随包分发）：错别字/混淆对 **40220 条**（人工精标 220 +
+程序化生成 40000）；机构沿革对照 52 条；词典 **123393 条**（开源 CC-CEDICT）；
+简繁转换用 OpenCC（MIT）；全程不发起网络请求。
 
 ## 快速开始（Windows 开发机）
 
@@ -40,8 +45,18 @@
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python main.py        # 启动
-.venv\Scripts\python -m pytest tests\ -q   # 运行测试
+.venv\Scripts\python -m pytest tests\ -q   # 运行测试（87 个用例）
+python scripts\e2e_check.py         # 端到端自检（9 步全流程 PASS/FAIL 清单）
 ```
+
+## 持续集成（GitHub Actions）
+
+推送 `v*` 标签或手动触发 `.github/workflows/build.yml` 即自动完成：
+两个平台（windows-latest x64 与 ubuntu-24.04-arm **原生 ARM64** runner）各自
+执行 ruff 静态检查 → pytest 全量测试 → PyInstaller 打包（共用 `gwtool.spec`）→
+产出 4 类安装包（Windows 便携 zip、Windows Inno Setup 安装 exe、ARM64 deb、
+ARM64 便携 tar.gz）并自动创建 GitHub Release（deb 内置 desktop 文件并声明
+Qt 运行库依赖，推荐安装 tesseract-ocr-chi-sim 以启用 OCR）。
 
 ## 打包发布
 
@@ -55,6 +70,10 @@ scripts\build_windows.bat
 - 安装包：用 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 编译 `scripts\setup_windows.iss`
 
 ### 麒麟 V10 ARM64
+
+CI（推 v* 标签）在 **AlmaLinux 8 容器（glibc 2.28）** 内打包，产物兼容
+麒麟服务器版（EL8 底层）与麒麟桌面版（Ubuntu 20.04 底层）；同时提供
+**x86_64 与 ARM64 两种架构**。手动在麒麟机上打包：
 
 **方式一（有网络）**：把整个项目拷到麒麟机器，执行：
 ```bash
@@ -70,14 +89,28 @@ bash scripts/kylin_offline_wheels.sh    # 生成 wheels_aarch64/
 bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 ```
 
-产物：`dist/gwtool/gwtool`（可直接分发目录），安装 makeself 后生成
-`gwtool_kylin_arm64.run` 自解压安装包。
+产物：`dist/gwtool/gwtool`（目录版，启动器 `gwtool.sh` 附带运行库预检），
+安装包 `gwtool_kylin_<架构>.run` 自解压安装（含架构校验 + 桌面入口）。
 
 **麒麟前置条件**：`sudo apt install python3 python3-venv python3-pip`
 （麒麟 V10 一般自带 Python 3.7+；若系统 Python 低于 3.9，可用 `pyenv` 或源码
 编译 Python 3.9，requirements 中所有库均支持 3.9）。PyMuPDF、PySide6 均有
 官方 aarch64 wheel；PySide6 在麒麟上需系统存在 Qt 相关运行库
 （`sudo apt install libgl1-mesa-dev libxkbcommon0 libxcb-*` 视报错补装）。
+
+## 麒麟安装与启动排障
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| 打开报 `version 'GLIBC_2.3x' not found` | 安装包在比麒麟更老的 glibc 上打包（旧版 CI 在 ubuntu-24.04 打包） | 升级到 v1.2.1+（CI 已改为 glibc 2.28 容器构建） |
+| 报 `Could not load the Qt platform plugin "xcb"` | 缺 Qt6 xcb 所需系统库；`dpkg -i` 不会自动装依赖 | `sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1` |
+| 报"无法执行二进制文件" | ARM64 包装到了 x86_64 机器（或反之） | 下载与 `uname -m` 一致的安装包（v1.2.1 起 .run 会主动校验架构） |
+| 双击无反应 | 错误被桌面入口吞掉 | 运行 `/opt/gwtool/gwtool.sh`（终端可诊断）或看 `~/gwtool_启动诊断.log` |
+
+启动器 `gwtool.sh`（deb / tar.gz / .run 均内置）会在启动前预检：架构是否
+匹配、xcb 插件缺哪些库，缺库时把**确切的 apt 安装命令**写入
+`~/gwtool_启动诊断.log` 并尝试弹窗提示；deb 的 postinst 也会兜底恢复
+可执行位。
 
 ## 数据目录
 
@@ -116,16 +149,69 @@ bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 
 ```
 gwtool/
-├── main.py                 # 入口
-├── gwtool/
-│   ├── app.py              # 启动装配 + 首次运行种子导入
-│   ├── paths.py            # 数据目录
-│   ├── db/                 # schema / connection / dao / tokenize
-│   ├── core/               # parsers(6格式) importer template docxgen
-│   │                       # compiler corrector booklet pdfrender
-│   │                       # formatter differ reference backup
-│   ├── ui/                 # main_window 三栏布局 + 各对话框
-│   └── resources/data/     # seed.db（词典+纠错库，随包分发）
-├── tests/                  # pytest 测试套件
-└── scripts/                # 打包脚本（Windows/麒麟）+ Inno Setup
+├── main.py                     # 程序入口（--portable / --import 命令行参数）
+├── gwtool.spec                 # PyInstaller 打包配置（双平台共用，参数唯一来源）
+├── requirements.txt            # 运行依赖
+├── ruff.toml                   # 静态检查（E9+F821：拦截"漏导入即崩溃"类缺陷）
+├── gwtool/                     # 主包
+│   ├── app.py                  # 启动装配：种子导入 → 口令锁 → 主窗口
+│   ├── paths.py                # 数据目录（%APPDATA% / ~/.local/share / 便携 Data/）
+│   ├── db/                     # 数据层
+│   │   ├── schema.py           #   9 张业务表 + 3 个 FTS5 虚表 + 版本迁移
+│   │   ├── connection.py       #   线程本地连接、WAL、迁移前自动备份
+│   │   ├── dao.py              #   唯一数据访问入口（文档/词典/纠错对/模板/快照…）
+│   │   └── tokenize.py         #   jieba 分词（建索引 + 构造 MATCH 查询）
+│   ├── core/                   # 纯逻辑层（不含 UI）
+│   │   ├── model.py            #   DocTree/Block 统一中间结构
+│   │   ├── importer.py         #   导入调度器（按扩展名分发 + OCR 回退）
+│   │   ├── parsers/            #   6 格式解析器：docx/doc/txt/rtf/pdf/md_html
+│   │   ├── skeletons.py        #   15 种法定文种骨架
+│   │   ├── template.py         #   GB/T 9704 排版参数模型（默认模板）
+│   │   ├── docxgen.py          #   规范 DOCX 生成（TOC 域/奇偶页脚/红头）
+│   │   ├── compiler.py         #   汇编编排 + docx→pdf 转换链
+│   │   ├── pdfrender.py        #   内置 PDF 渲染器（两遍渲染算目录页码）
+│   │   ├── booklet.py          #   A3 骑马订小册子（页序算法）
+│   │   ├── corrector.py        #   三级纠错流水线 + 词边界保护
+│   │   ├── corrector_data.py   #   内置精标对/机构沿革/上下文与标点规则
+│   │   ├── inspector.py        #   GB/T 9704 格式体检（文本级 + docx 级）
+│   │   ├── toolbox.py          #   文秘工具箱（金额/日期大写、简繁、全半角）
+│   │   ├── formatter.py        #   一键排版微调
+│   │   ├── differ.py           #   文档对比（词级 diff → 红绿 HTML）
+│   │   ├── simhash.py          #   SimHash + Jaccard 相似查重
+│   │   ├── reference.py        #   写作参考（三库联合 BM25 检索）
+│   │   ├── batch.py            #   批量汇编（单份失败不中断）
+│   │   ├── tts.py              #   离线朗读（SAPI/spd-say/espeak-ng）
+│   │   ├── watermark.py        #   PDF/DOCX 水印与密级标注
+│   │   ├── ocr.py              #   Tesseract OCR（可选，chi_sim 预检）
+│   │   ├── backup.py           #   备份/恢复（AES 加密、轮转、完整性校验）
+│   │   └── security.py         #   口令锁（PBKDF2-HMAC-SHA256）
+│   ├── ui/                     # PySide6 界面层
+│   │   ├── main_window.py      #   主窗口（三栏 + 12 动作工具栏 + 5 菜单）
+│   │   ├── editor_panel.py     #   编辑/预览/输出预览三页 + 大纲 + 查找替换
+│   │   ├── library_panel.py    #   资料库（检索框/分类树/文档列表）
+│   │   ├── reference_panel.py  #   纠错结果 + 写作参考双区面板
+│   │   ├── import_dialog.py    #   导入对话框（拖拽 + 进度）
+│   │   ├── compile_wizard.py   #   一键汇编三步向导
+│   │   ├── template_editor.py  #   模板管理（三参数页 + 实时预览）
+│   │   ├── dict_manager.py     #   词典/纠错对/句式/忽略名单四页管理
+│   │   ├── compare_dialog.py   #   文档对比
+│   │   ├── feature_dialogs.py  #   骨架/体检/批量替换/快照/查重/安全/锁屏
+│   │   ├── workers.py          #   QThread 工作线程（FnWorker 等 7 类）
+│   │   ├── icons.py            #   纯代码内嵌 SVG 图标（零图片资源）
+│   │   ├── widgets.py          #   公文字体常量与公共组件
+│   │   └── theme.py            #   语义色常量（深浅色兼容）
+│   └── resources/data/
+│       └── seed.db             # 种子库：词典 12.3 万 + 纠错对 4 万（15.7 MB）
+├── tests/                      # pytest 测试套件（87 个用例，含性能验收）
+├── scripts/                    # 构建与运维脚本
+│   ├── build_windows.bat       #   Windows x64 打包（PyInstaller + 便携 zip）
+│   ├── build_kylin_arm64.sh    #   麒麟 ARM64 打包（支持离线 wheels）
+│   ├── kylin_offline_wheels.sh #   有网机器预下载 ARM64 离线依赖
+│   ├── setup_windows.iss       #   Inno Setup 安装包脚本
+│   ├── install_context_menu.bat / uninstall_context_menu.bat  # 右键菜单
+│   ├── gwtool.desktop          #   Linux 桌面入口
+│   ├── seed_data.py            #   构建期生成 seed.db（词典下载+混淆对生成）
+│   ├── e2e_check.py            #   端到端自检（9 步全流程）
+│   └── api_commit.py           #   GitHub API 提交备援工具
+└── .github/workflows/build.yml # CI：双平台测试+打包+自动 Release
 ```

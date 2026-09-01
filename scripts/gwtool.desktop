@@ -2,8 +2,9 @@
 Type=Application
 Name=公文汇编助手
 Comment=单机离线版智能公文汇编与写作辅助工具
-# 请按实际安装路径修改 Exec（打包版：dist/gwtool/gwtool）
-Exec=/opt/gwtool/gwtool
+# 请按实际安装路径修改 Exec（打包版：/opt/gwtool，经启动器获得缺库诊断）
+Path=/opt/gwtool
+Exec=/opt/gwtool/gwtool.sh
 Icon=applications-office
 Terminal=false
 Categories=Office;Viewer;
