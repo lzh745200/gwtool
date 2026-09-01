@@ -71,9 +71,12 @@ scripts\build_windows.bat
 
 ### 麒麟 V10 ARM64
 
-CI（推 v* 标签）在 **AlmaLinux 8 容器（glibc 2.28）** 内打包，产物兼容
-麒麟服务器版（EL8 底层）与麒麟桌面版（Ubuntu 20.04 底层）；同时提供
-**x86_64 与 ARM64 两种架构**。手动在麒麟机上打包：
+CI（推 v* 标签）在 **Debian 11 容器（glibc 2.31）** 内打包，并锁定
+`PySide6==6.8.0.2`（Qt 6.8 LTS）。版本底线由此决定：**ARM64 包要求
+glibc ≥ 2.31**（麒麟桌面 V10 / Ubuntu 20.04 底层即可运行）；x86_64 包
+manylinux_2_28，**glibc ≥ 2.28 的麒麟桌面/服务器均可**。官方 PySide6 的
+aarch64 wheel 自 6.8.1 起要求 glibc ≥ 2.39（麒麟全系不满足），故不追新。
+同时提供 **x86_64 与 ARM64 两种架构**。手动在麒麟机上打包：
 
 **方式一（有网络）**：把整个项目拷到麒麟机器，执行：
 ```bash
@@ -102,7 +105,7 @@ bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| 打开报 `version 'GLIBC_2.3x' not found` | 安装包在比麒麟更老的 glibc 上打包（旧版 CI 在 ubuntu-24.04 打包） | 升级到 v1.2.1+（CI 已改为 glibc 2.28 容器构建） |
+| 打开报 `version 'GLIBC_2.3x' not found` | 安装包在比目标机更新的 glibc 上打包（旧版包在 ubuntu-24.04/glibc 2.39 构建，且 PySide6 6.8.1+ 的 aarch64 wheel 需 glibc≥2.39） | 使用 v1.2.1+ 安装包（ARM64 需麒麟桌面版 glibc≥2.31；x86_64 需 glibc≥2.28；终端执行 `ldd --version` 可查） |
 | 双击 deb 报 `local variable 'deb' referenced before assignment` | 麒麟自带图形安装器的内部缺陷（该报错措辞为 Python ≤3.10 特征；经逐一核查，本项目 v1.0.0–v1.2.1 全部源码中不存在 `deb` 变量，非本应用问题） | 改用命令行安装：`sudo dpkg -i gwtool_*_linux_*.deb && sudo apt-get -f install`；或直接使用 `.run` 安装包 / 便携版 tar.gz |
 | 报 `Could not load the Qt platform plugin "xcb"` | 缺 Qt6 xcb 所需系统库；`dpkg -i` 不会自动装依赖 | `sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1` |
 | 报"无法执行二进制文件" | ARM64 包装到了 x86_64 机器（或反之） | 下载与 `uname -m` 一致的安装包（v1.2.1 起 .run 会主动校验架构） |
