@@ -13,6 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 英文区域设置的 Windows 与 GitHub Windows runner 控制台默认是 charmap 编码，
+# print 中文会抛 UnicodeEncodeError 让自检脚本自己先崩掉，故强制 UTF-8 输出。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 import os
 
 if not sys.platform.startswith("win"):

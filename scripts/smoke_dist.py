@@ -22,6 +22,12 @@ import sys
 import time
 from pathlib import Path
 
+# 英文区域设置的 Windows 与 GitHub Windows runner 控制台默认是 charmap 编码，
+# print 中文会抛 UnicodeEncodeError 让校验脚本自己先崩掉，故强制 UTF-8 输出。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 IS_WIN = sys.platform.startswith("win")
 EXE_NAME = "gwtool.exe" if IS_WIN else "gwtool"
 ALIVE_SECONDS = 12          # 启动后需存活这么久才算没崩（首启动要导种子库）

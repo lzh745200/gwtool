@@ -134,3 +134,19 @@ def test_build_script_does_not_assume_venv_exists():
     text = _read("scripts", "build_windows.bat")
     assert "if not exist" in text, "缺少 .venv 存在性判断"
     assert "errorlevel 1" in text, "缺少失败退出判断，打包失败会被当成成功"
+
+
+def test_cli_scripts_force_utf8_stdout():
+    """输出中文的脚本必须自行把 stdout 重配为 UTF-8。
+
+    英文区域设置的 Windows 与 GitHub Windows runner 控制台是 charmap 编码，
+    print 中文会抛 UnicodeEncodeError，让自检脚本在跑出结论之前就崩掉
+    （CI 实测：build-windows 在「端到端自检」步骤因此失败）。
+    """
+    for script in ("e2e_check.py", "smoke_dist.py"):
+        text = _read("scripts", script)
+        assert "reconfigure" in text, f"{script} 未重配 stdout 编码"
+        assert 'encoding="utf-8"' in text, f"{script} 未指定 UTF-8 输出编码"
+        # 重配必须在任何中文输出之前，即位于文件靠前位置
+        assert text.index("reconfigure") < text.index("[PASS]"), (
+            f"{script} 的编码重配晚于首次中文输出，仍会崩")
