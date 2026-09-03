@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 from pathlib import Path
 
-from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QListWidget, QMessageBox,
-                               QPushButton, QTabWidget, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout)
+from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QMessageBox, QPushButton, QTabWidget,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout)
 
+from ..core import ruleset
 from ..core.corrector import invalidate_cache
 from ..db import dao
 from ..db.connection import get_conn
-from .widgets import ask, info
+from .widgets import ask, info, warn
 
 
 class DictManager(QDialog):
@@ -147,6 +149,30 @@ class DictManager(QDialog):
         bar.addWidget(btn_del)
         v.addLayout(bar)
 
+        # 规则集工具条：按来源整体启停与导出
+        rs = QHBoxLayout()
+        rs.addWidget(QLabel("规则集"))
+        self.err_source = QComboBox()
+        self.err_source.setMinimumWidth(180)
+        rs.addWidget(self.err_source)
+        btn_on = QPushButton("启用该规则集")
+        btn_on.clicked.connect(lambda: self._toggle_ruleset(True))
+        btn_off = QPushButton("停用该规则集")
+        btn_off.clicked.connect(lambda: self._toggle_ruleset(False))
+        toggle_hint = ("只作用于词库中的纠错对。程序内置的人工精标对"
+                       "（如「布署→部署」「截止→截至」）始终生效，无法停用。")
+        btn_on.setToolTip(toggle_hint)
+        btn_off.setToolTip(toggle_hint)
+        btn_export = QPushButton("导出 CSV…")
+        btn_export.clicked.connect(self._export_pairs)
+        rs.addWidget(btn_on)
+        rs.addWidget(btn_off)
+        rs.addWidget(btn_export)
+        rs.addStretch(1)
+        self.err_stat = QLabel("")
+        rs.addWidget(self.err_stat)
+        v.addLayout(rs)
+
         self.err_table = QTableWidget(0, 3)
         self.err_table.setHorizontalHeaderLabels(["错误写法", "正确写法", "类别"])
         self.err_table.setColumnWidth(0, 220)
@@ -154,6 +180,57 @@ class DictManager(QDialog):
         v.addWidget(self.err_table, 1)
         self._reload_errors()
         return w
+
+    def _reload_rule_sets(self):
+        """重填规则集下拉与统计标签，尽量保留当前选择。"""
+        current = self.err_source.currentText()
+        self.err_source.blockSignals(True)
+        self.err_source.clear()
+        self.err_source.addItem("全部规则集", "")
+        for name, n in dao.error_pair_sources():
+            self.err_source.addItem(f"{name}（{n} 条）", name)
+        idx = self.err_source.findData(current)
+        if idx >= 0:
+            self.err_source.setCurrentIndex(idx)
+        self.err_source.blockSignals(False)
+
+        on = dao.count_error_pairs_by(enabled=True)
+        off = dao.count_error_pairs_by(enabled=False)
+        self.err_stat.setText(f"已启用 {on} 条　已停用 {off} 条")
+
+    def _current_rule_set(self) -> str:
+        return self.err_source.currentData() or ""
+
+    def _toggle_ruleset(self, enable: bool):
+        source = self._current_rule_set()
+        scope = f"规则集「{source}」" if source else "全部纠错对"
+        if not ask(self, f"确认{'启用' if enable else '停用'}{scope}？\n"
+                         f"停用后这些纠错对立即不再参与文字纠错，但数据保留，可随时重新启用。"):
+            return
+        n = dao.set_error_pairs_enabled(enable, source=source)
+        invalidate_cache()      # 纠错流水线缓存了词库，不失效则本次会话仍按旧规则纠
+        self._reload_rule_sets()
+        self._reload_errors()
+        info(self, f"已{'启用' if enable else '停用'} {n} 条纠错对。")
+
+    def _export_pairs(self):
+        source = self._current_rule_set()
+        total = dao.count_error_pairs_by(source=source)
+        if not total:
+            warn(self, "当前范围内没有可导出的纠错对。")
+            return
+        default = f"纠错规则集_{source or '全部'}_{date.today():%Y%m%d}.csv"
+        path, _sel = QFileDialog.getSaveFileName(self, "导出纠错规则集",
+                                                 default, "CSV 文件 (*.csv)")
+        if not path:
+            return
+        try:
+            n = ruleset.export_error_pairs(path, source=source)
+        except OSError as exc:
+            warn(self, f"导出失败：{exc}")
+            return
+        info(self, f"已导出 {n} 条纠错对到：\n{path}\n"
+                   f"（UTF-8 BOM 编码，Excel 可直接打开；含来源与启用状态，可原样导回）")
 
     def _reload_errors(self):
         kw = self.err_search.text().strip()
@@ -165,6 +242,7 @@ class DictManager(QDialog):
             self.err_table.setItem(r, 0, QTableWidgetItem(p.wrong))
             self.err_table.setItem(r, 1, QTableWidgetItem(p.correct))
             self.err_table.setItem(r, 2, QTableWidgetItem(p.category))
+        self._reload_rule_sets()
 
     def _add_pair(self):
         wrong, ok = QInputDialog.getText(self, "添加纠错对", "错误写法：")

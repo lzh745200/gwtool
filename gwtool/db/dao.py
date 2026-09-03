@@ -311,12 +311,13 @@ def lookup_dictionary(word: str) -> list[dict]:
 
 # ---------------------------------------------------------------- error pairs
 def add_error_pair(wrong: str, correct: str, category: str = "用户添加",
-                   confidence: float = 0.99, source: str = "user") -> int:
+                   confidence: float = 0.99, source: str = "user",
+                   enabled: bool = True) -> int:
     conn = dbconn.get_conn()
     cur = conn.execute(
         "INSERT OR REPLACE INTO error_pairs(wrong,correct,category,confidence,enabled,source)"
-        " VALUES(?,?,?,?,1,?)",
-        (wrong, correct, category, confidence, source))
+        " VALUES(?,?,?,?,?,?)",
+        (wrong, correct, category, confidence, 1 if enabled else 0, source))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -325,6 +326,72 @@ def delete_error_pair(pair_id: int) -> None:
     conn = dbconn.get_conn()
     conn.execute("DELETE FROM error_pairs WHERE id=?", (pair_id,))
     conn.commit()
+
+
+def error_pair_sources() -> list[tuple[str, int]]:
+    """全部纠错对来源及其条数，按条数倒序。用于「规则集」下拉。"""
+    rows = dbconn.get_conn().execute(
+        "SELECT COALESCE(NULLIF(source,''),'未标注') AS s, count(*) AS n"
+        " FROM error_pairs GROUP BY s ORDER BY n DESC, s").fetchall()
+    return [(r["s"], int(r["n"])) for r in rows]
+
+
+def error_pair_categories(source: str = "") -> list[tuple[str, int]]:
+    """某来源下的分类及条数（source 为空表示不限来源）。"""
+    conn = dbconn.get_conn()
+    sql = ("SELECT COALESCE(NULLIF(category,''),'未分类') AS c, count(*) AS n"
+           " FROM error_pairs")
+    params: list = []
+    if source:
+        sql += " WHERE source=?"
+        params.append(source)
+    sql += " GROUP BY c ORDER BY n DESC, c"
+    return [(r["c"], int(r["n"])) for r in conn.execute(sql, params).fetchall()]
+
+
+def set_error_pairs_enabled(enabled: bool, source: str = "",
+                            category: str = "") -> int:
+    """按来源/分类批量启用或停用纠错对，返回受影响行数。
+
+    这是「规则集」的开关：停用某个来源后，该来源下的全部纠错对立即不再参与
+    纠错（all_error_pairs(only_enabled=True) 会过滤掉），但数据仍保留在库里，
+    可随时重新启用，不必删了再导。
+    """
+    where: list[str] = []
+    params: list = []
+    if source:
+        where.append("COALESCE(NULLIF(source,''),'未标注')=?")
+        params.append(source)
+    if category:
+        where.append("COALESCE(NULLIF(category,''),'未分类')=?")
+        params.append(category)
+    sql = f"UPDATE error_pairs SET enabled={1 if enabled else 0}"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    conn = dbconn.get_conn()
+    cur = conn.execute(sql, params)
+    conn.commit()
+    return int(cur.rowcount)
+
+
+def count_error_pairs_by(source: str = "", category: str = "",
+                         enabled: bool | None = None) -> int:
+    """按来源/分类/启用状态统计纠错对条数。"""
+    where: list[str] = []
+    params: list = []
+    if source:
+        where.append("COALESCE(NULLIF(source,''),'未标注')=?")
+        params.append(source)
+    if category:
+        where.append("COALESCE(NULLIF(category,''),'未分类')=?")
+        params.append(category)
+    if enabled is not None:
+        where.append("enabled=?")
+        params.append(1 if enabled else 0)
+    sql = "SELECT count(*) FROM error_pairs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return int(dbconn.get_conn().execute(sql, params).fetchone()[0])
 
 
 def all_error_pairs(only_enabled: bool = True) -> list[ErrorPair]:
