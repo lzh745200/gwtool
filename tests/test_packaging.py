@@ -147,6 +147,6 @@ def test_cli_scripts_force_utf8_stdout():
         text = _read("scripts", script)
         assert "reconfigure" in text, f"{script} 未重配 stdout 编码"
         assert 'encoding="utf-8"' in text, f"{script} 未指定 UTF-8 输出编码"
-        # 重配必须在任何中文输出之前，即位于文件靠前位置
-        assert text.index("reconfigure") < text.index("[PASS]"), (
-            f"{script} 的编码重配晚于首次中文输出，仍会崩")
+        # 重配必须在模块顶层完成，早于 main 里的任何中文输出
+        assert text.index("reconfigure") < text.index("def main"), (
+            f"{script} 的编码重配晚于 main，输出中文时仍会崩")
