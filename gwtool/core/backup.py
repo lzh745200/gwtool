@@ -45,14 +45,39 @@ def create_backup(note: str = "", password: str = "") -> str:
                  "encrypted": True}, ensure_ascii=False, indent=1))
             zf.write(src, "gwtool.db")
             _write_templates(zf)
+            _write_attachments(zf)
     else:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(src, "gwtool.db")
             meta = {"created": stamp, "version": "1.0.0", "note": note}
             zf.writestr("manifest.json", json.dumps(meta, ensure_ascii=False, indent=1))
             _write_templates(zf)
+            _write_attachments(zf)
     rotate_backups()
     return str(out)
+
+
+def _write_attachments(zf) -> None:
+    """把附件文件一并打进备份包（attachments/ 目录下）。
+
+    附件本体存在数据目录里，备份只带 db 的话换机器/恢复后附件全部失联，
+    所以必须随包走。个别文件读不到（被占用、已手工删除）只跳过，
+    不能因此让整份备份失败。
+    """
+    from . import attachments as att_core
+    from ..db import dao
+    try:
+        items = dao.list_all_attachments()
+    except Exception:
+        return
+    for att in items:
+        p = att_core.resolve(att)
+        if p is None or not p.exists():
+            continue
+        try:
+            zf.write(p, f"attachments/{p.name}")
+        except (OSError, ValueError):
+            continue
 
 
 def _write_templates(zf) -> None:
@@ -137,7 +162,39 @@ def restore_backup(zip_path: str, password: str = "") -> bool:
                 _restore_templates(zf)
             except Exception:
                 pass
+        # 附件回数据目录（备份包里没有该目录时静默跳过，兼容旧备份）
+        try:
+            _restore_attachments(zf)
+        except Exception:
+            pass
     return True
+
+
+def _restore_attachments(zf) -> int:
+    """备份包内 attachments/* -> 数据目录 attachments/，返回还原文件数。
+
+    只取条目的 basename 拼目标路径，并校验结果确实落在附件目录内：
+    备份包可能来自别的机器（甚至被人手工改过），不能相信里面的相对路径。
+    """
+    from .. import paths
+    dest_dir = paths.attachments_dir().resolve()
+    n = 0
+    for name in zf.namelist():
+        if not name.startswith("attachments/") or name.endswith("/"):
+            continue
+        file_name = Path(name).name
+        if not file_name:
+            continue
+        target = (dest_dir / file_name).resolve()
+        if dest_dir != target and dest_dir not in target.parents:
+            continue                      # 路径穿越，拒绝
+        try:
+            with zf.open(name) as fsrc, open(target, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst)
+            n += 1
+        except (OSError, KeyError, RuntimeError):
+            continue
+    return n
 
 
 def _restore_templates(zf) -> int:

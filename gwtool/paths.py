@@ -59,6 +59,17 @@ def backup_dir() -> Path:
     return d
 
 
+def attachments_dir() -> Path:
+    """文档附件存放目录（数据目录内）。
+
+    附件一律复制到这里而不是只记录用户选的原始路径：备份/恢复与便携模式
+    （U 盘随带）都只搬数据目录，存原路径的话换机器或恢复备份后附件全部失联。
+    """
+    d = app_data_dir() / "attachments"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def export_dir() -> Path:
     """默认导出目录（用户文档/公文汇编输出）。"""
     home = Path.home() / "Documents" if Path.home().joinpath("Documents").exists() else Path.home()

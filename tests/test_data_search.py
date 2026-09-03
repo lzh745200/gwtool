@@ -23,7 +23,13 @@ def test_document_crud_and_dedup(tmp_db):
     dao.update_document_content(did, "测试一", "修改后的内容。")
     d = dao.get_document(did)
     assert d.content_text == "修改后的内容。"
+    # 删除 = 移入回收站（软删除）：行还在，但常规列表与检索都看不到
     dao.delete_document(did)
+    assert dao.get_document(did) is not None
+    assert dao.list_documents() == []
+    assert [x.id for x in dao.list_deleted_documents()] == [did]
+    # 彻底删除才真删行
+    dao.purge_document(did)
     assert dao.get_document(did) is None
 
 

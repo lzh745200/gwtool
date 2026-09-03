@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""新增功能对话框集合：骨架向导 / 格式体检 / 批量替换 / 历史快照 /
+"""新增功能对话框集合：骨架向导 / 格式体检 / 批量替换 / 批量纠错 / 历史快照 /
 相似查重 / 安全设置 / 锁屏。"""
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -371,6 +372,290 @@ class BulkReplaceDialog(QDialog):
         self.accept()
 
 
+# ================================================================ 批量纠错
+# 预览树的显示上限：命中很多时全部塞进控件会让界面卡住，
+# 计划本身（self._plans）不截断，执行仍按全部命中处理。
+_MAX_SHOW_DOCS = 300
+_MAX_SHOW_HITS = 4000
+
+
+def _correct_categories() -> list[str]:
+    """可选纠错类别：内置规则类别 + 词库里的真实类别（去掉统计占位名）。"""
+    names = {"错别字", "易混词", "标点", "机构沿革", "用户词库"}
+    try:
+        names |= {c for c, _n in dao.error_pair_categories()
+                  if c and c not in ("未分类", "未标注")}
+    except Exception:      # noqa: BLE001  词库不可用时退回内置类别
+        pass
+    return sorted(names)
+
+
+def _brief_failures(failures, limit: int = 8) -> str:
+    """失败清单摘要（弹窗里不能刷几百行）。"""
+    lines = [f"· {title}：{reason}" for title, reason in list(failures)[:limit]]
+    if len(failures) > limit:
+        lines.append(f"…另有 {len(failures) - limit} 项")
+    return "\n".join(lines)
+
+
+class _BatchScanWorker(QThread):
+    """批量纠错扫描（预览）。全库逐篇跑纠错耗时，必须在后台线程。"""
+    progress = Signal(int, int)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, category_id, min_conf, categories, parent=None):
+        super().__init__(parent)
+        self.category_id = category_id
+        self.min_conf = min_conf
+        self.categories = categories
+
+    def run(self):
+        from ..core import batch
+        try:
+            res = batch.batch_correct(
+                category_id=self.category_id, min_confidence=self.min_conf,
+                categories=self.categories,
+                progress_cb=lambda i, n: self.progress.emit(i, n))
+            self.done.emit(res)
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+
+
+class _BatchApplyWorker(QThread):
+    """批量纠错执行：按预览计划写回（DAO 内部同步 FTS 索引）。"""
+    progress = Signal(int, int)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, plans, parent=None):
+        super().__init__(parent)
+        self.plans = plans
+
+    def run(self):
+        from ..core import batch
+        try:
+            res = batch.batch_correct(
+                apply=True, plans=self.plans,
+                progress_cb=lambda i, n: self.progress.emit(i, n))
+            self.done.emit(res)
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+
+
+class BatchCorrectDialog(QDialog):
+    """按分类批量纠错：先预览命中（哪篇、每处 错→对、位置），确认后才写回。
+
+    交互范式沿用 BulkReplaceDialog（预览 -> 确认 -> 后台执行 -> 汇总）。
+    写回前每篇都会留一份历史快照，改错了可在「历史版本」里逐篇回滚。
+    """
+
+    def __init__(self, category_id: int | None = None, parent=None):
+        super().__init__(parent)
+        self.category_id = category_id
+        self._plans: list = []
+        self._scan_worker = None
+        self._apply_worker = None
+        self.setWindowTitle("按分类批量纠错")
+        self.resize(840, 560)
+        v = QVBoxLayout(self)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("范围："))
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItem("全部文档", None)
+        for c in dao.list_categories():
+            self.scope_combo.addItem(c.name, c.id)
+        if category_id:
+            idx = self.scope_combo.findData(category_id)
+            if idx >= 0:
+                self.scope_combo.setCurrentIndex(idx)
+        self.scope_combo.currentIndexChanged.connect(self._invalidate)
+        row.addWidget(self.scope_combo, 1)
+        row.addWidget(QLabel("类别："))
+        self.kind_combo = QComboBox()
+        self.kind_combo.addItem("全部类别", "")
+        for name in _correct_categories():
+            self.kind_combo.addItem(name, name)
+        self.kind_combo.currentIndexChanged.connect(self._invalidate)
+        row.addWidget(self.kind_combo)
+        row.addWidget(QLabel("置信度≥"))
+        self.sp_conf = QDoubleSpinBox()
+        self.sp_conf.setRange(0.0, 1.0)
+        self.sp_conf.setDecimals(2)
+        self.sp_conf.setSingleStep(0.05)
+        self.sp_conf.setValue(0.80)
+        self.sp_conf.setToolTip(
+            "批量写回默认只改高置信命中：精标词库≥0.85，上下文与标点规则 0.85~0.95，"
+            "程序生成的混淆对 0.55，机构沿革对照 0.70。\n"
+            "「数字用法」类只给提示不给替换文本，已整类排除。")
+        self.sp_conf.valueChanged.connect(self._invalidate)
+        row.addWidget(self.sp_conf)
+        v.addLayout(row)
+
+        ops = QHBoxLayout()
+        self.btn_preview = QPushButton("预览命中")
+        self.btn_preview.clicked.connect(self._preview)
+        self.btn_apply = QPushButton("执行纠错")
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setToolTip("按上面预览到的命中写回资料库（全文索引随之同步）")
+        self.btn_apply.clicked.connect(self._apply)
+        ops.addWidget(self.btn_preview)
+        ops.addWidget(self.btn_apply)
+        ops.addStretch(1)
+        v.addLayout(ops)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["文档 / 命中（错 → 对）", "位置", "类别", "置信度"])
+        self.tree.setUniformRowHeights(True)
+        self.tree.setColumnWidth(0, 430)
+        v.addWidget(self.tree, 1)
+
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        v.addWidget(self.progress)
+
+        self.lbl = QLabel("先「预览命中」确认无误，再「执行纠错」。执行会直接写入资料库，"
+                          "建议先做一次备份。")
+        self.lbl.setWordWrap(True)
+        self.lbl.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.reject)
+        bottom.addWidget(btn_close)
+        v.addLayout(bottom)
+
+    # ------------------------------------------------------------ 预览
+    def _invalidate(self, *_):
+        """筛选条件一变，旧的命中计划立即作废（防止按过期预览写回）。"""
+        self._plans = []
+        self.tree.clear()
+        self.btn_apply.setEnabled(False)
+
+    def _preview(self):
+        scope = self.scope_combo.currentData()
+        self._invalidate()
+        try:
+            total = dao.count_documents(scope)
+        except Exception as exc:  # noqa: BLE001
+            warn(self, f"读取资料库失败：{exc}")
+            return
+        if not total:
+            info(self, "该范围内没有文档可纠错。")
+            return
+        kind = self.kind_combo.currentData() or ""
+        self.btn_preview.setEnabled(False)
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
+        self.lbl.setText(f"正在扫描 {total} 篇文档…")
+        self._scan_worker = _BatchScanWorker(scope, self.sp_conf.value(),
+                                             (kind,) if kind else (), parent=self)
+        self._scan_worker.progress.connect(self._on_progress)
+        self._scan_worker.done.connect(self._on_preview_done)
+        self._scan_worker.failed.connect(self._on_failed)
+        self._scan_worker.start()
+
+    def _on_progress(self, i: int, total: int):
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(i, total))
+
+    def _reset_buttons(self):
+        self.progress.setVisible(False)
+        self.btn_preview.setEnabled(True)
+
+    def _on_failed(self, msg: str):
+        self._reset_buttons()
+        self.lbl.setText("已中止，未改动任何文档。")
+        warn(self, f"批量纠错失败：{msg}")
+
+    def _on_preview_done(self, res):
+        self._reset_buttons()
+        self._plans = list(res.plans)
+        self._fill_tree(res)
+        hits = res.hit_total
+        self.btn_apply.setEnabled(hits > 0)
+        text = (f"预览完成：扫描 {res.scanned} 篇，{len(self._plans)} 篇有命中，"
+                f"共 {hits} 处。")
+        if res.failures:
+            text += f"（{len(res.failures)} 篇扫描失败，已跳过）"
+        self.lbl.setText(text)
+        if not hits:
+            info(self, "在当前范围与筛选条件下没有可批量修正的命中。"
+                       "\n可试着降低置信度门槛或换类别。")
+        elif res.failures:
+            warn(self, "以下文档扫描失败（不影响其余）：\n"
+                       + _brief_failures(res.failures))
+
+    def _fill_tree(self, res):
+        self.tree.clear()
+        shown_docs = shown_hits = 0
+        for plan in res.plans:
+            if shown_docs >= _MAX_SHOW_DOCS or shown_hits >= _MAX_SHOW_HITS:
+                break
+            top = QTreeWidgetItem([f"{plan.title}（{plan.count} 处）", "", "", ""])
+            top.setData(0, Qt.UserRole, plan.doc_id)
+            self.tree.addTopLevelItem(top)
+            shown_docs += 1
+            for h in plan.hits:
+                if shown_hits >= _MAX_SHOW_HITS:
+                    break
+                child = QTreeWidgetItem([h.label, f"{h.start}-{h.end}",
+                                         h.category, f"{h.confidence:.2f}"])
+                child.setToolTip(0, f"上下文：…{h.context}…")
+                top.addChild(child)
+                shown_hits += 1
+            if shown_docs <= 20:
+                top.setExpanded(True)
+        if len(res.plans) > shown_docs:
+            self.tree.addTopLevelItem(QTreeWidgetItem(
+                [f"…另有 {len(res.plans) - shown_docs} 篇命中未显示"
+                 f"（执行时按全部 {res.hit_total} 处处理）", "", "", ""]))
+
+    # ------------------------------------------------------------ 执行
+    def _apply(self):
+        if not self._plans:
+            warn(self, "请先「预览命中」，确认要改哪些地方。")
+            return
+        hits = sum(p.count for p in self._plans)
+        if not ask(self, f"将修改 {len(self._plans)} 篇文档、共 {hits} 处，"
+                         f"直接写入资料库（每篇改前会留一份历史快照）。\n确定执行？"):
+            return
+        self.btn_preview.setEnabled(False)
+        self.btn_apply.setEnabled(False)
+        self.progress.setRange(0, len(self._plans))
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
+        self.lbl.setText("正在写回资料库…")
+        self._apply_worker = _BatchApplyWorker(self._plans, parent=self)
+        self._apply_worker.progress.connect(self._on_progress)
+        self._apply_worker.done.connect(self._on_apply_done)
+        self._apply_worker.failed.connect(self._on_failed)
+        self._apply_worker.start()
+
+    def _on_apply_done(self, res):
+        self._reset_buttons()
+        self._plans = []
+        self.tree.clear()
+        lines = [f"批量纠错完成：{len(res.applied)} 篇文档、{res.changes} 处已写回，"
+                 f"全文索引已同步。"]
+        if res.skipped:
+            lines.append(f"另有 {res.skipped} 处因文档已变化未能替换，可重新预览。")
+        if res.failures:
+            lines.append(f"{len(res.failures)} 篇失败（不影响其余）：")
+            lines.append(_brief_failures(res.failures))
+        self.lbl.setText(lines[0])
+        info(self, "\n".join(lines))
+        self.accept()
+
+
 # ================================================================ 历史快照
 class SnapshotsDialog(QDialog):
     """历史版本：列表 + 差异预览 + 回滚。"""
@@ -626,6 +911,15 @@ class SecurityDialog(QDialog):
         btn_fts = QPushButton("重建全文索引")
         btn_fts.clicked.connect(self._rebuild_fts)
         v.addWidget(btn_fts, 0, Qt.AlignLeft)
+        self.lbl_attach = QLabel(
+            "彻底删除材料时若附件正被其他程序占用，数据目录里会留下无人引用的"
+            "附件文件，可在此清理。")
+        self.lbl_attach.setWordWrap(True)
+        self.lbl_attach.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_attach)
+        btn_sweep = QPushButton("清理无引用的附件文件")
+        btn_sweep.clicked.connect(self._sweep_attachments)
+        v.addWidget(btn_sweep, 0, Qt.AlignLeft)
 
         v.addStretch(1)
         btn_close = QPushButton("关闭")
@@ -658,6 +952,22 @@ class SecurityDialog(QDialog):
         counts = dao_mod.rebuild_fts()
         self.lbl_fts.setText(
             f"索引已重建：资料 {counts['documents']} 篇、句式 {counts['phrases']} 条。")
+
+    def _sweep_attachments(self):
+        """清掉彻底删除材料时残留（文件被占用没删掉）的孤儿附件。"""
+        if not ask(self, "清理数据目录里已没有任何材料引用的附件文件？\n"
+                         "在用的附件不受影响。"):
+            return
+        from ..core import attachments
+        try:
+            n = attachments.sweep_orphans()
+        except Exception as exc:  # noqa: BLE001
+            warn(self, f"清理失败：{exc}")
+            return
+        self.lbl_attach.setText(
+            f"已清理 {n} 个无引用的附件文件。" if n else "没有需要清理的附件文件。")
+        info(self, f"已清理 {n} 个无引用的附件文件。" if n
+             else "没有需要清理的附件文件。")
 
     def _set_pw(self):
         pw = self.ed_pw.text()

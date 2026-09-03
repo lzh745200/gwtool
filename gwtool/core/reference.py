@@ -77,9 +77,11 @@ def lookup(query: str, limit_each: int = 12) -> list[ReferenceItem]:
 
 
 def _document_tags() -> dict[int, str]:
-    """id -> tags（轻量查询，供标签命中加权）。"""
+    """id -> tags（轻量查询，供标签命中加权）。回收站里的文档不参与。"""
     from ..db.connection import get_conn
-    rows = get_conn().execute("SELECT id, tags FROM documents WHERE tags<>''").fetchall()
+    rows = get_conn().execute(
+        "SELECT id, tags FROM documents WHERE tags<>'' AND deleted_time=''"
+    ).fetchall()
     return {int(r["id"]): r["tags"] for r in rows}
 
 

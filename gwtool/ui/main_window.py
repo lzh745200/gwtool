@@ -15,11 +15,13 @@ from ..paths import db_path, export_dir
 from .compile_wizard import CompileWizard
 from .dict_manager import DictManager
 from .editor_panel import EditorPanel
-from .feature_dialogs import (BulkReplaceDialog, InspectorDialog,
-                              SecurityDialog, SimilarityDialog,
-                              SkeletonDialog, SnapshotsDialog)
+from .feature_dialogs import (BatchCorrectDialog, BulkReplaceDialog,
+                              InspectorDialog, SecurityDialog,
+                              SimilarityDialog, SkeletonDialog,
+                              SnapshotsDialog)
 from .import_dialog import ImportDialog
 from .library_panel import LibraryPanel
+from .material_dialogs import RecycleBinDialog
 from .reference_panel import ReferencePanel
 from .registry_dialog import RegistryDialog
 from .template_editor import TemplateEditor
@@ -140,6 +142,7 @@ class MainWindow(QMainWindow):
         m_tool.addAction("一键排版微调", lambda: self.editor.run_formatter())
         m_tool.addSeparator()
         m_tool.addAction("跨文档批量查找替换…", self.open_bulk_replace)
+        m_tool.addAction("按分类批量纠错…", self.open_batch_correct)
         m_tool.addAction("相似文档查重…", self.open_similarity)
         m_tool.addAction("文档对比…", self.open_compare)
         m_tool.addSeparator()
@@ -147,6 +150,8 @@ class MainWindow(QMainWindow):
         m_tool.addAction("词典与词库管理…", self.open_dict_manager)
         m_tool.addAction("备份…", self._do_backup)
         m_tool.addAction("恢复…", self._do_restore)
+        m_tool.addSeparator()
+        m_tool.addAction("回收站…", self.open_recycle_bin)
 
         m_tpl = self.menuBar().addMenu("模板(&P)")
         m_tpl.addAction("模板管理…", self.open_template_editor)
@@ -279,6 +284,20 @@ class MainWindow(QMainWindow):
         dlg.exec()
         self.library.reload()
         self.editor.update_preview()
+
+    def open_batch_correct(self):
+        """按分类批量纠错：先预览命中，用户确认后才写回（后台线程执行）。"""
+        dlg = BatchCorrectDialog(self.library.current_category(), self)
+        dlg.exec()
+        self.library.reload()
+        self.editor.update_preview()
+
+    def open_recycle_bin(self):
+        """回收站：恢复或彻底删除已删除的材料。"""
+        dlg = RecycleBinDialog(self)
+        dlg.exec()
+        self.library.reload()
+        self._update_status()
 
     def open_similarity(self):
         dlg = SimilarityDialog(self)

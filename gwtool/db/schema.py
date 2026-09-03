@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级；
 # 语句要求幂等容错（新库建表已含新列时 ALTER 会重复报错，由调用方忽略）。
@@ -19,6 +19,13 @@ MIGRATIONS = {
     2: [
         "ALTER TABLE documents ADD COLUMN simhash INTEGER",
         "CREATE INDEX IF NOT EXISTS idx_documents_simhash ON documents(simhash)",
+    ],
+    # v3：回收站（软删除）。新列两处都要写 —— TABLES 的 CREATE TABLE 供全新库，
+    # 这里供老库升级；而依赖新列的索引只能放这里（本循环对 OperationalError 容错，
+    # 新库重复 ALTER 报 duplicate column 属预期；TABLES 循环不容错，老库会当场崩）。
+    3: [
+        "ALTER TABLE documents ADD COLUMN deleted_time TEXT NOT NULL DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted_time)",
     ],
 }
 
@@ -45,10 +52,15 @@ TABLES = [
         word_count INTEGER NOT NULL DEFAULT 0,
         import_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-        simhash INTEGER
+        simhash INTEGER,
+        deleted_time TEXT NOT NULL DEFAULT ''
     )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_hash ON documents(text_hash)""",
     """CREATE INDEX IF NOT EXISTS idx_documents_cat ON documents(category_id)""",
+    # 注意：回收站索引 idx_documents_deleted 只能写在 MIGRATIONS[3] 里，不能放这儿。
+    # TABLES 在迁移之前执行且不容错，老库此时还没有 deleted_time 列，
+    # 在这里建索引会抛 "no such column: deleted_time"，用户升级即启动崩溃
+    # （与 idx_documents_simhash 同理，它也只在 MIGRATIONS[2] 里）。
     # 词典（词条、拼音、释义、例句）
     """CREATE TABLE IF NOT EXISTS dictionary(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +145,17 @@ TABLES = [
     """CREATE INDEX IF NOT EXISTS idx_dispatch_no ON dispatch_register(doc_no)""",
     """CREATE INDEX IF NOT EXISTS idx_dispatch_sign_date ON dispatch_register(sign_date)""",
     """CREATE INDEX IF NOT EXISTS idx_dispatch_org ON dispatch_register(org)""",
+    # 文档附件：文件本体复制进数据目录 attachments/ 子目录，库里只存相对路径
+    # （便携模式与备份恢复后仍能按数据目录重新定位，不依赖用户原始绝对路径）
+    """CREATE TABLE IF NOT EXISTS attachments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id INTEGER NOT NULL DEFAULT 0,
+        file_name TEXT NOT NULL DEFAULT '',
+        stored_path TEXT NOT NULL DEFAULT '',
+        size INTEGER NOT NULL DEFAULT 0,
+        added_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_attachments_doc ON attachments(doc_id, id)""",
 ]
 
 # FTS5 虚拟表：ref_id 指向源表 id；tokenized 为 jieba 分词后文本

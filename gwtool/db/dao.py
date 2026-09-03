@@ -42,6 +42,7 @@ class Document:
     import_time: str = ""
     updated_time: str = ""
     simhash: int | None = None
+    deleted_time: str = ""      # 非空 = 在回收站里（软删除时间）
 
 
 @dataclass
@@ -107,6 +108,21 @@ class Dispatch:
     updated_time: str = ""
 
 
+@dataclass
+class Attachment:
+    """一条文档附件记录。
+
+    stored_path 存数据目录内的相对路径（如 attachments/xxx.pdf）而非用户选的
+    原始绝对路径：附件本体已复制进数据目录，备份/恢复与便携模式换机器后仍能定位。
+    """
+    id: int = 0
+    doc_id: int = 0
+    file_name: str = ""         # 原始文件名（列表里给用户看的名字）
+    stored_path: str = ""       # 数据目录内相对路径（兼容历史绝对路径）
+    size: int = 0               # 字节
+    added_time: str = ""
+
+
 # ---------------------------------------------------------------- categories
 def add_category(name: str, parent_id: int = 0) -> int:
     conn = dbconn.get_conn()
@@ -161,14 +177,22 @@ def _fts_update_documents(doc_id: int, title: str, content: str) -> None:
 
 
 def add_document(doc: Document) -> int:
-    """插入文档；重复内容（hash 相同）返回 -1。"""
+    """插入文档；重复内容（hash 相同）返回 -1。
+
+    特例：重复的那篇正在回收站里时，视为用户重新导入同一份材料 —— 直接把它
+    恢复出来并返回其 id。text_hash 上有唯一索引，不恢复就再也无法入库，
+    用户会看到"提示重复却在资料库里找不到"的怪现象。
+    """
     conn = dbconn.get_conn()
     if not doc.text_hash:
         doc.text_hash = text_hash(doc.content_text)
     dup = conn.execute(
-        "SELECT id FROM documents WHERE text_hash=?", (doc.text_hash,)).fetchone()
+        "SELECT id,deleted_time FROM documents WHERE text_hash=?",
+        (doc.text_hash,)).fetchone()
     if dup:
-        return -1
+        if not dup["deleted_time"]:
+            return -1
+        return _restore_deleted(conn, int(dup["id"]), category_id=doc.category_id)
     if not doc.word_count:
         doc.word_count = len(doc.content_text)
     if doc.simhash is None:
@@ -217,30 +241,110 @@ def update_document_meta(doc_id: int, tags: str | None = None,
 
 
 def delete_document(doc_id: int) -> None:
+    """软删除：移入回收站（写 deleted_time），并摘掉 FTS 行使其不再被检索命中。
+
+    正文、历史快照与附件都原样保留，restore_document 可完整恢复；
+    真正删行见 purge_document（附件磁盘文件由 core.attachments 清理）。
+    """
     conn = dbconn.get_conn()
-    conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+    conn.execute(
+        "UPDATE documents SET deleted_time=? WHERE id=? AND deleted_time=''",
+        (now(), doc_id))
     conn.execute("DELETE FROM documents_fts WHERE ref_id=?", (doc_id,))
-    # 级联清理历史快照，避免孤儿快照无限累积
-    conn.execute("DELETE FROM snapshots WHERE doc_id=?", (doc_id,))
     conn.commit()
 
 
+def _restore_deleted(conn, doc_id: int, category_id: int = 0) -> int:
+    """把回收站里的文档恢复出来（调用方持有连接，负责语义上的分类归属）。"""
+    conn.execute("UPDATE documents SET deleted_time='', updated_time=? WHERE id=?",
+                 (now(), doc_id))
+    if category_id:
+        conn.execute("UPDATE documents SET category_id=? WHERE id=?",
+                     (category_id, doc_id))
+    row = conn.execute(
+        "SELECT title,content_text FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if row:
+        # 软删除时摘掉了 FTS 行，恢复必须补回，否则"恢复后搜不到"
+        _fts_update_documents(doc_id, row["title"], row["content_text"])
+    conn.commit()
+    return doc_id
+
+
+def restore_document(doc_id: int) -> bool:
+    """从回收站恢复一篇文档；返回是否确有恢复（未在回收站/不存在则 False）。"""
+    conn = dbconn.get_conn()
+    row = conn.execute(
+        "SELECT deleted_time FROM documents WHERE id=?", (doc_id,)).fetchone()
+    if row is None or not row["deleted_time"]:
+        return False
+    _restore_deleted(conn, doc_id)
+    return True
+
+
+def purge_document(doc_id: int) -> None:
+    """彻底删除（不可恢复）：真删文档行、FTS 行、历史快照与附件记录。
+
+    附件的磁盘文件不在这里删（DAO 不做文件 IO）——UI 一律走
+    core.attachments.purge_document，它先删文件再调本函数。
+    """
+    conn = dbconn.get_conn()
+    conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+    conn.execute("DELETE FROM documents_fts WHERE ref_id=?", (doc_id,))
+    # 级联清理历史快照与附件记录，避免孤儿数据无限累积
+    conn.execute("DELETE FROM snapshots WHERE doc_id=?", (doc_id,))
+    conn.execute("DELETE FROM attachments WHERE doc_id=?", (doc_id,))
+    conn.commit()
+
+
+def list_deleted_documents(limit: int = 5000) -> list[Document]:
+    """回收站列表：按删除时间倒序（走 idx_documents_deleted）。"""
+    conn = dbconn.get_conn()
+    cols = ("id,title,tags,category_id,file_type,word_count,import_time,"
+            "updated_time,deleted_time")
+    rows = conn.execute(
+        f"SELECT {cols} FROM documents WHERE deleted_time<>''"
+        " ORDER BY deleted_time DESC,id DESC LIMIT ?", (limit,)).fetchall()
+    return [Document(**dict(r)) for r in rows]
+
+
+def count_deleted_documents() -> int:
+    return int(dbconn.get_conn().execute(
+        "SELECT count(*) FROM documents WHERE deleted_time<>''").fetchone()[0])
+
+
+def deleted_document_ids() -> list[int]:
+    """回收站内全部文档 id（清空回收站时先取 id 再逐个彻底删除）。"""
+    rows = dbconn.get_conn().execute(
+        "SELECT id FROM documents WHERE deleted_time<>''").fetchall()
+    return [int(r["id"]) for r in rows]
+
+
 def get_document(doc_id: int) -> Document | None:
+    """按 id 取单篇（含回收站里的：恢复/彻底删除/附件管理都要能取到）。
+
+    需要"只看未删除"的列表请用 list_documents。
+    """
     row = dbconn.get_conn().execute(
         "SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
     return Document(**dict(row)) if row else None
 
 
 def list_documents(category_id: int | None = None) -> list[Document]:
-    """category_id=None 返回全部（标题列表用，不含正文以省内存）。"""
+    """category_id=None 返回全部（标题列表用，不含正文以省内存）。
+
+    回收站里的文档（deleted_time 非空）一律不返回 —— 这是软删除语义的关键，
+    资料库列表、汇编选料、查重、批量替换都走本函数。
+    """
     conn = dbconn.get_conn()
-    cols = "id,title,tags,category_id,file_type,word_count,import_time,updated_time"
+    cols = ("id,title,tags,category_id,file_type,word_count,import_time,"
+            "updated_time,deleted_time")
     if category_id is None:
         rows = conn.execute(
-            f"SELECT {cols} FROM documents ORDER BY import_time DESC,id DESC").fetchall()
+            f"SELECT {cols} FROM documents WHERE deleted_time=''"
+            " ORDER BY import_time DESC,id DESC").fetchall()
     else:
         rows = conn.execute(
-            f"SELECT {cols} FROM documents WHERE category_id=?"
+            f"SELECT {cols} FROM documents WHERE deleted_time='' AND category_id=?"
             " ORDER BY import_time DESC,id DESC", (category_id,)).fetchall()
     return [Document(**dict(r)) for r in rows]
 
@@ -282,16 +386,59 @@ def bulk_update_tags(doc_ids: list[int], add: tuple[str, ...] = (),
     return changed
 
 
-def count_documents() -> int:
-    return int(dbconn.get_conn().execute("SELECT count(*) FROM documents").fetchone()[0])
+def count_documents(category_id: int | None = None) -> int:
+    """在库文档数（不含回收站）。category_id 非 None 时只数该分类。"""
+    conn = dbconn.get_conn()
+    if category_id is None:
+        return int(conn.execute(
+            "SELECT count(*) FROM documents WHERE deleted_time=''").fetchone()[0])
+    return int(conn.execute(
+        "SELECT count(*) FROM documents WHERE deleted_time='' AND category_id=?",
+        (category_id,)).fetchone()[0])
 
 
 def all_simhashes() -> dict[int, int]:
-    """全库已持久化的 SimHash（查重粗筛用，避免每次全库重算）。"""
+    """全库已持久化的 SimHash（查重粗筛用，避免每次全库重算）。
+
+    回收站里的文档不参与查重。
+    """
     rows = dbconn.get_conn().execute(
-        "SELECT id, simhash FROM documents WHERE simhash IS NOT NULL").fetchall()
+        "SELECT id, simhash FROM documents"
+        " WHERE simhash IS NOT NULL AND deleted_time=''").fetchall()
     from ..core.simhash import from_db
     return {int(r["id"]): from_db(int(r["simhash"])) for r in rows}
+
+
+def iter_documents_content(category_id: int | None = None,
+                           doc_ids: list[int] | None = None,
+                           chunk: int = 200):
+    """惰性产出未删除文档的 {id,title,content_text,blocks_json}。
+
+    批量处理（批量纠错、批量替换）用它逐篇取正文：既不把全库正文一次性读进
+    内存，也不必对每篇再发一次 get_document（N+1 查询）。
+    category_id 走 idx_documents_cat，doc_ids 按主键分片参数化查询。
+    """
+    conn = dbconn.get_conn()
+    cols = "id,title,content_text,blocks_json"
+    if doc_ids is not None:
+        ids = [int(i) for i in doc_ids]
+        for i in range(0, len(ids), max(1, chunk)):
+            part = ids[i:i + max(1, chunk)]
+            marks = ",".join("?" * len(part))
+            for row in conn.execute(
+                    f"SELECT {cols} FROM documents WHERE deleted_time=''"
+                    f" AND id IN ({marks})", part):
+                yield dict(row)
+        return
+    if category_id is None:
+        sql = f"SELECT {cols} FROM documents WHERE deleted_time='' ORDER BY id"
+        params: tuple = ()
+    else:
+        sql = (f"SELECT {cols} FROM documents WHERE deleted_time=''"
+               " AND category_id=? ORDER BY id")
+        params = (category_id,)
+    for row in conn.execute(sql, params):
+        yield dict(row)
 
 
 def rebuild_fts() -> dict[str, int]:
@@ -305,7 +452,10 @@ def rebuild_fts() -> dict[str, int]:
     from . import tokenize as tok
     counts: dict[str, int] = {}
     conn.execute("DELETE FROM documents_fts")
-    rows = conn.execute("SELECT id, title, content_text FROM documents").fetchall()
+    # 回收站里的文档不进索引：否则重建一次就把软删除的材料全部变回可检索
+    rows = conn.execute(
+        "SELECT id, title, content_text FROM documents WHERE deleted_time=''"
+    ).fetchall()
     for r in rows:
         conn.execute(
             "INSERT INTO documents_fts(title,tokenized,ref_id) VALUES(?,?,?)",
@@ -658,11 +808,14 @@ def _fts_search(fts_table: str, src_table: str, query: str, limit: int) -> list[
     conn = dbconn.get_conn()
     try:
         if src_table == "documents":
+            # 追加 deleted_time='' 是道保险：软删除时已摘掉 FTS 行，但外部改库
+            # 或恢复旧备份可能留下残行，不能让回收站里的材料被检索命中
             sql = (f"SELECT f.ref_id AS ref_id, bm25({fts_table}) AS rank,"
                    f" d.title AS title,"
                    f" snippet({fts_table},1,'【','】','…',16) AS snip"
                    f" FROM {fts_table} f JOIN {src_table} d ON d.id=f.ref_id"
-                   f" WHERE {fts_table} MATCH ? ORDER BY rank LIMIT ?")
+                   f" WHERE {fts_table} MATCH ? AND d.deleted_time=''"
+                   f" ORDER BY rank LIMIT ?")
         elif src_table == "dictionary":
             sql = (f"SELECT f.ref_id AS ref_id, bm25({fts_table}) AS rank,"
                    f" d.word AS title,"
@@ -680,6 +833,85 @@ def _fts_search(fts_table: str, src_table: str, query: str, limit: int) -> list[
         return []
     return [SearchResult(src_table, int(r["ref_id"]), r["title"], r["snip"], float(r["rank"]))
             for r in rows]
+
+
+# ---------------------------------------------------------------- attachments
+# 只管数据库行；附件文件的复制/删除/定位在 core.attachments（DAO 不做文件 IO）。
+def add_attachment(doc_id: int, file_name: str, stored_path: str,
+                   size: int = 0) -> int:
+    """登记一条附件记录，返回附件 id。
+
+    stored_path 传数据目录内的相对路径（core.attachments.add 已把文件复制进去）。
+    """
+    conn = dbconn.get_conn()
+    cur = conn.execute(
+        "INSERT INTO attachments(doc_id,file_name,stored_path,size,added_time)"
+        " VALUES(?,?,?,?,?)",
+        (int(doc_id), file_name, stored_path, int(size), now()))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_attachment(attachment_id: int) -> Attachment | None:
+    row = dbconn.get_conn().execute(
+        "SELECT * FROM attachments WHERE id=?", (attachment_id,)).fetchone()
+    return Attachment(**dict(row)) if row else None
+
+
+def list_attachments(doc_id: int) -> list[Attachment]:
+    """某文档的附件，按添加先后（走 idx_attachments_doc）。"""
+    rows = dbconn.get_conn().execute(
+        "SELECT * FROM attachments WHERE doc_id=? ORDER BY id", (doc_id,)).fetchall()
+    return [Attachment(**dict(r)) for r in rows]
+
+
+def list_all_attachments(limit: int = 100000) -> list[Attachment]:
+    """全库附件记录（维护用：清理无人引用的孤儿文件）。"""
+    rows = dbconn.get_conn().execute(
+        "SELECT * FROM attachments ORDER BY id LIMIT ?", (limit,)).fetchall()
+    return [Attachment(**dict(r)) for r in rows]
+
+
+def delete_attachment(attachment_id: int) -> None:
+    """删除单条附件记录（磁盘文件由 core.attachments.remove 先删）。"""
+    conn = dbconn.get_conn()
+    conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+    conn.commit()
+
+
+def delete_attachments_of(doc_id: int) -> int:
+    """删除某文档的全部附件记录，返回条数。"""
+    conn = dbconn.get_conn()
+    cur = conn.execute("DELETE FROM attachments WHERE doc_id=?", (doc_id,))
+    conn.commit()
+    return int(cur.rowcount)
+
+
+def count_attachments(doc_id: int | None = None) -> int:
+    conn = dbconn.get_conn()
+    if doc_id is None:
+        return int(conn.execute("SELECT count(*) FROM attachments").fetchone()[0])
+    return int(conn.execute(
+        "SELECT count(*) FROM attachments WHERE doc_id=?", (doc_id,)).fetchone()[0])
+
+
+def attachment_counts(doc_ids: list[int]) -> dict[int, int]:
+    """多篇文档各自的附件数：单条 IN 查询搞定，避免逐篇 count 的 N+1。"""
+    ids = [int(i) for i in doc_ids]
+    if not ids:
+        return {}
+    conn = dbconn.get_conn()
+    out: dict[int, int] = {}
+    chunk = 400
+    for i in range(0, len(ids), chunk):
+        part = ids[i:i + chunk]
+        marks = ",".join("?" * len(part))
+        rows = conn.execute(
+            f"SELECT doc_id, count(*) AS n FROM attachments"
+            f" WHERE doc_id IN ({marks}) GROUP BY doc_id", part).fetchall()
+        for r in rows:
+            out[int(r["doc_id"])] = int(r["n"])
+    return out
 
 
 # ------------------------------------------------------- dispatch_register

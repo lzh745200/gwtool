@@ -5,8 +5,9 @@ import sqlite3
 
 
 def test_migration_v1_to_v2(tmp_path):
-    """老库（user_version=1）启动时自动迁移并做迁移前备份。"""
+    """老库（user_version=1）启动时自动迁移到当前版本并做迁移前备份。"""
     from gwtool.db import connection as dbconn
+    from gwtool.db.schema import SCHEMA_VERSION
     dbf = tmp_path / "old.db"
     conn = sqlite3.connect(str(dbf))
     conn.executescript(
@@ -26,10 +27,11 @@ def test_migration_v1_to_v2(tmp_path):
     dbconn.configure(dbf)
     try:
         from gwtool.db.connection import get_conn
-        assert get_conn().execute("PRAGMA user_version").fetchone()[0] == 2
+        assert get_conn().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         cols = {r[1] for r in get_conn().execute(
             "PRAGMA table_info(documents)").fetchall()}
         assert "simhash" in cols
+        assert "deleted_time" in cols, "v3 迁移应补上回收站标记列"
         assert list((tmp_path / "backups").glob("*_premigrate_v1.zip")), \
             "迁移前应有原始库备份"
         from gwtool.db import dao
@@ -40,7 +42,8 @@ def test_migration_v1_to_v2(tmp_path):
 
 def test_fresh_db_schema_version(tmp_db):
     from gwtool.db.connection import get_conn
-    assert get_conn().execute("PRAGMA user_version").fetchone()[0] == 2
+    from gwtool.db.schema import SCHEMA_VERSION
+    assert get_conn().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_simhash_persisted(tmp_db):

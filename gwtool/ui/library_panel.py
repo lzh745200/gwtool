@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""左侧资料库面板：分类树 + 标签 + 文档列表 + 全文检索。"""
+"""左侧资料库面板：分类树 + 标签 + 文档列表 + 全文检索 + 附件/回收站入口。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
 
 from ..db import dao
 from ..ui.widgets import ask, info, warn
+from .material_dialogs import AttachmentDialog, RecycleBinDialog
 
 
 class LibraryPanel(QWidget):
@@ -63,6 +64,9 @@ class LibraryPanel(QWidget):
         self.btn_import.clicked.connect(self._import)
         self.btn_all = QPushButton("全部文档")
         self.btn_all.clicked.connect(self._show_all)
+        self.btn_bin = QPushButton("回收站")
+        self.btn_bin.setToolTip("删除的材料先进回收站，可在此恢复或彻底删除")
+        self.btn_bin.clicked.connect(self.open_recycle_bin)
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["按导入时间", "按标题", "按字数", "按最近更新"])
         self.sort_combo.setToolTip("列表排序方式")
@@ -72,6 +76,7 @@ class LibraryPanel(QWidget):
         self.count_label = QLabel("0 篇")
         bottom.addWidget(self.btn_import)
         bottom.addWidget(self.btn_all)
+        bottom.addWidget(self.btn_bin)
         bottom.addStretch(1)
         bottom.addWidget(QLabel("排序"))
         bottom.addWidget(self.sort_combo)
@@ -150,8 +155,14 @@ class LibraryPanel(QWidget):
             docs.sort(key=lambda d: (d.updated_time or d.import_time or ""),
                       reverse=True)
         self.doc_list.clear()
+        try:
+            att_counts = dao.attachment_counts([d.id for d in docs])
+        except Exception:  # noqa: BLE001  附件数只是装饰，取不到不影响列表
+            att_counts = {}
         for d in docs:
             label = f"{d.title}    [{d.file_type or '文本'}] {d.word_count}字"
+            if att_counts.get(d.id):
+                label += f"  附件{att_counts[d.id]}"
             if d.tags:
                 label += f"  #{d.tags.replace(',', ' #').replace('，', ' #')}"
             item = QListWidgetItem(label)
@@ -222,12 +233,14 @@ class LibraryPanel(QWidget):
             menu.addAction("移动到分类…", self._move_selected)
             menu.addAction("编辑标签…", self._tag_selected)
             menu.addAction("分类建议…", self._suggest_category)
+            menu.addAction("附件…", self._open_attachments)
             menu.addSeparator()
         menu.addAction("批量添加标签…", self._bulk_add_tags)
         menu.addAction("批量移除标签…", self._bulk_remove_tags)
         menu.addSeparator()
         menu.addAction("导出为 TXT", self._export_selected_txt)
-        menu.addAction("删除", self._delete_selected)
+        menu.addAction("回收站…", self.open_recycle_bin)
+        menu.addAction("删除（移入回收站）", self._delete_selected)
         menu.exec(self.doc_list.mapToGlobal(pos))
 
     def _bulk_add_tags(self):
@@ -338,14 +351,48 @@ class LibraryPanel(QWidget):
         if items:
             self.open_document.emit(items[0].data(Qt.UserRole))
 
+    def _open_attachments(self):
+        """附件管理：文件复制进数据目录，随备份与便携模式一起走。"""
+        did = self._single_doc()
+        if not did:
+            warn(self, "请先选中一篇材料（附件挂在单篇材料下）。")
+            return
+        d = dao.get_document(did)
+        try:
+            dlg = AttachmentDialog(did, self, doc_title=d.title if d else "")
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            warn(self, f"打开附件管理失败：{exc}")
+            return
+        self._reload_docs()          # 列表上的「附件N」标记要跟着变
+
+    def open_recycle_bin(self):
+        """回收站：查看、恢复、彻底删除已删除的材料。"""
+        try:
+            dlg = RecycleBinDialog(self)
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            warn(self, f"打开回收站失败：{exc}")
+            return
+        self.reload()                # 可能恢复了材料，分类计数一并刷新
+
     def _delete_selected(self):
         items = self.doc_list.selectedItems()
         if not items:
             return
-        if ask(self, f"删除选中的 {len(items)} 篇材料？"):
-            for item in items:
+        if not ask(self, f"把选中的 {len(items)} 篇材料移入回收站？\n"
+                         "移入后不再出现在列表、计数与全文检索里，"
+                         "可在「回收站」中恢复；彻底删除才会真删数据与附件。"):
+            return
+        failed: list[str] = []
+        for item in items:
+            try:
                 dao.delete_document(item.data(Qt.UserRole))
-            self._reload_docs()
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{item.text()}：{exc}")
+        self._reload_docs()
+        if failed:
+            warn(self, "以下材料未能移入回收站：\n" + "\n".join(failed[:5]))
 
     def _export_selected_txt(self):
         from PySide6.QtWidgets import QFileDialog

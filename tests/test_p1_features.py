@@ -136,14 +136,17 @@ def test_backup_restore_templates(tmp_db):
     assert any(t["name"] == "自定义模板A" for t in dao.list_templates())
 
 
-def test_delete_document_cascades_snapshots(tmp_db):
-    """删除文档须级联清理其历史快照。"""
+def test_purge_document_cascades_snapshots(tmp_db):
+    """彻底删除须级联清理历史快照；软删除（回收站）必须保留，否则恢复后历史全丢。"""
     from gwtool.db import dao
     did = dao.add_document(dao.Document(title="x", content_text="内容"))
     dao.add_snapshot(did, "x", "内容", reason="auto")
     dao.add_snapshot(did, "x", "内容2", reason="auto")
     assert len(dao.list_snapshots(did)) == 2
-    dao.delete_document(did)
+    dao.delete_document(did)                  # 移入回收站
+    assert len(dao.list_snapshots(did)) == 2, "软删除不应清掉历史快照"
+    assert dao.restore_document(did) is True
+    dao.purge_document(did)                   # 彻底删除
     assert dao.list_snapshots(did) == []
 
 
