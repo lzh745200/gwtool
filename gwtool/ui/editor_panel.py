@@ -16,7 +16,7 @@ from ..core import toolbox
 from ..core.model import DocTree, HEADING, PARAGRAPH
 
 _HEADING_RE = re.compile(
-    r"^([一二三四五六七八九十]+、|（[一二三四五六七八九十]+）|\d{1,2}[、..]|"
+    r"^([一二三四五六七八九十]+、|（[一二三四五六七八九十]+）|\d{1,2}[、．.](?!\d)|"
     r"第[一二三四五六七八九十百\d]+[章节条])")
 
 
@@ -89,7 +89,7 @@ class EditorPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(2)
         outer.addWidget(self._build_find_bar())
-        ev = QHBoxLayout(edit_page)
+        ev = QHBoxLayout()
         ev.setContentsMargins(0, 0, 0, 0)
         ev.addWidget(self.outline)
         ev.addWidget(self.editor, 1)

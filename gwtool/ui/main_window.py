@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextCursor
-from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel, QMainWindow,
-                               QSplitter, QStatusBar)
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
+                               QMainWindow, QSplitter, QStatusBar)
 
 from .. import APP_NAME, __version__
 from ..core.backup import create_backup, list_backups, restore_backup
@@ -21,6 +21,7 @@ from .feature_dialogs import (BulkReplaceDialog, InspectorDialog,
 from .import_dialog import ImportDialog
 from .library_panel import LibraryPanel
 from .reference_panel import ReferencePanel
+from .registry_dialog import RegistryDialog
 from .template_editor import TemplateEditor
 from .widgets import ask, info, missing_official_fonts, warn
 
@@ -101,12 +102,17 @@ class MainWindow(QMainWindow):
         act_dict.triggered.connect(self.open_dict_manager)
         act_backup = QAction("备份/恢复", self)
         act_backup.triggered.connect(self.backup_restore)
+        act_registry = QAction("发文登记", self)
+        act_registry.setShortcut("Ctrl+R")
+        act_registry.setToolTip("发文登记台账：登记、查询、统计、导出")
+        act_registry.triggered.connect(self.open_registry)
         for a, ic in ((act_new, "new_doc"), (act_import, "import"),
                       (act_compile, "compile"), (act_tpl, "template"),
                       (act_check, "check"), (act_inspect, "inspect"),
                       (act_tts, "tts"), (act_clip, "clipboard"),
                       (act_fmt, "cleanup"), (act_compare, "compare"),
-                      (act_dict, "book"), (act_backup, "backup")):
+                      (act_dict, "book"), (act_backup, "backup"),
+                      (act_registry, "registry")):
             ic_obj = icons.icon(ic)
             if not ic_obj.isNull():
                 a.setIcon(ic_obj)
@@ -123,6 +129,7 @@ class MainWindow(QMainWindow):
         m_file.addAction("剪贴板入库", self.import_clipboard, "Ctrl+Shift+B")
         m_file.addAction("一键汇编…", self.open_compile_wizard, "Ctrl+N")
         m_file.addAction("保存到资料库", lambda: self.editor.save_to_db(), "Ctrl+S")
+        m_file.addAction("发文登记台账…", self.open_registry, "Ctrl+R")
         m_file.addSeparator()
         m_file.addAction("退出", self.close, "Ctrl+Q")
 
@@ -182,9 +189,14 @@ class MainWindow(QMainWindow):
         cur.insertText(replacement)
 
     # ------------------------------------------------ 功能入口
+    def open_registry(self):
+        """发文登记台账：登记、查询、统计、导出。"""
+        dlg = RegistryDialog(self)
+        dlg.exec()
+
     def new_skeleton_doc(self):
         dlg = SkeletonDialog(self)
-        if dlg.exec() != dlg.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         from ..db import dao
         text = dlg.draft_text
@@ -318,7 +330,7 @@ class MainWindow(QMainWindow):
             cur = ed.textCursor()
             cur.setPosition(pos)
             cur.setPosition(min(pos + len(sentence), len(ed.toPlainText())),
-                            Qt.KeepAnchor)
+                            QTextCursor.KeepAnchor)
             ed.setTextCursor(cur)
         self.status.showMessage(f"朗读中 {idx + 1}/{total}（F9 停止）")
 

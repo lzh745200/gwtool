@@ -1,9 +1,9 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.2.0**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.3.0**。
 
-核心解决四大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考。
+核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
 > 📖 新接触本项目？请先阅读 [项目文件结构说明.md](项目文件结构说明.md)——
 > 逐文件讲解每个目录/文件的职责、代码数据流与"我想改 X 该去哪个文件"速查表。
@@ -18,6 +18,7 @@
 | 新建公文 | 15 种法定文种骨架（决议/决定/命令/公报/公告/通告/意见/通知/通报/报告/请示/批复/议案/函/纪要），填要素即成稿 |
 | 文秘工具箱 | 编辑器右键：金额大写、日期大写、数字大写、简繁转换、全半角切换（OpenCC 离线词典） |
 | 一键汇编 | 三步向导：选材料（拖拽排序）→选模板→生成；支持批量模式（每份材料独立成文） |
+| 发文登记台账 | 发文字号/文种/主送抄送/密级/成文印发日期/拟核签人/印数全要素登记；按年度·机关·文种·状态组合筛选；统计报表（按文种/机关/状态分布 + 逐月发文量 + 占比）；导出 UTF-8-BOM CSV（Excel 直接可读）；发文字号自动取号（按机关代字与年度流水，避免撞号） |
 | 文字纠错 | 4 万+ 错别字/易混词、新华社禁用词、机构沿革对照、标点数字规则、持久忽略名单 |
 | 格式体检 | GB/T 9704 合规检查：标题编号链条、发文字号、成文日期、结束语与文种匹配、字体字号行距 |
 | 模板自定义 | 页边距、字体、行距、标题层级、红头、版记、页码、水印/密级标注，保存即生效 |
@@ -45,18 +46,29 @@
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python main.py        # 启动
-.venv\Scripts\python -m pytest tests\ -q   # 运行测试（87 个用例）
-python scripts\e2e_check.py         # 端到端自检（9 步全流程 PASS/FAIL 清单）
+.venv\Scripts\python -m pytest tests\ -q   # 运行测试（177 个用例）
+python scripts\e2e_check.py         # 端到端自检（14 步全流程 PASS/FAIL 清单）
+python scripts\smoke_dist.py dist\gwtool   # 打包后校验产物（需先打包）
 ```
 
 ## 持续集成（GitHub Actions）
 
 推送 `v*` 标签或手动触发 `.github/workflows/build.yml` 即自动完成：
 两个平台（windows-latest x64 与 ubuntu-24.04-arm **原生 ARM64** runner）各自
-执行 ruff 静态检查 → pytest 全量测试 → PyInstaller 打包（共用 `gwtool.spec`）→
+执行 ruff 静态检查 → pytest 全量测试 → **端到端自检**（`scripts/e2e_check.py`，
+14 步全流程）→ PyInstaller 打包（共用 `gwtool.spec`）→ **产物冒烟校验**
+（`scripts/smoke_dist.py`：资源齐全 + 真实启动 + 首启动种子导入）→
 产出 4 类安装包（Windows 便携 zip、Windows Inno Setup 安装 exe、ARM64 deb、
 ARM64 便携 tar.gz）并自动创建 GitHub Release（deb 内置 desktop 文件并声明
 Qt 运行库依赖，推荐安装 tesseract-ocr-chi-sim 以启用 OCR）。
+
+依赖已在 `requirements.txt` **精确锁定**。两处必须分档，不能一刀切：
+PySide6 分平台（Windows 6.11.2；Linux/麒麟 6.8.0.2，因官方 aarch64 wheel
+自 6.8.1 起要求 glibc≥2.39）；PyMuPDF/markdown/chardet/pytest 分 Python 版本
+（麒麟 CI 在 Debian 11 容器内用 Python 3.9 构建，为守住 glibc 2.31 底线不能
+升级容器，而这些包的新版已放弃 3.9）。**不要把这些约束改回浮动版本**：v1.2.1
+之所以出现"启用口令锁后程序启动即崩"，正是因为 `PySide6>=6.6` 让不同日期
+构建出的安装包行为不同，且没有任何环节报警。
 
 ## 打包发布
 
@@ -132,6 +144,13 @@ bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 标准字体，随 WPS/Office 常见安装）。软件不打包字体（版权原因）；若目标机缺
 字体，Word 中会以近似字体显示，文档内容与版式参数不受影响，装上字体后恢复。
 启动时会自动检测并提示缺失字体。
+
+**零中文字体兜底（v1.3.0 起）**：若目标机上一个中文字体都没有（麒麟最小安装、
+精简字体镜像等），程序启动时会自动注入 PyMuPDF 自带的 **Droid Sans Fallback**
+（Apache-2.0，随既有依赖离线分发，不额外装字体、不涉及版权问题）作为兜底。
+此前这种情况下界面与 PDF 的中文会**整篇渲染成空白且不报任何错**——用户拿到的
+是一份看起来正常的空文件，目录页码也全变成"—"。现已由 `pdfrender.ensure_cjk_font()`
+兜住，并有 `tests/test_pdf_cjk_font.py` 在 CI 中守住。
 
 ## 验收对照
 

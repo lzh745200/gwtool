@@ -137,8 +137,14 @@ class ImportDialog(QDialog):
             lambda i, total, p: (self.progress.setValue(i),
                                  self.setWindowTitle(f"导入中 {i}/{total}")))
         self._worker.finished_ok.connect(self._done)
-        self._worker.failed.connect(lambda msg: info(self, f"导入出错：{msg}"))
+        self._worker.failed.connect(self._failed)
         self._worker.start()
+
+    def _failed(self, msg: str):
+        # 必须复位按钮与进度条，否则一次失败后对话框永久卡在“导入中”，无法重试
+        self.btn_start.setEnabled(True)
+        self.progress.setVisible(False)
+        info(self, f"导入出错：{msg}")
 
     def _done(self, ok: int, skip: int):
         self.btn_start.setEnabled(True)

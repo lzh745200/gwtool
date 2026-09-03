@@ -18,7 +18,7 @@ try:
 except ImportError:  # pragma: no cover
     import fitz  # type: ignore
 
-from PySide6.QtCore import QMarginsF, QSizeF
+from PySide6.QtCore import QMarginsF, QByteArray, QSizeF
 from PySide6.QtGui import QColor, QFont, QPainter, QPageLayout, QPageSize, QPdfWriter, QTextDocument
 from PySide6.QtCore import Qt
 
@@ -48,10 +48,62 @@ def _toc_chunks(n_rows: int) -> list[int]:
     return pages
 
 
-def _font_family(candidate: str, fallback: str = "SimSun") -> str:
+# 系统无任何中文字体时注入的兜底族名（PyMuPDF 自带，Apache-2.0）
+_CJK_FALLBACK_FAMILY = "Droid Sans Fallback"
+_cjk_font_id: int = -1
+# None=尚未探测；""=系统已有中文字体，无需注入；其余=已注入的族名
+_cjk_injected: str | None = None
+
+_KNOWN_CJK_FONTS = ("SimSun", "宋体", "微软雅黑", "Microsoft YaHei",
+                    "Noto Sans CJK SC", "Noto Sans CJK", "WenQuanYi Micro Hei",
+                    "WenQuanYi Zen Hei", "仿宋_GB2312", "方正小标宋简体")
+
+
+def ensure_cjk_font() -> str:
+    """保证存在可渲染中文的字体，返回可用于兜底的族名（无则空串）。
+
+    麒麟最小安装、精简字体镜像等机器上一个中文字体都没有，此时 Qt 渲染出的
+    PDF 正文会整篇空白（只剩 PyMuPDF 盖的页码），目录页码全部退化成“—”，
+    且全程不报任何错——用户拿到的是一份看起来正常的空白文件。
+    PyMuPDF 自带 Droid Sans Fallback（覆盖简繁日韩），随既有依赖离线分发，
+    注入后即可兜底，无需系统装字体、不涉及版权问题。
+    """
+    global _cjk_font_id, _cjk_injected
+    if _cjk_injected is not None:
+        return _cjk_injected
+
     from PySide6.QtGui import QFontDatabase
     fams = set(QFontDatabase.families())
-    for c in (candidate, fallback, "宋体", "SimSun", "Noto Sans CJK SC", "微软雅黑"):
+    for known in _KNOWN_CJK_FONTS:
+        if known in fams:
+            _cjk_injected = ""
+            return ""
+    if _CJK_FALLBACK_FAMILY in fams:
+        _cjk_injected = _CJK_FALLBACK_FAMILY
+        return _CJK_FALLBACK_FAMILY
+
+    try:
+        buf = fitz.Font("china-s").buffer
+    except Exception:
+        buf = None
+    if buf:
+        _cjk_font_id = QFontDatabase.addApplicationFontFromData(QByteArray(bytes(buf)))
+    if _cjk_font_id != -1:
+        fams = set(QFontDatabase.applicationFontFamilies(_cjk_font_id))
+        _cjk_injected = next(iter(fams), _CJK_FALLBACK_FAMILY)
+    else:
+        _cjk_injected = ""
+    return _cjk_injected
+
+
+def _font_family(candidate: str, fallback: str = "SimSun") -> str:
+    from PySide6.QtGui import QFontDatabase
+    injected = ensure_cjk_font()
+    fams = set(QFontDatabase.families())
+    chain = [candidate, fallback, "宋体", "SimSun", "Noto Sans CJK SC", "微软雅黑"]
+    if injected:
+        chain.append(injected)
+    for c in chain:
         if c in fams:
             return c
     return QFontDatabase.systemFont(QFontDatabase.GeneralFont).family()

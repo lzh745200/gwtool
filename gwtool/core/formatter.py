@@ -7,7 +7,7 @@ import re
 # 公文标题编号链：一、 -> (一) -> 1. -> (1)
 _H1 = re.compile(r"^[一二三四五六七八九十]+[、.]")
 _H2 = re.compile(r"^[（(][一二三四五六七八九十]+[)）]")
-_H3 = re.compile(r"^\d{1,2}[、..]")
+_H3 = re.compile(r"^\d{1,2}[、．.](?!\d)")
 _H4 = re.compile(r"^[（(]\d{1,2}[)）]")
 
 _FULL2HALF_DIGIT = str.maketrans("０１２３４５６７８９", "0123456789")
@@ -96,7 +96,7 @@ def normalize_heading_numbers(text: str) -> tuple[str, int]:
         m2 = re.match(r"^[（(]([一二三四五六七八九十]+)[)）]\s*(.*)$", s)
         if m2 and len(s) <= 45:
             repl = f"（{m2.group(1)}）{m2.group(2)}"
-        m3 = re.match(r"^(\d{1,2})[、..]\s*(.*)$", s)
+        m3 = re.match(r"^(\d{1,2})[、．.](?!\d)\s*(.*)$", s)
         if m3 and len(s) <= 45:
             repl = f"{m3.group(1)}.{m3.group(2)}"
         if repl != s:

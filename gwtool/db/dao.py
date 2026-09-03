@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -78,6 +79,32 @@ class SearchResult:
     title: str
     snippet: str
     rank: float
+
+
+@dataclass
+class Dispatch:
+    """一条发文登记记录。"""
+    id: int = 0
+    doc_no: str = ""            # 发文字号，如 ×政办发〔2026〕12号
+    title: str = ""
+    doc_type: str = ""          # 文种：通知/报告/请示/批复/函/纪要…
+    org: str = ""               # 发文机关
+    main_send: str = ""         # 主送
+    cc: str = ""                # 抄送
+    secret_level: str = "公开"   # 密级
+    urgency: str = ""           # 紧急程度
+    sign_date: str = ""         # 成文日期
+    print_date: str = ""        # 印发日期
+    pages: int = 0
+    copies: int = 0             # 印数
+    drafter: str = ""           # 拟稿人
+    reviewer: str = ""          # 核稿人
+    approver: str = ""          # 签发人
+    status: str = "拟稿"         # 拟稿/核稿/签发/已印发/已归档
+    doc_id: int = 0             # 关联资料库文档（0=未关联）
+    remark: str = ""
+    created_time: str = ""
+    updated_time: str = ""
 
 
 # ---------------------------------------------------------------- categories
@@ -549,3 +576,138 @@ def _fts_search(fts_table: str, src_table: str, query: str, limit: int) -> list[
         return []
     return [SearchResult(src_table, int(r["ref_id"]), r["title"], r["snip"], float(r["rank"]))
             for r in rows]
+
+
+# ------------------------------------------------------- dispatch_register
+_DISPATCH_COLUMNS = (
+    "doc_no", "title", "doc_type", "org", "main_send", "cc", "secret_level",
+    "urgency", "sign_date", "print_date", "pages", "copies", "drafter",
+    "reviewer", "approver", "status", "doc_id", "remark",
+)
+# 统计分组列白名单：绝不能把调用方传入的字符串直接拼进 SQL
+_DISPATCH_GROUPABLE = ("doc_type", "org", "status", "secret_level", "urgency",
+                       "drafter", "approver")
+
+
+def add_dispatch(d: Dispatch) -> int:
+    conn = dbconn.get_conn()
+    cols = ",".join(_DISPATCH_COLUMNS)
+    marks = ",".join("?" * len(_DISPATCH_COLUMNS))
+    cur = conn.execute(
+        f"INSERT INTO dispatch_register({cols}) VALUES({marks})",
+        [getattr(d, c) for c in _DISPATCH_COLUMNS])
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_dispatch(d: Dispatch) -> None:
+    conn = dbconn.get_conn()
+    assigns = ",".join(f"{c}=?" for c in _DISPATCH_COLUMNS)
+    conn.execute(
+        f"UPDATE dispatch_register SET {assigns},"
+        f"updated_time=datetime('now','localtime') WHERE id=?",
+        [getattr(d, c) for c in _DISPATCH_COLUMNS] + [d.id])
+    conn.commit()
+
+
+def delete_dispatch(dispatch_id: int) -> None:
+    conn = dbconn.get_conn()
+    conn.execute("DELETE FROM dispatch_register WHERE id=?", (dispatch_id,))
+    conn.commit()
+
+
+def get_dispatch(dispatch_id: int) -> Dispatch | None:
+    conn = dbconn.get_conn()
+    row = conn.execute("SELECT * FROM dispatch_register WHERE id=?",
+                       (dispatch_id,)).fetchone()
+    return Dispatch(**dict(row)) if row else None
+
+
+def list_dispatch(keyword: str = "", org: str = "", doc_type: str = "",
+                  status: str = "", year: str = "", date_from: str = "",
+                  date_to: str = "", limit: int = 5000) -> list[Dispatch]:
+    """按条件筛选发文登记，成文日期倒序（同日按 id 倒序）。"""
+    where: list[str] = []
+    params: list = []
+    if keyword.strip():
+        # 台账最常见的检索就是按机关名/拟稿人查，这些列必须纳入关键字匹配
+        kw_cols = ("title", "doc_no", "main_send", "cc", "remark", "org",
+                   "doc_type", "drafter", "reviewer", "approver")
+        where.append("(" + " OR ".join(f"{c} LIKE ?" for c in kw_cols) + ")")
+        like = f"%{keyword.strip()}%"
+        params += [like] * len(kw_cols)
+    if org:
+        where.append("org=?")
+        params.append(org)
+    if doc_type:
+        where.append("doc_type=?")
+        params.append(doc_type)
+    if status:
+        where.append("status=?")
+        params.append(status)
+    if year:
+        # 年份既可能来自成文日期，也可能来自发文字号里的〔2026〕
+        where.append("(sign_date LIKE ? OR doc_no LIKE ?)")
+        params += [f"{year}%", f"%〔{year}〕%"]
+    if date_from:
+        where.append("sign_date>=?")
+        params.append(date_from)
+    if date_to:
+        where.append("sign_date<=?")
+        params.append(date_to)
+    sql = "SELECT * FROM dispatch_register"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY sign_date DESC, id DESC LIMIT ?"
+    params.append(limit)
+    conn = dbconn.get_conn()
+    rows = conn.execute(sql, params).fetchall()
+    return [Dispatch(**dict(r)) for r in rows]
+
+
+def count_dispatch() -> int:
+    conn = dbconn.get_conn()
+    return int(conn.execute("SELECT count(*) FROM dispatch_register").fetchone()[0])
+
+
+def dispatch_stats(group_by: str = "doc_type", year: str = "") -> list[tuple[str, int]]:
+    """按指定列聚合计数，返回 [(取值, 件数)]，件数倒序。空值归入「未填写」。"""
+    if group_by not in _DISPATCH_GROUPABLE:
+        raise ValueError(f"不支持的分组列：{group_by}")
+    conn = dbconn.get_conn()
+    sql = (f"SELECT COALESCE(NULLIF({group_by},''),'未填写') AS k, count(*) AS n"
+           f" FROM dispatch_register")
+    params: list = []
+    if year:
+        sql += " WHERE sign_date LIKE ? OR doc_no LIKE ?"
+        params += [f"{year}%", f"%〔{year}〕%"]
+    sql += " GROUP BY k ORDER BY n DESC, k"
+    return [(r["k"], int(r["n"])) for r in conn.execute(sql, params).fetchall()]
+
+
+def dispatch_monthly_counts(year: str) -> list[tuple[str, int]]:
+    """某年 1-12 月各月发文件数（按成文日期）。"""
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT substr(sign_date,6,2) AS m, count(*) AS n FROM dispatch_register"
+        " WHERE sign_date LIKE ? GROUP BY m", (f"{year}%",)).fetchall()
+    got = {r["m"]: int(r["n"]) for r in rows if r["m"]}
+    return [(f"{int(m):02d}月", got.get(m, 0)) for m in
+            [f"{i:02d}" for i in range(1, 13)]]
+
+
+def max_doc_no_serial(prefix: str, year: str) -> int:
+    """取某机关代字某年度已用的最大发文序号，无记录返回 0。
+
+    prefix 形如「×政办发」，匹配「×政办发〔2026〕12号」中的 12。
+    """
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT doc_no FROM dispatch_register WHERE doc_no LIKE ?",
+        (f"{prefix}%〔{year}〕%",)).fetchall()
+    best = 0
+    for r in rows:
+        m = re.search(r"〕\s*(\d+)\s*号", r["doc_no"] or "")
+        if m:
+            best = max(best, int(m.group(1)))
+    return best

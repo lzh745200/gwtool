@@ -106,6 +106,33 @@ TABLES = [
         word TEXT PRIMARY KEY,
         note TEXT DEFAULT ''
     )""",
+    # 发文登记台账：公文发出后的登记、查询与统计
+    """CREATE TABLE IF NOT EXISTS dispatch_register(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_no TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        doc_type TEXT DEFAULT '',
+        org TEXT DEFAULT '',
+        main_send TEXT DEFAULT '',
+        cc TEXT DEFAULT '',
+        secret_level TEXT DEFAULT '公开',
+        urgency TEXT DEFAULT '',
+        sign_date TEXT DEFAULT '',
+        print_date TEXT DEFAULT '',
+        pages INTEGER NOT NULL DEFAULT 0,
+        copies INTEGER NOT NULL DEFAULT 0,
+        drafter TEXT DEFAULT '',
+        reviewer TEXT DEFAULT '',
+        approver TEXT DEFAULT '',
+        status TEXT DEFAULT '拟稿',
+        doc_id INTEGER NOT NULL DEFAULT 0,
+        remark TEXT DEFAULT '',
+        created_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_dispatch_no ON dispatch_register(doc_no)""",
+    """CREATE INDEX IF NOT EXISTS idx_dispatch_sign_date ON dispatch_register(sign_date)""",
+    """CREATE INDEX IF NOT EXISTS idx_dispatch_org ON dispatch_register(org)""",
 ]
 
 # FTS5 虚拟表：ref_id 指向源表 id；tokenized 为 jieba 分词后文本

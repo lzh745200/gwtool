@@ -280,8 +280,10 @@ class DictManager(QDialog):
         rows = {i.row() for i in self.phr_table.selectedIndexes()}
         for r in sorted(rows, reverse=True):
             phrase = self.phr_table.item(r, 0).text()
-            get_conn().execute("DELETE FROM user_phrases WHERE phrase=? LIMIT 1",
-                               (phrase,))
+            get_conn().execute(
+                "DELETE FROM user_phrases WHERE id="
+                "(SELECT id FROM user_phrases WHERE phrase=? LIMIT 1)",
+                (phrase,))
             get_conn().commit()
         from ..db.connection import get_conn as gc
         conn = gc()

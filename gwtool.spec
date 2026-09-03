@@ -11,7 +11,11 @@ from PyInstaller.utils.hooks import collect_data_files
 datas = [('gwtool/resources/data/seed.db', 'gwtool/resources/data')]
 datas += collect_data_files('opencc')
 
-hiddenimports = []
+hiddenimports = [
+    # icons.py 用 QImage.fromData(..., "SVG") 画图标，需要 imageformats/qsvg 插件；
+    # 代码未显式 import QtSvg，PyInstaller 不会自动收集该插件，打包后图标会全空白。
+    'PySide6.QtSvg',
+]
 if sys.platform.startswith('win'):
     hiddenimports.append('win32timezone')   # pywin32 动态导入
 

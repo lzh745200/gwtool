@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from . import APP_NAME, __version__
 from .paths import bundled_db_seed_path, db_path
@@ -100,6 +100,18 @@ def _launch_qapp(argv: list[str]) -> "QApplication | None":
         return None
 
 
+def _pass_lock() -> bool:
+    """启动口令锁：未启用、未设口令或解锁成功时返回 True。"""
+    from .db import dao
+    if dao.get_setting("lock_enabled") != "1":
+        return True
+    from .core.security import has_password
+    if not has_password():
+        return True
+    dlg = LockDialog()
+    return dlg.exec() == QDialog.DialogCode.Accepted
+
+
 def run(import_path: str = "") -> int:
     # 高分屏适配：默认强制浅色；设置「跟随系统深浅色」后交由系统决定
     if sys.platform == "win32" and not _follow_system_theme():
@@ -109,19 +121,18 @@ def run(import_path: str = "") -> int:
     if app is None:
         return 1
 
+    # 零中文字体的机器上，界面与 PDF 的中文都会渲染成空白：启动时注入兜底字体
+    from .core.pdfrender import ensure_cjk_font
+    ensure_cjk_font()
+
     from .db import connection as dbconn
     dbconn.configure(db_path())
     ensure_database_seeded()
 
     from .ui.main_window import MainWindow
     # 口令锁（启用后启动先解锁）
-    from .db import dao
-    if dao.get_setting("lock_enabled") == "1":
-        from .core.security import has_password
-        if has_password():
-            dlg = LockDialog()
-            if dlg.exec() != dlg.Accepted:
-                return 0
+    if not _pass_lock():
+        return 0
 
     win = MainWindow()
     win.show()

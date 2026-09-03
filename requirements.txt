@@ -1,17 +1,43 @@
-PySide6>=6.6
-PyMuPDF>=1.24
-python-docx>=1.1
-jieba>=0.42
-pypinyin>=0.51
-striprtf>=0.0.26
-markdown>=3.5
-beautifulsoup4>=4.12
-lxml>=4.9
-chardet>=5.2
-olefile>=0.46
-pyinstaller>=6.0
-pytest>=8.0
-pywin32>=306; sys_platform == 'win32'
-opencc-python-reimplemented>=0.1.7
-pyzipper>=0.3.6
-pytest-timeout>=2.1
+# 公文汇编助手 —— 运行依赖（全部精确锁定）
+#
+# 为什么锁死版本：v1.2.1 发布时 requirements 写的是 PySide6>=6.6，
+# 之后 PySide6 6.8+ 收紧了枚举访问规则，代码里 `dlg.Accepted` 这种实例级
+# 写法开始抛 AttributeError —— 用户一启用启动口令锁，程序就启动即崩。
+# 也就是说同一份源码、同一条 CI 流水线，在不同日期构建出的安装包行为不同，
+# 且没有任何环节会报警。锁定版本是让"构建产物可复现"的前提。
+#
+# 两处必须分档，不能一刀切：
+#   1) PySide6 分平台：Linux/麒麟 必须停在 6.8.0.2，官方 aarch64 wheel 自
+#      6.8.1 起要求 glibc>=2.39，麒麟全系（glibc 2.31）不满足。
+#   2) 部分包分 Python 版本：麒麟 CI 在 Debian 11 容器内用 Python 3.9 构建
+#      （为守住 glibc 2.31 底线不能升级容器），而这些包的新版已放弃 3.9。
+
+# ---- GUI 框架 ----
+PySide6==6.11.2 ; sys_platform == 'win32'
+PySide6==6.8.0.2 ; sys_platform != 'win32'
+
+# ---- 需要按 Python 版本分档的依赖 ----
+PyMuPDF==1.28.2 ; python_version >= '3.10'
+PyMuPDF==1.26.5 ; python_version < '3.10'
+markdown==3.10.3 ; python_version >= '3.10'
+markdown==3.9 ; python_version < '3.10'
+chardet==7.6.0 ; python_version >= '3.10'
+chardet==5.2.0 ; python_version < '3.10'
+pytest==9.1.1 ; python_version >= '3.10'
+pytest==8.4.2 ; python_version < '3.10'
+
+# ---- 其余运行依赖（两平台同一版本） ----
+python-docx==1.2.0
+jieba==0.42.1
+pypinyin==0.55.0
+striprtf==0.0.33
+beautifulsoup4==4.15.0
+lxml==6.1.2
+olefile==0.47
+opencc-python-reimplemented==0.1.7
+pyzipper==0.4.0
+
+# ---- 构建与测试工具 ----
+pyinstaller==6.22.2
+pytest-timeout==2.4.0
+pywin32==312 ; sys_platform == 'win32'

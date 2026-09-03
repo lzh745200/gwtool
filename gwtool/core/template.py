@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 
 FONT_BODY = "仿宋_GB2312"
 FONT_HEI = "黑体"
@@ -108,17 +108,20 @@ class DocTemplate:
         d = json.loads(s or "{}")
         if not isinstance(d, dict):
             raise ValueError("模板配置非法")
-        # 嵌套对象重建
+        # 嵌套对象重建（逐层过滤未知键，兼容跨版本存取）
         h = {}
         for k in ("h1", "h2", "h3", "h4"):
             if k in d and isinstance(d[k], dict):
-                h[k] = HeadingStyle(**d[k])
-        rh = RedHeader(**d.pop("red_header", {})) if isinstance(d.get("red_header"), dict) else RedHeader()
-        cv = CoverInfo(**d.pop("cover", {})) if isinstance(d.get("cover"), dict) else CoverInfo()
-        co = Colophon(**d.pop("colophon", {})) if isinstance(d.get("colophon"), dict) else Colophon()
+                h[k] = HeadingStyle(**_known_fields(HeadingStyle, d[k]))
+        rh_raw = d.pop("red_header", {})
+        cv_raw = d.pop("cover", {})
+        co_raw = d.pop("colophon", {})
+        rh = RedHeader(**_known_fields(RedHeader, rh_raw)) if isinstance(rh_raw, dict) else RedHeader()
+        cv = CoverInfo(**_known_fields(CoverInfo, cv_raw)) if isinstance(cv_raw, dict) else CoverInfo()
+        co = Colophon(**_known_fields(Colophon, co_raw)) if isinstance(co_raw, dict) else Colophon()
         for k, v in h.items():
             d[k] = v
-        obj = cls(**d)
+        obj = cls(**_known_fields(cls, d))
         obj.red_header, obj.cover, obj.colophon = rh, cv, co
         return obj
 
@@ -151,6 +154,19 @@ def _cn_num(n: int) -> str:
         tens, ones = divmod(n, 10)
         return digits[tens] + "十" + (digits[ones] if ones else "")
     return str(n)
+
+
+def _known_fields(dc_cls, data: dict) -> dict:
+    """只保留 dataclass 已声明的字段。
+
+    模板 config_json 存在库里，跨版本读写必然出现键不匹配：新版本写的字段
+    被旧程序读、或字段改名后老库残留旧键。直接 cls(**d) 会抛 TypeError，
+    让模板编辑器与汇编向导整个崩掉，因此忽略未知键、缺失键走默认值。
+    """
+    if not isinstance(data, dict):
+        return {}
+    allowed = {f.name for f in fields(dc_cls)}
+    return {k: v for k, v in data.items() if k in allowed}
 
 
 def default_template() -> DocTemplate:

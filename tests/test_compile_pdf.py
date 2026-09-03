@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """汇编生成 + 小册子 + PDF 渲染测试。"""
-import os
 from pathlib import Path
 
 import pytest
@@ -8,9 +7,6 @@ import pytest
 from gwtool.core.model import Block, DocTree
 from gwtool.core.template import default_template
 from gwtool.core import docxgen, booklet
-
-# 离屏平台无完整字体，QTextDocument 输出的 PDF 文本层为空（本机原生会话已验证）
-_UNDER_OFFSCREEN = os.environ.get("QT_QPA_PLATFORM") == "offscreen"
 
 
 def _sample_trees():
@@ -106,7 +102,6 @@ def test_booklet_imposition(tmp_path, qapp):
     d.close()
 
 
-@pytest.mark.skipif(_UNDER_OFFSCREEN, reason="离屏平台缺字体，PDF 文本层为空")
 def test_pdf_render_full(tmp_path, qapp):
     """两遍渲染：目录页码真实填充 + 外侧页码盖章。"""
     from gwtool.core.pdfrender import render_compiled_pdf

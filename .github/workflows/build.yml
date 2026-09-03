@@ -30,8 +30,16 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest tests/ -q --timeout=300
 
+      - name: 端到端自检（导入→汇编→PDF→检索→纠错→备份 全流程）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python scripts/e2e_check.py
+
       - name: PyInstaller 打包（参数统一于 gwtool.spec）
         run: pyinstaller --noconfirm --clean gwtool.spec
+
+      - name: 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入）
+        run: python scripts/smoke_dist.py dist/gwtool
 
       - name: 生成便携版 zip
         run: python -c "import shutil; shutil.make_archive('dist/gwtool_portable_win64','zip','.','dist/gwtool')"
@@ -105,8 +113,10 @@ jobs:
       - name: 安装依赖
         run: |
           "$PYBIN" -m pip install --upgrade pip
-          # PySide6 锁 6.8.0.2：6.8.1+ 的 aarch64 wheel 需 glibc>=2.39，麒麟无法运行
-          "$PYBIN" -m pip install "PySide6==6.8.0.2" -r requirements.txt ruff
+          # PySide6 的平台约束已在 requirements.txt 用环境标记声明：
+          # Linux 锁 6.8.0.2（6.8.1+ 的 aarch64 wheel 需 glibc>=2.39，麒麟无法运行），
+          # 故此处不再单独安装，避免同一约束两处声明而漂移。
+          "$PYBIN" -m pip install -r requirements.txt ruff
 
       - name: 静态检查（ruff：语法错误/未定义名称）
         run: ruff check gwtool/ scripts/ tests/
@@ -116,8 +126,18 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: $PYBIN -m pytest tests/ -q --timeout=300
 
+      - name: 端到端自检（导入→汇编→PDF→检索→纠错→备份 全流程）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: $PYBIN scripts/e2e_check.py
+
       - name: PyInstaller 打包（glibc 2.28 目标，参数统一于 gwtool.spec）
         run: $PYBIN -m PyInstaller --noconfirm --clean gwtool.spec
+
+      - name: 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: $PYBIN scripts/smoke_dist.py dist/gwtool
 
       - name: 整理产物目录（统一 pkgsrc/，规避 artifact 根路径歧义）
         run: |
