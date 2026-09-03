@@ -245,6 +245,43 @@ def list_documents(category_id: int | None = None) -> list[Document]:
     return [Document(**dict(r)) for r in rows]
 
 
+def bulk_update_tags(doc_ids: list[int], add: tuple[str, ...] = (),
+                     remove: tuple[str, ...] = ()) -> int:
+    """批量增删多篇文档的标签，返回实际发生变化的文档数。
+
+    tags 是逗号分隔串，历史数据里中英文逗号混用，解析时两种都认、
+    写回统一为中文逗号；去重且保持原有顺序，避免反复批量操作后
+    标签越堆越乱。
+    """
+    add_clean = [t.strip() for t in add if t and t.strip()]
+    remove_clean = {t.strip() for t in remove if t and t.strip()}
+    if not doc_ids or (not add_clean and not remove_clean):
+        return 0
+
+    conn = dbconn.get_conn()
+    changed = 0
+    for doc_id in doc_ids:
+        row = conn.execute("SELECT tags FROM documents WHERE id=?",
+                           (doc_id,)).fetchone()
+        if row is None:
+            continue
+        raw = (row["tags"] or "").replace("，", ",")
+        current = [t.strip() for t in raw.split(",") if t.strip()]
+        merged = [t for t in current if t not in remove_clean]
+        for t in add_clean:
+            if t not in merged:
+                merged.append(t)
+        new_value = "，".join(merged)
+        if new_value != (row["tags"] or ""):
+            conn.execute(
+                "UPDATE documents SET tags=?, updated_time=datetime('now','localtime')"
+                " WHERE id=?", (new_value, doc_id))
+            changed += 1
+    if changed:
+        conn.commit()
+    return changed
+
+
 def count_documents() -> int:
     return int(dbconn.get_conn().execute("SELECT count(*) FROM documents").fetchone()[0])
 

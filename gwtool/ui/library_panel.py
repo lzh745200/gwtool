@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
                                QWidget)
 
 from ..db import dao
-from ..ui.widgets import ask, info
+from ..ui.widgets import ask, info, warn
 
 
 class LibraryPanel(QWidget):
@@ -221,10 +221,74 @@ class LibraryPanel(QWidget):
             menu.addAction("重命名", self._rename_selected)
             menu.addAction("移动到分类…", self._move_selected)
             menu.addAction("编辑标签…", self._tag_selected)
+            menu.addAction("分类建议…", self._suggest_category)
             menu.addSeparator()
+        menu.addAction("批量添加标签…", self._bulk_add_tags)
+        menu.addAction("批量移除标签…", self._bulk_remove_tags)
+        menu.addSeparator()
         menu.addAction("导出为 TXT", self._export_selected_txt)
         menu.addAction("删除", self._delete_selected)
         menu.exec(self.doc_list.mapToGlobal(pos))
+
+    def _bulk_add_tags(self):
+        ids = self.selected_doc_ids()
+        if not ids:
+            warn(self, "请先选中要加标签的文档（可按住 Ctrl/Shift 多选）。")
+            return
+        text, ok = QInputDialog.getText(
+            self, "批量添加标签",
+            f"为选中的 {len(ids)} 篇文档添加标签（多个用逗号分隔）：")
+        if not ok:
+            return
+        tags = tuple(t.strip() for t in text.replace("，", ",").split(",") if t.strip())
+        if not tags:
+            warn(self, "未填写有效标签。")
+            return
+        n = dao.bulk_update_tags(ids, add=tags)
+        self._reload_docs()
+        info(self, f"已为 {n} 篇文档添加标签：{'、'.join(tags)}")
+
+    def _bulk_remove_tags(self):
+        ids = self.selected_doc_ids()
+        if not ids:
+            warn(self, "请先选中要移除标签的文档（可按住 Ctrl/Shift 多选）。")
+            return
+        text, ok = QInputDialog.getText(
+            self, "批量移除标签",
+            f"从选中的 {len(ids)} 篇文档移除标签（多个用逗号分隔）：")
+        if not ok:
+            return
+        tags = tuple(t.strip() for t in text.replace("，", ",").split(",") if t.strip())
+        if not tags:
+            warn(self, "未填写有效标签。")
+            return
+        n = dao.bulk_update_tags(ids, remove=tags)
+        self._reload_docs()
+        info(self, f"已从 {n} 篇文档移除标签：{'、'.join(tags)}")
+
+    def _suggest_category(self):
+        """按内容给出分类建议——只提示，不自动改，归档口径由人定。"""
+        did = self._single_doc()
+        if not did:
+            return
+        from ..core import classify
+        doc = dao.get_document(did)
+        suggestions = classify.suggest_for_document(did, top_n=3)
+        if not suggestions:
+            info(self, "暂无可用建议：需要已有分类下存在文档，"
+                       "且本文与它们的用词有交集。")
+            return
+        top_score = suggestions[0][2] or 1.0
+        names = [f"{name}（匹配度 {score / top_score:.0%}）"
+                 for _id, name, score in suggestions]
+        lines = [f"「{doc.title}」当前分类："
+                 f"{next((c.name for c in dao.list_categories() if c.id == doc.category_id), '未分类')}",
+                 "", "按内容匹配度推荐："]
+        lines += [f"  {i}. {n}" for i, n in enumerate(names, 1)]
+        lines += ["", "是否移动到推荐的首位分类？"]
+        if ask(self, "\n".join(lines)):
+            dao.update_document_meta(did, category_id=suggestions[0][0])
+            self._reload_docs()
 
     def _single_doc(self):
         items = self.doc_list.selectedItems()

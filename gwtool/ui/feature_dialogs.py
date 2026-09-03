@@ -136,7 +136,16 @@ class InspectorDialog(QDialog):
         v.addLayout(row)
         btn_run = QPushButton("开始体检")
         btn_run.clicked.connect(self._run)
-        v.addWidget(btn_run)
+        self.btn_export = QPushButton("导出报告…")
+        self.btn_export.setToolTip("把体检结果导出为规范 DOCX 报告，可归档或转交拟稿人整改")
+        self.btn_export.clicked.connect(self._export_report)
+        ops = QHBoxLayout()
+        ops.addWidget(btn_run)
+        ops.addWidget(self.btn_export)
+        ops.addStretch(1)
+        v.addLayout(ops)
+        self._findings: list[inspector.Finding] = []
+        self._source = ""
         self.result_list = QListWidget()
         v.addWidget(self.result_list, 1)
         self.lbl_stat = QLabel("")
@@ -158,6 +167,9 @@ class InspectorDialog(QDialog):
             findings = inspector.inspect_docx(path)
         else:
             findings = inspector.inspect_text(self._get_text())
+        self._findings = findings
+        self._source = (Path(self.file_path.text().strip()).name
+                        if self.rb_file.isChecked() else "当前编辑文档")
         self.result_list.clear()
         colors = {"error": theme.DANGER, "warn": theme.WARN, "info": theme.INFO}
         for f in findings:
@@ -172,6 +184,25 @@ class InspectorDialog(QDialog):
         self.lbl_stat.setText(
             f"体检完成：问题 {n_err} 项、建议 {n_warn} 项、提示 {len(findings) - n_err - n_warn} 项。"
             + ("" if findings else "未发现问题。"))
+
+    def _export_report(self):
+        if not self._findings and not self.lbl_stat.text():
+            warn(self, "请先点击「开始体检」。")
+            return
+        from datetime import datetime
+
+        default = f"公文格式体检报告_{datetime.now():%Y%m%d_%H%M}.docx"
+        path, _sel = QFileDialog.getSaveFileName(self, "导出体检报告", default,
+                                                 "Word 文档 (*.docx)")
+        if not path:
+            return
+        from ..core import report
+        try:
+            report.export_report(self._findings, path, source_name=self._source)
+        except OSError as exc:
+            warn(self, f"导出失败：{exc}")
+            return
+        info(self, f"体检报告已导出：\n{path}\n\n结论：{report.verdict(self._findings)}")
 
 
 # ================================================================ 批量替换
