@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
 
 from ..core import inspector, simhash, toolbox
 from ..core import skeletons as skeleton
+from ..core import backup as backup_core
 from ..core.backup import create_backup, restore_backup
 from ..core.security import clear_password, has_password, set_password
 from ..db import dao
@@ -796,7 +797,7 @@ class SecurityDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置 —— 系统与安全")
-        self.resize(560, 420)
+        self.resize(600, 560)
         v = QVBoxLayout(self)
 
         g1 = QLabel("口令锁（启动程序时需输入口令）")
@@ -845,6 +846,40 @@ class SecurityDialog(QDialog):
         row_bk.addWidget(self.sp_backup_hours)
         row_bk.addStretch(1)
         v.addLayout(row_bk)
+
+        # 附件体积上限：备份包从「几百 KB 的库」变成「库 + 全部附件」之后，
+        # 退出时的自动备份会连带压缩全部附件，而轮转保留 20 份 → 备份目录变成
+        # 20 × 全量附件，关程序越来越卡。这里就是那道闸门。
+        # 超限的附件绝不静默丢弃：包内写 manifest/excluded_attachments.txt 清单、
+        # 恢复时明确提醒去哪儿补、自动备份另记 logs/backup.log。
+        row_lim = QHBoxLayout()
+        row_lim.addWidget(QLabel("手动备份附件上限："))
+        self.sp_backup_limit = self._make_limit_spin(backup_core.MODE_MANUAL)
+        self.sp_backup_limit.valueChanged.connect(
+            lambda val: dao.set_setting(backup_core.SETTING_LIMIT_MB, str(val)))
+        row_lim.addWidget(self.sp_backup_limit)
+        row_lim.addStretch(1)
+        v.addLayout(row_lim)
+
+        row_alim = QHBoxLayout()
+        row_alim.addWidget(QLabel("退出/定时自动备份附件上限："))
+        self.sp_auto_backup_limit = self._make_limit_spin(backup_core.MODE_AUTO)
+        self.sp_auto_backup_limit.valueChanged.connect(
+            lambda val: dao.set_setting(backup_core.SETTING_AUTO_LIMIT_MB, str(val)))
+        row_alim.addWidget(self.sp_auto_backup_limit)
+        row_alim.addStretch(1)
+        v.addLayout(row_alim)
+
+        from ..core import attachments as att_core
+        atts = dao.list_all_attachments()
+        total = sum(int(a.size or 0) for a in atts)
+        self.lbl_backup_limit = QLabel(
+            f"当前附件共 {len(atts)} 个 / {att_core.human_size(total)}。"
+            "自动备份只是防丢失的安全网，上限设小一些退出才不卡；"
+            "要换电脑迁移请用「备份…」（手动备份），必要时把手动上限设为不限制。")
+        self.lbl_backup_limit.setWordWrap(True)
+        self.lbl_backup_limit.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_backup_limit)
 
         g3 = QLabel("OCR（扫描件识别，需已安装 Tesseract）")
         g3.setStyleSheet("font-weight:bold;margin-top:8pt;")
@@ -926,6 +961,22 @@ class SecurityDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         v.addWidget(btn_close, 0, Qt.AlignRight)
         self._check_tess()
+
+    @staticmethod
+    def _make_limit_spin(mode: str) -> QSpinBox:
+        """附件体积上限输入框（手动/自动共用），值取自 settings。"""
+        sp = QSpinBox()
+        sp.setRange(-1, 1024 * 1024)          # 最小值 -1 显示为「不限制」
+        sp.setSuffix(" MB")
+        sp.setSingleStep(10)
+        sp.setSpecialValueText("不限制（全部附件随包）")
+        sp.setToolTip("单个备份包里附件总体积的上限。\n"
+                      "超出的附件不会静默丢弃：备份包内会写下缺失清单，\n"
+                      "恢复该备份时程序会明确提醒哪些附件不在包里、去哪儿补；\n"
+                      "自动备份还会记一条 logs/backup.log。\n"
+                      "0 = 完全不打包附件；不限制 = 全部随包（包很大、退出会变慢）。")
+        sp.setValue(backup_core.attachment_limit_mb(mode))
+        return sp
 
     def _check_tess(self):
         from ..core.ocr import available, has_chi_sim, tesseract_path

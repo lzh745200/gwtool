@@ -1,7 +1,7 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.3.1**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.3.2**。
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
@@ -34,7 +34,7 @@
 | 历史版本 | 每 3 分钟自动快照（每文档保留 30 版），差异预览一键回滚 |
 | 朗读校对 | 离线 TTS 逐句朗读（Win SAPI / 麒麟 espeak-ng），F9 开停 |
 | 便携模式 | `main.py --portable` 数据存程序同级 Data/，U 盘随带随走 |
-| 安全 | 启动口令锁（PBKDF2·12万次迭代）、AES 加密备份（pyzipper）、退出自动备份+轮转保留 20 份 |
+| 安全 | 启动口令锁（PBKDF2·12万次迭代）、AES 加密备份（pyzipper）、退出自动备份+轮转保留 20 份；附件按体积上限随包（手动/自动分别可配），装不下的写进包内清单、恢复时明确提醒，绝不静默丢 |
 | 系统集成 | Windows 右键菜单（`scripts/install_context_menu.bat`）、剪贴板一键入库 |
 
 离线数据（实测 seed.db，15.7 MB 随包分发）：错别字/混淆对 **40220 条**（人工精标 220 +
@@ -136,7 +136,8 @@ bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 | Windows | `%APPDATA%\gwtool\` |
 | 麒麟/Linux | `~/.local/share/gwtool/` |
 
-包含：`gwtool.db`（全部数据）、`backups\`（备份）。程序本体不含用户数据，
+包含：`gwtool.db`（全部数据）、`attachments\`（文档附件本体）、`backups\`（备份）、
+`logs\`（备份等运维日志）。程序本体不含用户数据，
 重装/升级不影响数据；"备份/恢复"功能可整体迁移到另一台电脑。
 
 ## 公文字体说明
@@ -207,7 +208,7 @@ gwtool/
 │   │   ├── tts.py              #   离线朗读（SAPI/spd-say/espeak-ng）
 │   │   ├── watermark.py        #   PDF/DOCX 水印与密级标注
 │   │   ├── ocr.py              #   Tesseract OCR（可选，chi_sim 预检）
-│   │   ├── backup.py           #   备份/恢复（AES 加密、轮转、完整性校验）
+│   │   ├── backup.py           #   备份/恢复（AES 加密、轮转、完整性校验、附件体积上限+缺失清单）
 │   │   └── security.py         #   口令锁（PBKDF2-HMAC-SHA256）
 │   ├── ui/                     # PySide6 界面层
 │   │   ├── main_window.py      #   主窗口（三栏 + 12 动作工具栏 + 5 菜单）

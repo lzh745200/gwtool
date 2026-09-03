@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
                                QMainWindow, QSplitter, QStatusBar)
 
 from .. import APP_NAME, __version__
-from ..core.backup import create_backup, list_backups, restore_backup
+from ..core.backup import (MODE_AUTO, MODE_MANUAL, create_backup_detailed,
+                           list_backups, restore_backup_detailed)
 from ..core.template import default_template
 from ..db import dao
 from ..paths import db_path, export_dir
@@ -53,11 +54,17 @@ class MainWindow(QMainWindow):
             self._backup_timer.start(int(hours * 3600 * 1000))
 
     def _scheduled_backup(self):
+        """定时备份走自动档：附件预算小，不卡界面；有附件没随包时在状态栏留痕。"""
         try:
-            create_backup(note="定时备份")
-            self.status.showMessage("已完成定时备份", 5000)
+            rep = create_backup_detailed(note="定时备份", mode=MODE_AUTO)
         except Exception:
-            pass
+            return
+        if rep.excluded:
+            self.status.showMessage(
+                f"已完成定时备份（{len(rep.excluded)} 个附件超出上限未随包，"
+                f"详见备份包内清单）", 15000)
+        else:
+            self.status.showMessage("已完成定时备份", 5000)
 
     # ------------------------------------------------ UI
     def _build_ui(self):
@@ -373,9 +380,45 @@ class MainWindow(QMainWindow):
         elif clicked is b3:
             self._do_restore()
         elif clicked is b4:
-            items = list_backups()
-            info(self, "\n".join(f"{x['created']}  {x['note']}\n    {x['file']}"
-                                 for x in items) or "暂无备份。")
+            lines = []
+            for x in list_backups():
+                if x.get("attachments_excluded"):
+                    att = (f"  附件 {x.get('attachments_included', 0)} 个"
+                           f"（另有 {x['attachments_excluded']} 个超出上限未随包）")
+                elif x.get("attachments_included"):
+                    att = f"  附件 {x['attachments_included']} 个"
+                else:
+                    att = ""
+                lines.append(f"{x['created']}  {x['note']}{att}\n    {x['file']}")
+            info(self, "\n".join(lines) or "暂无备份。")
+
+    @staticmethod
+    def _format_backup_items(items, limit: int = 15) -> str:
+        """把备份/恢复明细里的附件条目排成缩进列表（超出条数只给个总数）。"""
+        from ..core.attachments import human_size
+        lines = [f"    · {it.get('name') or '附件'}"
+                 f"（{human_size(int(it.get('size') or 0))}）"
+                 + (f"：{it['reason']}" if it.get("reason") else "")
+                 for it in (items or [])[:limit]]
+        rest = len(items or []) - limit
+        if rest > 0:
+            lines.append(f"    …其余 {rest} 个见备份包内 excluded_attachments.txt")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _guarded(fn):
+        """在等待光标下跑一段可能耗时几秒的备份/恢复，返回 (结果, 错误文本)。
+
+        光标必须在弹窗**之前**复位：override cursor 是全应用生效的，
+        带着沙漏弹模态框会让用户以为程序还卡着。
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return fn(), ""
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _do_backup(self, encrypted: bool = False):
         pw = ""
@@ -387,11 +430,27 @@ class MainWindow(QMainWindow):
                 if ok:
                     warn(self, "口令至少 4 位。")
                 return
-        try:
-            path = create_backup(note="手动备份", password=pw)
-            info(self, f"备份成功：\n{path}" + ("（已 AES 加密）" if pw else ""))
-        except Exception as exc:  # noqa: BLE001
-            warn(self, f"备份失败：{exc}")
+        from ..core.attachments import human_size
+        rep, err = self._guarded(lambda: create_backup_detailed(
+            note="手动备份", password=pw, mode=MODE_MANUAL))
+        if rep is None:
+            warn(self, f"备份失败：{err}")
+            return
+        msg = f"备份成功：\n{rep.path}" + ("（已 AES 加密）" if pw else "")
+        if rep.excluded:
+            # 绝不静默丢附件：当场告诉用户哪些没随包、为什么、去哪儿改上限
+            limit_text = "不限制" if rep.limit_bytes < 0 else human_size(rep.limit_bytes)
+            warn(self, msg + f"\n\n注意：{len(rep.excluded)} 个附件未随本备份包备份"
+                             f"（附件体积上限 {limit_text}，"
+                             f"未随包合计 {human_size(rep.excluded_bytes)}）：\n"
+                             + self._format_backup_items(rep.excluded)
+                             + "\n\n这些附件的原件仍在数据目录的 attachments 子目录里，"
+                               "并未被删除；恢复此备份时程序会再次提醒。\n"
+                               "需要完整迁移包时，请在「设置 → 系统与安全」"
+                               "调高附件体积上限（或设为不限制）后重新备份。")
+        else:
+            info(self, msg + f"\n\n附件 {len(rep.included)} 个已随包备份"
+                             f"（{human_size(rep.included_bytes)}）。")
 
     def _do_restore(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择备份文件",
@@ -406,12 +465,23 @@ class MainWindow(QMainWindow):
                                           QLineEdit.Password)
             if not ok:
                 return
-        if ask(self, "恢复将覆盖当前全部数据（恢复前会自动再备份一次），确定继续？"):
-            try:
-                restore_backup(path, password=pw)
-                info(self, "恢复成功，请重启程序使数据完全生效。")
-            except Exception as exc:  # noqa: BLE001
-                warn(self, f"恢复失败（口令错误或文件损坏）：{exc}")
+        if not ask(self, "恢复将覆盖当前全部数据（恢复前会自动再备份一次），确定继续？"):
+            return
+        rep, err = self._guarded(lambda: restore_backup_detailed(path, password=pw))
+        if rep is None:
+            warn(self, f"恢复失败（口令错误或文件损坏）：{err}")
+            return
+        if rep.missing:
+            warn(self, f"数据库已恢复，但有 {len(rep.missing)} 个附件不在此备份包内：\n"
+                       + self._format_backup_items(rep.missing)
+                       + "\n\n怎么补回来：这些附件的原件在「备份来源电脑」的数据目录 "
+                         "attachments 子目录里，把同名文件复制回本机同一目录即可：\n"
+                         f"    {rep.attachments_dir}\n"
+                         "（恢复不会删除本机已有的附件文件；若来源电脑已不可用，"
+                         "只能从原始出处重新添加。）\n\n请重启程序使数据完全生效。")
+        else:
+            info(self, f"恢复成功（附件 {rep.restored_files} 个已还原），"
+                       "请重启程序使数据完全生效。")
 
     # ------------------------------------------------ 启动检查
     def _first_run_checks(self):
@@ -438,10 +508,15 @@ class MainWindow(QMainWindow):
         if not self.editor.confirm_discard_changes():
             event.ignore()
             return
-        # 退出自动备份
+        # 退出自动备份：走自动档（附件预算默认 8 MB，可在设置里改），
+        # 退出路径的耗时因此不随附件增多而失控。
+        # 这里刻意**同步**执行、不开后台线程：进程马上就要退出，线程若还在写 zip，
+        # 解释器销毁 QThread 会直接终止进程（Qt 报 "Destroyed while thread is still
+        # running"），留下半截备份包。同步 + 小预算 + core.backup 的 .part 原子改名
+        # 三者合起来，才既快又不会写出损坏的包。
         if dao.get_setting("auto_backup", "1") == "1":
             try:
-                create_backup(note="退出自动备份")
+                create_backup_detailed(note="退出自动备份", mode=MODE_AUTO)
             except Exception:
                 pass
         if self._tts_worker is not None and self._tts_worker.isRunning():
