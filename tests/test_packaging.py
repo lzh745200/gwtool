@@ -150,3 +150,34 @@ def test_cli_scripts_force_utf8_stdout():
         # 重配必须在模块顶层完成，早于 main 里的任何中文输出
         assert text.index("reconfigure") < text.index("def main"), (
             f"{script} 的编码重配晚于 main，输出中文时仍会崩")
+
+
+def test_no_non_ascii_in_strftime_format():
+    """strftime 的格式串里绝不能有中文。
+
+    Windows 上 strftime 会把格式串交给 C 运行时按 locale 编码处理，英文区域
+    设置的机器（含 GitHub windows runner）遇到「年月日」直接抛
+    UnicodeEncodeError: 'locale' codec can't encode character。
+    中文区域设置的开发机上完全看不出来，属典型的"只在我机器上好的"缺陷。
+    正确写法是格式串只用 ASCII 占位符，中文单位在外面用 f-string 拼。
+    """
+    offenders = []
+    # strftime("...") 直接调用，以及 f-string 里的 :%Y... 日期格式符
+    patterns = [re.compile(r"strftime\(\s*[rR]?([\"'])(.*?)\1", re.S),
+                re.compile(r":(%[-\dA-Za-z%]+)\}")]
+    for base in ("gwtool", "scripts"):
+        for path in (ROOT / base).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for n, line in enumerate(text.splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                for rx in patterns:
+                    for m in rx.finditer(line):
+                        fmt = m.group(2) if rx.groups >= 2 else m.group(1)
+                        if any(ord(ch) > 127 for ch in fmt):
+                            offenders.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()[:80]}")
+    assert not offenders, (
+        "以下 strftime/日期格式串含非 ASCII 字符，英文区域设置 Windows 上会崩：\n"
+        + "\n".join(offenders))

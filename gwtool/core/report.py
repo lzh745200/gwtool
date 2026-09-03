@@ -45,12 +45,15 @@ def build_report_tree(findings: list[Finding], source_name: str = "",
     ordered = sorted(findings,
                      key=lambda f: (_SEVERITY_ORDER.get(f.severity, 9), f.item))
     counts = summarize(findings)
-    now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+    # 不要把中文写进 strftime 的格式串：Windows 会按 C 运行时的 locale 编码处理它，
+    # 英文区域设置的机器上「年月日」无法编码，直接抛 UnicodeEncodeError。
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    stamp = f"{now[:4]}年{now[5:7]}月{now[8:10]}日 {now[11:]}"
 
     blocks: list[Block] = [
         Block(type=HEADING, level=1, text=title),
         Block(type=PARAGRAPH, text=f"体检对象：{source_name or '（未指定）'}"),
-        Block(type=PARAGRAPH, text=f"体检时间：{now}"),
+        Block(type=PARAGRAPH, text=f"体检时间：{stamp}"),
         Block(type=PARAGRAPH, text=f"检查依据：GB/T 9704《党政机关公文格式》"),
         Block(type=PARAGRAPH,
               text=f"体检结论：{verdict(findings)}"
