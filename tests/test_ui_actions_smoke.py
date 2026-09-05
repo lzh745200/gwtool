@@ -70,6 +70,7 @@ def test_all_menu_and_toolbar_actions_triggerable(win, qapp):
 
 
 DIALOG_SPECS = [
+    ("correct_dialog", "AnyDocCorrectDialog"),
     ("compare_dialog", "CompareDialog"),
     ("compile_wizard", "CompileWizard"),
     ("dict_manager", "DictManager"),

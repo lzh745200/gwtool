@@ -115,13 +115,17 @@ class MainWindow(QMainWindow):
         act_registry.setShortcut("Ctrl+R")
         act_registry.setToolTip("发文登记台账：登记、查询、统计、导出")
         act_registry.triggered.connect(self.open_registry)
+        act_anydoc = QAction("任意文档纠错", self)
+        act_anydoc.setShortcut("Ctrl+Shift+F7")
+        act_anydoc.setToolTip("任意文档纠错：任意格式文档或粘贴文本，标记视图逐处修正，保结构导出")
+        act_anydoc.triggered.connect(self.open_anydoc_correct)
         for a, ic in ((act_new, "new_doc"), (act_import, "import"),
                       (act_compile, "compile"), (act_tpl, "template"),
                       (act_check, "check"), (act_inspect, "inspect"),
                       (act_tts, "tts"), (act_clip, "clipboard"),
                       (act_fmt, "cleanup"), (act_compare, "compare"),
                       (act_dict, "book"), (act_backup, "backup"),
-                      (act_registry, "registry")):
+                      (act_registry, "registry"), (act_anydoc, "check")):
             ic_obj = icons.icon(ic)
             if not ic_obj.isNull():
                 a.setIcon(ic_obj)
@@ -144,6 +148,7 @@ class MainWindow(QMainWindow):
 
         m_tool = self.menuBar().addMenu("工具(&T)")
         m_tool.addAction("文字纠错", lambda: self.reference.run_check(), "F7")
+        m_tool.addAction("任意文档纠错…", self.open_anydoc_correct, "Ctrl+Shift+F7")
         m_tool.addAction("公文格式体检…", self.open_inspector, "F8")
         m_tool.addAction("朗读校对 开/停", self.toggle_tts, "F9")
         m_tool.addAction("一键排版微调", lambda: self.editor.run_formatter())
@@ -276,6 +281,11 @@ class MainWindow(QMainWindow):
     def open_compare(self):
         from .compare_dialog import CompareDialog
         dlg = CompareDialog(self)
+        dlg.exec()
+
+    def open_anydoc_correct(self):
+        from .correct_dialog import AnyDocCorrectDialog
+        dlg = AnyDocCorrectDialog(self)
         dlg.exec()
 
     def open_dict_manager(self):

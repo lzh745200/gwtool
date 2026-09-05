@@ -230,3 +230,97 @@ def apply_all(text: str, corrections: list[Correction], skip: set[int] | None = 
             continue
         text = text[:c.start] + c.suggestion + text[c.end:]
     return text
+
+
+# ------------------------------------------------------------------ 纠错标记（增强）
+# 类别 -> (标记底色, 标记文字色)。中间调配色，深浅色主题下均可读。
+_MARK_STYLE = {
+    "错别字": ("#fdecea", "#8c1d18"),
+    "易混词": ("#fff3e0", "#8a5300"),
+    "标点": ("#e8eaf6", "#283593"),
+    "数字用法": ("#e0f2f1", "#004d40"),
+    "用户词库": ("#fdecea", "#8c1d18"),
+}
+_MARK_FALLBACK = ("#eceff1", "#37474f")
+
+
+def to_marked_html(text: str, corrections: list[Correction],
+                   show_suggestion: bool = True,
+                   anchor_prefix: str = "mk") -> str:
+    """把原文渲染成带纠错标记的 HTML（QTextBrowser 直接 setHtml 可用）。
+
+    每处错误按类别底色高亮 + 下划线 + 命名锚点（{anchor_prefix}{序号}，
+    供 scrollToAnchor 定位），后随灰色〔建议〕；悬停显示完整说明。
+    文本一律 HTML 转义，换行转 <br>。重叠区间（理论已被 _dedupe 消除）
+    做跳过防御，绝不重复渲染。
+    """
+    import html as _html
+    parts: list[str] = []
+    pos = 0
+    ordered = sorted(corrections, key=lambda c: (c.start, -(c.end - c.start)))
+    for i, c in enumerate(ordered):
+        if c.start < pos:
+            continue
+        if c.end <= c.start or c.end > len(text):
+            continue
+        parts.append(_html.escape(text[pos:c.start]).replace("\n", "<br>"))
+        bg, fg = _MARK_STYLE.get(c.category, _MARK_FALLBACK)
+        tip = _html.escape(f"{c.label}（{c.category}，置信度 {c.confidence:.2f}）")
+        sug = (f'<span style="color:{_MARK_FALLBACK[1]};">'
+               f'〔{_html.escape(c.suggestion)}〕</span>') if show_suggestion else ""
+        parts.append(
+            f'<a name="{anchor_prefix}{i}"></a>'
+            f'<span style="background-color:{bg};color:{fg};'
+            f'text-decoration:underline;" title="{tip}">'
+            f'{_html.escape(c.wrong)}</span>{sug}')
+        pos = c.end
+    parts.append(_html.escape(text[pos:]).replace("\n", "<br>"))
+    return "".join(parts)
+
+
+def paragraph_no(text: str, pos: int) -> int:
+    """pos 落在第几段（按换行计数，1 起）。"""
+    return text.count("\n", 0, max(0, min(pos, len(text)))) + 1
+
+
+def correct_block(text: str, skip_categories: "set[str] | tuple" = ("数字用法",)
+                  ) -> "tuple[str, list[Correction]]":
+    """单个文本块（段落/标题/单元格）的纠错：返回 (修正后文本, 命中明细)。
+
+    偏移为块内局部偏移。默认跳过"数字用法"类——与纠错面板的口径一致
+    （该类多为提示性规范建议，批量替换容易把编号、日期改坏）。
+    """
+    cs = [c for c in check_text(text) if c.category not in skip_categories]
+    out = text
+    for c in sorted(cs, key=lambda c: -c.start):
+        out = out[:c.start] + c.suggestion + out[c.end:]
+    return out, cs
+
+
+def tree_to_blocks(tree) -> "list[dict]":
+    """DocTree -> 轻量块列表（kind: heading/para/table），供任意文档纠错逐块处理。"""
+    from .model import HEADING, TABLE
+    # 标题不折进块列表：blocks_to_tree 的 title 是独立入参，
+    # 折叠会导致导出时标题渲染两遍（DocTree.title + 正文 Heading1）。
+    blocks = []
+    for b in tree.blocks:
+        if b.type == TABLE and b.rows:
+            blocks.append({"kind": "table", "text": "", "rows": [list(r) for r in b.rows]})
+        else:
+            blocks.append({"kind": "heading" if b.type == HEADING else "para",
+                           "text": b.text or "", "rows": None})
+    return blocks
+
+
+def blocks_to_tree(title: str, blocks) -> "object":
+    """块列表 -> DocTree（表格行转 TABLE 块；heading 用 1 级、para 用正文块）。"""
+    from .model import Block, DocTree, HEADING, PARAGRAPH, TABLE
+    out: list[Block] = []
+    for b in blocks:
+        if b["kind"] == "table" and b.get("rows"):
+            out.append(Block(type=TABLE, rows=[list(r) for r in b["rows"]]))
+        elif b["kind"] == "heading" and (b.get("text") or "").strip():
+            out.append(Block(type=HEADING, level=1, text=b["text"]))
+        elif (b.get("text") or "").strip():
+            out.append(Block(type=PARAGRAPH, text=b["text"]))
+    return DocTree(title=title or "", blocks=out)
