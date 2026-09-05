@@ -13,8 +13,8 @@ from .parsers.pdf_parser import parse_pdf
 from .parsers.rtf_parser import parse_rtf
 from .parsers.txt_parser import parse_txt
 
-SUPPORTED_EXTS = {".docx", ".doc", ".txt", ".rtf", ".pdf", ".md", ".markdown",
-                  ".html", ".htm"}
+SUPPORTED_EXTS = {".docx", ".doc", ".wps", ".txt", ".rtf", ".pdf",
+                  ".md", ".markdown", ".html", ".htm"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
@@ -39,6 +39,18 @@ def parse_any(path: str, ocr_progress_cb=None) -> ImportResult:
             tree = parse_docx(path)
         elif ext == ".doc":
             tree = parse_doc(path)
+        elif ext == ".wps":
+            # WPS 文字格式。两种现实形态，按内容嗅探而非轻信扩展名：
+            #   1) OOXML zip（部分金山版本/WPS 兼容模式）-> 直接走 docx 解析；
+            #   2) OLE 复合文档（含 MS Works 同扩展名的历史文件）-> 走 .doc
+            #      四级降级链（COM 探测顺序 kwps/wps 优先，装了 WPS 的机器
+            #      保真度最高；LibreOffice 的 libwps 兜 Works；纯解析+原始
+            #      扫描兜底）。
+            head = Path(path).open("rb").read(4)
+            if head == b"PK" + bytes([3, 4]):  # ZIP 魔数 PK
+                tree = parse_docx(path)
+            else:
+                tree = parse_doc(path)
         elif ext == ".pdf":
             tree = parse_pdf(path)
             if (tree is None or not tree.blocks) and ocr_available():

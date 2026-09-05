@@ -14,9 +14,9 @@ from ..db import dao
 from .widgets import info
 from .workers import ImportWorker
 
-FILE_FILTER = ("支持的文件 (*.docx *.doc *.txt *.rtf *.pdf *.md *.markdown *.html *.htm"
+FILE_FILTER = ("支持的文件 (*.docx *.doc *.wps *.txt *.rtf *.pdf *.md *.markdown *.html *.htm"
                " *.png *.jpg *.jpeg *.bmp *.tif *.tiff);;"
-               "Word (*.docx *.doc);;PDF (*.pdf);;图片-需OCR (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;"
+               "Word/WPS (*.docx *.doc *.wps);;PDF (*.pdf);;图片-需OCR (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;"
                "文本 (*.txt);;RTF (*.rtf);;Markdown (*.md);;HTML (*.html *.htm);;全部文件 (*)")
 
 
