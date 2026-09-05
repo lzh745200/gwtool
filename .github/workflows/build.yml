@@ -86,8 +86,8 @@ jobs:
           # 鸡生蛋问题：快照源走 HTTPS，没有 CA 证书无法握手，故分两步。
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates
-          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian/20260905T023709Z/ bullseye main' > /etc/apt/sources.list
-          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian-security/20260905T023709Z/ bullseye-security main' >> /etc/apt/sources.list
+          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian/20260601T000000Z/ bullseye main' > /etc/apt/sources.list
+          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian-security/20260601T000000Z/ bullseye-security main' >> /etc/apt/sources.list
           echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip git file binutils libpython3.9 \
