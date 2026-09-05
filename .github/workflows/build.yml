@@ -80,11 +80,14 @@ jobs:
     steps:
       - name: 安装构建工具链（Python 3.9 + Qt 运行库）
         run: |
-          # bullseye-security 池正被上游逐步清理（u7 索引指向的 .deb 随机 404，
-          # 各 CDN 节点状态不一），在线源已不可靠。改为固定时间戳快照源：
-          # 内容永不变化，构建环境可复现。
-          echo 'deb [trusted=yes] https://snapshot.debian.org/archive/debian/20260905T023709Z/ bullseye main' > /etc/apt/sources.list
-          echo 'deb [trusted=yes] https://snapshot.debian.org/archive/debian-security/20260905T023709Z/ bullseye-security main' >> /etc/apt/sources.list
+          # bullseye-security 池正被上游逐步清理（u7 索引指向的 .deb 随机 404），
+          # 在线源不可复现。方案：先用容器自带的 HTTP 原始源装上 ca-certificates，
+          # 再切换到 snapshot.debian.org 固定时间戳快照（内容永不变化）装其余包。
+          # 鸡生蛋问题：快照源走 HTTPS，没有 CA 证书无法握手，故分两步。
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates
+          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian/20260905T023709Z/ bullseye main' > /etc/apt/sources.list
+          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian-security/20260905T023709Z/ bullseye-security main' >> /etc/apt/sources.list
           echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip git file binutils libpython3.9 \
