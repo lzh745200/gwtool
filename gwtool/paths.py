@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_DIR_NAME = "gwtool"
 _portable = False
-_override: Path | None = None
+_override = None  # Path | None（模块级注解不用 PEP 604 语法：本模块需兼容 Python 3.9）
 
 
 def set_portable(flag: bool) -> None:
