@@ -6,6 +6,7 @@ import pytest
 
 from gwtool.core import corrector
 from gwtool.core.model import Block, DocTree, HEADING, PARAGRAPH, TABLE
+from gwtool.db import dao
 
 
 # ------------------------------------------------------------ 标记渲染
