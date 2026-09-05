@@ -105,14 +105,17 @@ def test_spec_bundles_seed_db():
 # ------------------------------------------------------------ 硬编码路径
 def test_no_hardcoded_build_machine_paths():
     """全库不得出现构建机的绝对路径 C:\\gwtool——用户机上它不存在。"""
-    skip_dirs = {".git", "__pycache__", ".venv", "build", "dist", ".pytest_cache",
+    skip_dirs = {".git", "__pycache__", "build", "dist", ".pytest_cache",
                  "node_modules", ".qoder"}
+    # 虚拟环境目录按前缀匹配（.venv / .venv64 / .venv_win …），里面必然有本机路径
+    skip_prefixes = (".venv",)
     skip_suffix = {".pyc", ".pdf", ".pptx", ".db", ".zip", ".exe", ".png", ".ico"}
     hits = []
     for path in ROOT.rglob("*"):
         if not path.is_file() or path.suffix.lower() in skip_suffix:
             continue
-        if any(part in skip_dirs for part in path.parts):
+        if any(part in skip_dirs or part.startswith(skip_prefixes)
+               for part in path.parts):
             continue
         if path.name == Path(__file__).name:      # 本测试自身会提到该字符串
             continue
