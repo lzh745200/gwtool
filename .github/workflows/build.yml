@@ -227,7 +227,7 @@ jobs:
         run: |
           mkdir -p pkg/DEBIAN pkg/opt/gwtool pkg/usr/share/applications
           cp -r gwtool/. pkg/opt/gwtool/
-          INSTALLED_SIZE=$(du -sk pkg/usr | cut -f1)
+          INSTALLED_SIZE=$(du -sk pkg/opt pkg/usr | awk '{s+=$1} END {print s}')
           cat > pkg/DEBIAN/control <<EOF
           Package: gwtool
           Version: ${VERSION}
@@ -260,7 +260,7 @@ jobs:
           Categories=Office;
           EOF
           dpkg-deb --build --root-owner-group pkg "gwtool_${VERSION}_linux_${DEBARCH}.deb"
-          dpkg-deb -I "gwtool_${VERSION}_linux_${DEBARCH}.deb" | head -8
+          dpkg-deb -I "gwtool_${VERSION}_linux_${DEBARCH}.deb" | head -12
 
       - name: 生成便携版 tar.gz
         run: tar -czf "gwtool_linux_${{ matrix.pkgarch }}_portable.tar.gz" gwtool
