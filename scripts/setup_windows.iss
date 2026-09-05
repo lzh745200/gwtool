@@ -3,7 +3,7 @@
 ;  使用：安装 Inno Setup 6 后，编译本脚本。
 ; ============================================================
 #ifndef APP_VERSION
-#define APP_VERSION "1.3.3"
+#define APP_VERSION "1.4.0"
 #endif
 [Setup]
 AppName=公文汇编助手
