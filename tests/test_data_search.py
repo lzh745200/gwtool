@@ -107,3 +107,34 @@ def test_backup_restore(tmp_db, tmp_path, monkeypatch):
     bk.restore_backup(z)
     d = dao.get_document(1)
     assert d is not None and "备份内容" in d.content_text
+
+# ------------------------------------------------------------ MATCH 构造（第 6 轮回归）
+def test_match_query_grouping_and_syntax(tmp_db):
+    """变体进 OR 分组、分组间显式 AND：两词以上查询不得因拆分变体漏检。
+
+    修复前：lcut_for_search 的拆分片与主词并列 AND——"钉钉子精神"生成
+    '"钉子" "钉钉子" "精神"'，索引里没有"钉子"就整条落空；带括号分组后
+    分组间隐式 AND 又是 FTS5 语法错误（被静默吞掉，多词查询全部返回空）。
+    """
+    from gwtool.db.tokenize import build_match_query
+    from gwtool.db import dao
+
+    dao.add_phrase("我们要以钉钉子精神抓好落实。", context="作风")
+    mq = build_match_query("钉钉子精神")
+    assert " OR " in mq, f"变体应进 OR 分组: {mq}"
+    assert " AND " in mq, f"分组间应显式 AND: {mq}"
+    hits = dao.search_phrases("钉钉子精神")
+    assert hits, f"词组查询不得漏检（MATCH={mq}）"
+
+    # 纯符号查询：无词干，返回空表达式
+    assert build_match_query("！@#￥%") == ""
+
+    # 注入防御：引号剥除后无法闭合出 OR 注入
+    mq2 = build_match_query('x" OR "1')
+    assert mq2.count('"') % 2 == 0
+
+    # 多词文档查询在真实 FTS 上命中
+    dao.add_document(dao.Document(title="乡村振兴实施方案",
+                                  content_text="产业振兴 人才振兴。"))
+    rs = dao.search_documents("乡村振兴")
+    assert rs and rs[0].table == "documents"
