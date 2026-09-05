@@ -107,7 +107,12 @@ def _text_to_tree(text: str, title_hint: str = "") -> DocTree:
 
 
 def batch_import(paths: list[str], progress_cb=None) -> list[ImportResult]:
-    """同步批量导入。UI 层请放到工作线程调用，progress_cb(i, total, path)。"""
+    """仅批量**解析**（不入库！），返回逐文件 ImportResult。
+
+    入库由 UI 层 ImportWorker 负责（解析 -> dao.add_document 含内容指纹去重），
+    验收测试用 _import_like_worker 复刻同一链路。误把本函数当"完整导入"用
+    会得到全部 ok 但库内 0 篇的假象（第 8 轮压测实测踩中，故在此写明）。
+    UI 层请放到工作线程调用，progress_cb(i, total, path)。"""
     results = []
     total = len(paths)
     for i, p in enumerate(paths, 1):
