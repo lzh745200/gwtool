@@ -331,3 +331,16 @@ def test_library_panel_shows_attachment_marker(tmp_db, qapp, data_dir, doc, tmp_
         panel._open_attachments()     # 入口可用（exec 已屏蔽）
     finally:
         panel.close()
+
+def test_data_dir_isolation_under_tmp_db(tmp_db):
+    """tmp_db 夹具必须同时隔离数据目录：附件/备份不得写进真实 %APPDATA%。"""
+    import os as _os
+    from gwtool import paths
+
+    app_dir = paths.app_data_dir()
+    assert app_dir == tmp_db.parent
+    assert paths.attachments_dir().parent == app_dir
+    assert paths.backup_dir().parent == app_dir
+    real = _os.environ.get("APPDATA", "")
+    if real:
+        assert real.lower() not in str(app_dir).lower()

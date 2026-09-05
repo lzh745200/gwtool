@@ -10,12 +10,19 @@ sys.path.insert(0, str(ROOT))
 
 from gwtool.db import connection as dbconn  # noqa: E402
 from gwtool.core import corrector  # noqa: E402
+from gwtool import paths  # noqa: E402
 
 
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
-    """每个测试使用独立临时数据库。"""
-    db_file = tmp_path / "test_gwtool.db"
+    """每个测试使用独立临时数据库与隔离的数据目录。
+
+    数据目录若不隔离，附件/备份/日志会写进真实用户目录 %APPDATA%/gwtool
+    （曾在逐模块探测中实际泄漏：附件文件落入真实 attachments/）。
+    """
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(paths, "_override", data_dir)
+    db_file = data_dir / "test_gwtool.db"
     dbconn.configure(db_file)
     corrector.invalidate_cache()
     yield db_file

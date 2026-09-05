@@ -12,6 +12,7 @@ from pathlib import Path
 
 APP_DIR_NAME = "gwtool"
 _portable = False
+_override: Path | None = None
 
 
 def set_portable(flag: bool) -> None:
@@ -24,8 +25,22 @@ def is_portable() -> bool:
     return _portable
 
 
+def set_app_data_dir(path: "str | Path | None") -> None:
+    """显式指定数据根目录（优先级最高）。
+
+    供测试/探测使用：dbconn.configure 只重定向数据库文件，而附件、备份、
+    日志目录仍由 app_data_dir() 推导，会写进真实用户目录造成泄漏。
+    传 None 清除覆盖，恢复按平台规则推导。
+    """
+    global _override
+    _override = Path(path) if path else None
+
+
 def app_data_dir() -> Path:
     """返回应用数据根目录，不存在则创建。"""
+    if _override is not None:
+        _override.mkdir(parents=True, exist_ok=True)
+        return _override
     if _portable:
         base = _exe_base() / "Data"
         base.mkdir(parents=True, exist_ok=True)
