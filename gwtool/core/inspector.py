@@ -279,4 +279,11 @@ def inspect_docx(path: str) -> list[Finding]:
     has_page = any("PAGE" in p._p.xml for p in footer.paragraphs)
     if not has_page:
         out.append(Finding("info", "页码", "页脚未检测到页码域（PAGE）"))
+
+    # 文本层 GB/T 9704 检查（第 24 轮补齐）：此前 inspect_docx 只查版式，
+    # 外来 docx 的内容违规（发文字号括号/编号链条/结束语与文种/成文日期）
+    # 全部漏报——体检一个同事发来的 docx 却查不出「(2026)」这类硬伤。
+    text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    if text.strip():
+        out = inspect_text(text) + out
     return out
