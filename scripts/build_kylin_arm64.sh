@@ -41,6 +41,25 @@ pyinstaller --noconfirm --clean \
   --exclude-module tkinter \
   main.py
 
+echo "[4.5/6] 集成 Tesseract OCR（已安装时）..."
+if command -v tesseract >/dev/null 2>&1; then
+    mkdir -p dist/gwtool/ocr/bin dist/gwtool/ocr/lib dist/gwtool/ocr/tessdata
+    cp /usr/bin/tesseract dist/gwtool/ocr/bin/
+    ldd /usr/bin/tesseract | awk '/=> \//{print $3}' | while read -r lib; do
+        case "$lib" in
+            */libc.so*|*/libm.so*|*/libpthread*|*/libdl*|*/librt*|*/ld-linux*) ;;
+            *) cp -L "$lib" dist/gwtool/ocr/lib/ ;;
+        esac
+    done
+    cp -r /usr/share/tesseract-ocr/*/tessdata/. dist/gwtool/ocr/tessdata/ 2>/dev/null || true
+    if command -v patchelf >/dev/null 2>&1; then
+        patchelf --set-rpath '$ORIGIN/../lib' dist/gwtool/ocr/bin/tesseract 2>/dev/null || true
+    fi
+    echo "      已集成 Tesseract + 中文包。"
+else
+    echo "      未检测到 tesseract，跳过 OCR 集成。"
+fi
+
 echo "[5/6] 放入启动器并自检运行库..."
 cp scripts/gwtool.sh dist/gwtool/gwtool.sh
 chmod +x dist/gwtool/gwtool dist/gwtool/gwtool.sh

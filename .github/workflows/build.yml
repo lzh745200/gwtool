@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+env:
+  TESS_FAST: https://github.com/tesseract-ocr/tessdata_fast/raw/main/chi_sim.traineddata
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -35,63 +38,51 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python scripts/e2e_check.py
 
+      - name: 安装 Tesseract OCR（内置到安装包）
+        run: choco install tesseract -y --no-progress
+
       - name: PyInstaller 打包（参数统一于 gwtool.spec）
         run: pyinstaller --noconfirm --clean gwtool.spec
 
+      - name: 集成 Tesseract + 中文包进产物
+        shell: pwsh
+        run: |
+          $ts = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path "$ts\tesseract.exe")) { throw "choco Tesseract 未安装成功" }
+          New-Item -ItemType Directory -Force -Path "dist\gwtool\tesseract\tessdata" | Out-Null
+          Copy-Item "$ts\tesseract.exe"  "dist\gwtool\tesseract\"
+          Copy-Item "$ts\*.dll"          "dist\gwtool\tesseract\"
+          Copy-Item "$ts\tessdata\eng.traineddata"  "dist\gwtool\tesseract\tessdata\"
+          Copy-Item "$ts\tessdata\osd.traineddata"  "dist\gwtool\tesseract\tessdata\"
+          Invoke-WebRequest -Uri $env:TESS_FAST -OutFile "dist\gwtool\tesseract\tessdata\chi_sim.traineddata"
+          $chi = (Get-Item "dist\gwtool\tesseract\tessdata\chi_sim.traineddata").Length
+          if ($chi -lt 1MB) { throw "chi_sim.traineddata 下载异常（$chi 字节）" }
+          Write-Output "Tesseract 集成完成，chi_sim $chi 字节"
+
       - name: 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入）
-        run: python scripts/smoke_dist.py dist/gwtool
-
-      - name: 生成便携版 zip
-        run: python -c "import shutil; shutil.make_archive('dist/gwtool_portable_win64','zip','.','dist/gwtool')"
-
-      - name: 安装 Inno Setup
-        run: choco install innosetup -y --no-progress
+        run: python scripts/smoke_dist.py dist\gwtool
 
       - name: 生成安装程序（版本号取自 gwtool/__init__.py）
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAPP_VERSION=$(python -c "from gwtool import __version__; print(__version__)") scripts\setup_windows.iss'
 
-      - name: 上传构建产物
+      - name: 上传安装包（唯一 Windows 产物）
         uses: actions/upload-artifact@v4
         with:
-          name: gwtool-windows-packages
-          path: |
-            dist/gwtool_portable_win64.zip
-            dist/gwtool_setup_win64.exe
+          name: gwtool-windows-installer
+          path: dist/gwtool_setup_win64.exe
 
   # ------------------------------------------------------------
-  # Linux 构建（麒麟 V10 等）：在 Debian 11 容器（glibc 2.31）内打包。
-  # 关键约束：PySide6 官方 aarch64 wheel 中 6.6~6.8.0 需 glibc>=2.31、
-  # 6.8.1+ 需 glibc>=2.39、6.11 需 Python>=3.10 —— 故锁 PySide6==6.8.0.2
-  #（Qt 6.8 LTS），产物兼容麒麟桌面 V10（Ubuntu 20.04 底层，glibc 2.31）；
-  # x86_64 版为 manylinux_2_28，麒麟桌面/服务器（glibc 2.28+）均可运行。
-  # 之前在 ubuntu-24.04（glibc 2.39）打包，麒麟上打开即报 GLIBC not found。
+  # Linux ARM64 构建（麒麟 V10 主目标）：Debian 11 容器（glibc 2.31）。
+  # Tesseract 4.1 + chi_sim 从容器系统集成进安装包（glibc 与麒麟桌面一致，
+  # 离线机无需任何 apt 源）。构建矩阵收敛为 arm64 —— 唯一 Linux 交付目标。
   # ------------------------------------------------------------
   build-linux:
-    strategy:
-      matrix:
-        include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-          - arch: amd64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04-arm
     container:
       image: debian:11
     steps:
-      - name: 安装构建工具链（Python 3.9 + Qt 运行库）
+      - name: 安装构建工具链（Python 3.9 + Qt 运行库 + Tesseract OCR）
         run: |
-          # bullseye-security 池正被上游逐步清理（u7 索引指向的 .deb 随机 404），
-          # 在线源不可复现。方案：先用容器自带的 HTTP 原始源装上 ca-certificates，
-          # 再切换到 snapshot.debian.org 固定时间戳快照（内容永不变化）装其余包。
-          # 鸡生蛋问题：快照源走 HTTPS，没有 CA 证书无法握手，故分两步。
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates
-          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian/20260601T000000Z/ bullseye main' > /etc/apt/sources.list
-          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian-security/20260601T000000Z/ bullseye-security main' >> /etc/apt/sources.list
-          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
-          # 快照源的 Release 文件是"过期"签名（内容被刻意冻结），必须关闭
-          # 有效期校验，否则 apt 拒绝使用该源
-          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/81-no-valid-until
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip git file binutils libpython3.9 \
             libgl1 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
@@ -99,11 +90,11 @@ jobs:
             libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-render-util0 libxcb-render0 \
             libxcb-shape0 libxcb-randr0 libxcb-xfixes0 libxcb-glx0 \
-            libxext6 libxrender1 libsm6 libice6
+            libxext6 libxrender1 libsm6 libice6 \
+            tesseract-ocr tesseract-ocr-chi-sim patchelf
           echo "== Python 诊断 =="
-          echo "PATH=$PATH"
           python3 --version
-          ls -l /usr/bin/python* 2>/dev/null || true
+          tesseract --version | head -1
 
       - uses: actions/checkout@v4
 
@@ -114,8 +105,7 @@ jobs:
             if command -v "$c" >/dev/null 2>&1; then PY="$(command -v "$c")"; break; fi
           done
           if [ -z "$PY" ]; then
-            echo "错误：容器内未找到 Python 3，诊断如下："
-            ls -l /usr/bin | grep -i py || true
+            echo "错误：容器内未找到 Python 3"
             exit 1
           fi
           echo "使用解释器：$PY"
@@ -125,12 +115,9 @@ jobs:
       - name: 安装依赖
         run: |
           "$PYBIN" -m pip install --upgrade pip
-          # PySide6 的平台约束已在 requirements.txt 用环境标记声明：
-          # Linux 锁 6.8.0.2（6.8.1+ 的 aarch64 wheel 需 glibc>=2.39，麒麟无法运行），
-          # 故此处不再单独安装，避免同一约束两处声明而漂移。
-          "$PYBIN" -m pip install -r requirements.txt ruff
+          "$PYBIN" -m pip install "PySide6==6.8.0.2" -r requirements.txt ruff
 
-      - name: 静态检查（ruff：语法错误/未定义名称）
+      - name: 静态检查（ruff）
         run: ruff check gwtool/ scripts/ tests/
 
       - name: 运行测试
@@ -143,20 +130,28 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: $PYBIN scripts/e2e_check.py
 
-      - name: PyInstaller 打包（glibc 2.28 目标，参数统一于 gwtool.spec）
+      - name: PyInstaller 打包（glibc 2.31 目标，参数统一于 gwtool.spec）
         run: $PYBIN -m PyInstaller --noconfirm --clean gwtool.spec
 
-      - name: 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入）
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: $PYBIN scripts/smoke_dist.py dist/gwtool
-
-      - name: 整理产物目录（统一 pkgsrc/，规避 artifact 根路径歧义）
+      - name: 整理产物目录 + 集成 Tesseract/中文包
         run: |
           mkdir -p pkgsrc
           mv dist/gwtool pkgsrc/gwtool
           cp scripts/gwtool.sh pkgsrc/gwtool/gwtool.sh
           chmod +x pkgsrc/gwtool/gwtool pkgsrc/gwtool/gwtool.sh
+          # 集成 Tesseract：二进制 + 全部非基础依赖库 + 中文包（含 RPATH）
+          mkdir -p pkgsrc/gwtool/ocr/bin pkgsrc/gwtool/ocr/lib pkgsrc/gwtool/ocr/tessdata
+          cp /usr/bin/tesseract pkgsrc/gwtool/ocr/bin/
+          ldd /usr/bin/tesseract | awk '/=> \//{print $3}' | while read -r lib; do
+            case "$lib" in
+              */libc.so*|*/libm.so*|*/libpthread*|*/libdl*|*/librt*|*/ld-linux*) ;;
+              *) cp -L "$lib" pkgsrc/gwtool/ocr/lib/ ;;
+            esac
+          done
+          cp -r /usr/share/tesseract-ocr/*/tessdata/. pkgsrc/gwtool/ocr/tessdata/
+          patchelf --set-rpath '$ORIGIN/../lib' pkgsrc/gwtool/ocr/bin/tesseract
+          pkgsrc/gwtool/ocr/bin/tesseract --version | head -1
+          pkgsrc/gwtool/ocr/bin/tesseract --list-langs | grep -q chi_sim
 
       - name: 自检运行库（缺库即失败，问题在发布前暴露）
         run: |
@@ -164,18 +159,18 @@ jobs:
           for target in pkgsrc/gwtool/gwtool $(find pkgsrc/gwtool -name 'libqxcb.so' 2>/dev/null); do
             MISSING="$MISSING$(ldd "$target" 2>/dev/null | grep 'not found' || true)"
           done
-          # 兜底说明：libxcb-cursor 若在构建容器缺失属预期（bullseye 已含，
-          # deb Depends 亦已声明），仅对它放行，其余缺库一律构建失败
           FILTERED=$(echo "$MISSING" | grep -v 'libxcb-cursor' || true)
           if [ -n "$FILTERED" ]; then
             echo "以下系统库在打包环境缺失（成品将同样缺失，属致命问题）："
             echo "$FILTERED"
             exit 1
           fi
-          if [ -n "$MISSING" ]; then
-            echo "注：libxcb-cursor 在 EL8 容器缺失属预期（deb 已声明 libxcb-cursor0 依赖）"
-          fi
           echo "运行库自检通过"
+
+      - name: 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入 + OCR）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: $PYBIN scripts/smoke_dist.py pkgsrc/gwtool
 
       - name: 记录版本号
         run: $PYBIN -c "from gwtool import __version__; open('pkgsrc/VERSION.txt','w').write(__version__)"
@@ -183,25 +178,14 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: gwtool-linux-${{ matrix.arch }}
+          name: gwtool-linux-arm64
           path: pkgsrc
 
   # ------------------------------------------------------------
-  # Linux 安装包组装（在宿主机上做：需要 dpkg-deb / makeself）
+  # .deb 组装（宿主机 dpkg-deb）：唯一 Linux 安装包
   # ------------------------------------------------------------
   package-linux:
-    strategy:
-      matrix:
-        include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            debarch: arm64
-            pkgarch: arm64
-          - arch: amd64
-            runner: ubuntu-latest
-            debarch: amd64
-            pkgarch: x86_64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04-arm
     needs: build-linux
     steps:
       - uses: actions/checkout@v4
@@ -209,42 +193,36 @@ jobs:
       - name: 下载构建产物
         uses: actions/download-artifact@v4
         with:
-          name: gwtool-linux-${{ matrix.arch }}
-
-      - name: 安装打包工具
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y makeself
+          name: gwtool-linux-arm64
 
       - name: 还原可执行权限并读取版本号
         run: |
-          chmod +x gwtool/gwtool gwtool/gwtool.sh
+          chmod +x gwtool/gwtool gwtool/gwtool.sh gwtool/ocr/bin/tesseract
           echo "VERSION=$(cat VERSION.txt)" >> "$GITHUB_ENV"
 
       - name: 组装 .deb 安装包（麒麟 V10 / Debian 系）
-        env:
-          DEBARCH: ${{ matrix.debarch }}
         run: |
           mkdir -p pkg/DEBIAN pkg/opt/gwtool pkg/usr/share/applications
           cp -r gwtool/. pkg/opt/gwtool/
-          INSTALLED_SIZE=$(du -sk pkg/opt pkg/usr | awk '{s+=$1} END {print s}')
+          INSTALLED_SIZE=$(du -sk pkg/opt | cut -f1)
           cat > pkg/DEBIAN/control <<EOF
           Package: gwtool
           Version: ${VERSION}
           Section: office
           Priority: optional
-          Architecture: ${DEBARCH}
+          Architecture: arm64
           Installed-Size: ${INSTALLED_SIZE}
           Maintainer: lzh745200 <lzh745200@users.noreply.github.com>
           Depends: libgl1, libegl1, libglib2.0-0, libglx0, libxcb-glx0, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1, libdbus-1-3, libx11-6, libx11-xcb1, libxcb1, libxcb-cursor0, libxcb-xinerama0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-render0, libxcb-shape0, libxcb-randr0, libxcb-xfixes0, libxcb-xkb1, libxext6, libxrender1, libsm6, libice6
-          Recommends: tesseract-ocr, tesseract-ocr-chi-sim
           Description: 公文汇编助手 - 单机离线版智能公文汇编与写作辅助工具
-           多格式材料导入、一键汇编（红头/目录/页码）、文字纠错、GB/T 9704 格式体检、A3骑马钉小册子、全文检索、写作参考。
+           多格式材料导入（含 WPS/扫描件 OCR 内置）、一键汇编（红头/目录/页码）、
+           文字纠错、GB/T 9704 格式体检、A3骑马钉小册子、全文检索、写作参考。
+           OCR 引擎与中文包已内置，离线机开箱即用。
           EOF
           cat > pkg/DEBIAN/postinst <<'EOS'
           #!/bin/sh
           # artifact 传输可能丢失可执行位，这里统一兜底
-          chmod +x /opt/gwtool/gwtool /opt/gwtool/gwtool.sh 2>/dev/null || true
+          chmod +x /opt/gwtool/gwtool /opt/gwtool/gwtool.sh /opt/gwtool/ocr/bin/tesseract 2>/dev/null || true
           exit 0
           EOS
           chmod 755 pkg/DEBIAN/postinst
@@ -259,28 +237,14 @@ jobs:
           Terminal=false
           Categories=Office;
           EOF
-          dpkg-deb --build --root-owner-group pkg "gwtool_${VERSION}_linux_${DEBARCH}.deb"
-          dpkg-deb -I "gwtool_${VERSION}_linux_${DEBARCH}.deb" | head -12
+          dpkg-deb --build --root-owner-group pkg "gwtool_${VERSION}_linux_arm64.deb"
+          dpkg-deb -I "gwtool_${VERSION}_linux_arm64.deb" | head -12
 
-      - name: 生成便携版 tar.gz
-        run: tar -czf "gwtool_linux_${{ matrix.pkgarch }}_portable.tar.gz" gwtool
-
-      - name: 生成 .run 自解压安装包（makeself，含架构校验）
-        run: |
-          cp scripts/install_kylin_run.sh gwtool/gwtool-install.sh
-          sed -i "s/__TARGET_ARCH__/${{ matrix.pkgarch }}/" gwtool/gwtool-install.sh
-          chmod +x gwtool/gwtool-install.sh
-          makeself gwtool "gwtool_kylin_${{ matrix.pkgarch }}.run" \
-            "公文汇编助手 安装程序" ./gwtool-install.sh
-
-      - name: 上传安装包
+      - name: 上传安装包（唯一 Linux 产物）
         uses: actions/upload-artifact@v4
         with:
-          name: gwtool-linux-pkgs-${{ matrix.arch }}
-          path: |
-            gwtool_*_linux_*.deb
-            gwtool_linux_*_portable.tar.gz
-            gwtool_kylin_*.run
+          name: gwtool-linux-installer
+          path: gwtool_*_linux_arm64.deb
 
   release:
     runs-on: ubuntu-latest
@@ -302,6 +266,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "公文汇编助手 $GITHUB_REF_NAME" \
             --generate-notes \
-            artifacts/gwtool-windows-packages/* \
-            artifacts/gwtool-linux-pkgs-arm64/* \
-            artifacts/gwtool-linux-pkgs-amd64/*
+            artifacts/gwtool-windows-installer/* \
+            artifacts/gwtool-linux-installer/*

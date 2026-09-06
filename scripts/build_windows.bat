@@ -32,6 +32,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo [3.5/5] 集成 Tesseract OCR（本机已安装时；CI 由 choco 提供）...
+set "TS_DIR="
+for /d %%D in ("%ProgramFiles%\Tesseract-OCR") do set "TS_DIR=%%D"
+if exist "%TS_DIR%	esseract.exe" (
+    mkdir dist\gwtool	esseract	essdata 2>nul
+    copy /y "%TS_DIR%	esseract.exe" dist\gwtool	esseract\ >nul
+    copy /y "%TS_DIR%\*.dll" dist\gwtool	esseract\ >nul
+    copy /y "%TS_DIR%	essdata\eng.traineddata" dist\gwtool	esseract	essdata\ >nul
+    if exist "%TS_DIR%	essdata\chi_sim.traineddata" copy /y "%TS_DIR%	essdata\chi_sim.traineddata" dist\gwtool	esseract	essdata\ >nul
+    echo       已集成 Tesseract。
+) else (
+    echo       未检测到本机 Tesseract，跳过集成（OCR 仍可通过设置指定路径）。
+)
+
 echo [4/5] 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入）...
 "%PY%" scripts\smoke_dist.py dist\gwtool
 if errorlevel 1 (

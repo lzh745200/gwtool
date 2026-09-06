@@ -65,6 +65,13 @@ if [ -n "$MISSING" ]; then
   popup "缺少系统运行库，程序可能无法启动。\n\n修复命令已写入：$LOG\n（sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1 等）"
 fi
 
+# ---- OCR（内置 Tesseract）：预置路径，无内置时自动回退系统安装 ----
+if [ -d "$DIR/ocr/bin" ]; then
+    export PATH="$DIR/ocr/bin:$PATH"
+    export LD_LIBRARY_PATH="$DIR/ocr/lib:${LD_LIBRARY_PATH:-}"
+    export TESSDATA_PREFIX="$DIR/ocr/tessdata"
+fi
+
 # ---- 启动主程序；失败时保留诊断日志 ----
 "$EXE" "$@"
 rc=$?

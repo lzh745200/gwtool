@@ -1,7 +1,7 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.4.1**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.5.0**。
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
@@ -14,7 +14,7 @@
 
 | 模块 | 说明 |
 |------|------|
-| 材料导入 | 拖拽/选择批量导入 .docx .doc .wps（WPS/Works，内容嗅探路由，装 WPS 机器 COM 保真）.txt .rtf .pdf .md .html，扫描件经 OCR 识别（可选），内容去重 |
+| 材料导入 | 拖拽/选择批量导入 .docx .doc .wps（WPS/Works，内容嗅探路由，装 WPS 机器 COM 保真）.txt .rtf .pdf .md .html，**扫描件 OCR 内置**（Tesseract+中文包随安装包分发，离线开箱即用），内容去重 |
 | 新建公文 | 15 种法定文种骨架（决议/决定/命令/公报/公告/通告/意见/通知/通报/报告/请示/批复/议案/函/纪要），填要素即成稿 |
 | 文秘工具箱 | 编辑器右键：金额大写、日期大写、数字大写、简繁转换、全半角切换（OpenCC 离线词典） |
 | 一键汇编 | 三步向导：选材料（拖拽排序）→选模板→生成；支持批量模式（每份材料独立成文） |
@@ -80,9 +80,7 @@ PySide6 分平台（Windows 6.11.2；Linux/麒麟 6.8.0.2，因官方 aarch64 wh
 scripts\build_windows.bat
 ```
 产物：
-- `dist\gwtool\gwtool.exe` —— 目录版（启动最快，≤5 秒）
-- `dist\gwtool_便携版.zip` —— 免安装压缩包
-- 安装包：用 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 编译 `scripts\setup_windows.iss`
+- `dist\gwtool\gwtool.exe` —— 目录版（启动最快，≤5 秒；CI 以 Inno Setup 打成唯一安装包 `gwtool_setup_win64.exe`）
 
 ### 麒麟 V10 ARM64
 
@@ -107,8 +105,8 @@ bash scripts/kylin_offline_wheels.sh    # 生成 wheels_aarch64/
 bash scripts/build_kylin_arm64.sh       # 自动检测离线 wheel 并安装
 ```
 
-产物：`dist/gwtool/gwtool`（目录版，启动器 `gwtool.sh` 附带运行库预检），
-安装包 `gwtool_kylin_<架构>.run` 自解压安装（含架构校验 + 桌面入口）。
+产物：`dist/gwtool/gwtool`（目录版，启动器 `gwtool.sh` 附带运行库预检）；
+CI 以 dpkg-deb 打成唯一安装包 `gwtool_<版本>_linux_arm64.deb`。
 
 **麒麟前置条件**：`sudo apt install python3 python3-venv python3-pip`
 （麒麟 V10 一般自带 Python 3.7+；若系统 Python 低于 3.9，可用 `pyenv` 或源码

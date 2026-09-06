@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""OCR 扫描件识别（可选增强）：Tesseract 5 + chi_sim。
+"""OCR 扫描件识别（v1.5.0 起为**内置功能**）：Tesseract 5 + chi_sim。
 
-设计：检测到 tesseract 时启用；PDF 无文字层时 importer 自动走 OCR。
-不捆绑二进制——用户在设置中指定 tesseract 路径即可（Win 安装器 /
-麒麟 `sudo apt install tesseract-ocr tesseract-ocr-chi-sim`）。
+解析顺序：设置中用户指定的路径 > 随包捆绑（Windows 安装器把 Tesseract
+整体打进 _MEIPASS/tesseract；Linux deb 内嵌到 /opt/gwtool/ocr/，启动器
+已设 PATH/TESSDATA_PREFIX）> 系统 PATH。三种来源都无需用户手工配置。
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -21,11 +23,37 @@ except ImportError:  # pragma: no cover
     import fitz  # type: ignore
 
 
+def _bundled() -> tuple[str, str]:
+    """随包捆绑的 (tesseract 可执行文件, TESSDATA_PREFIX)；不存在返回空。"""
+    cands: list[tuple[Path, Path]] = []
+    exe_dir = Path(sys.executable).resolve().parent
+    # Windows onedir / Inno 安装布局：{app}	esseract	esseract.exe
+    cands.append((exe_dir / "tesseract" / "tesseract.exe",
+                  exe_dir / "tesseract" / "tessdata"))
+    # Linux：{install}/ocr/bin/tesseract（deb 装到 /opt/gwtool，.run/便携随目录）
+    cands.append((exe_dir / "ocr" / "bin" / "tesseract",
+                  exe_dir / "ocr" / "tessdata"))
+    cands.append((Path("/opt/gwtool/ocr/bin/tesseract"),
+                  Path("/opt/gwtool/ocr/tessdata")))
+    for exe, td in cands:
+        if exe.exists():
+            return str(exe), str(td)
+    return "", ""
+
+
+def _bundled_tessdata() -> str:
+    exe, td = _bundled()
+    return td if exe and Path(td).exists() else ""
+
+
 def tesseract_path() -> str:
-    """tesseract 可执行文件路径：设置优先，其次 PATH。"""
+    """tesseract 可执行文件路径：设置优先，其次随包捆绑，最后系统 PATH。"""
     configured = dao.get_setting("tesseract_path", "")
     if configured and Path(configured).exists():
         return configured
+    bundled, _ = _bundled()
+    if bundled:
+        return bundled
     return shutil.which("tesseract") or ""
 
 
@@ -37,6 +65,9 @@ def has_chi_sim(tess: str = "") -> bool:
     tess = tess or tesseract_path()
     if not tess:
         return False
+    td = _bundled_tessdata()
+    if td:
+        os.environ["TESSDATA_PREFIX"] = td
     try:
         out = subprocess.run([tess, "--list-langs"], capture_output=True,
                              timeout=30, text=True, check=False)
@@ -50,6 +81,9 @@ def ocr_image(image_path: str, tess: str = "") -> str:
     tess = tess or tesseract_path()
     if not tess:
         raise RuntimeError("未找到 tesseract，请先安装并在设置中指定路径")
+    td = _bundled_tessdata()
+    if td:
+        os.environ["TESSDATA_PREFIX"] = td
     r = subprocess.run(
         [tess, image_path, "stdout", "-l", "chi_sim", "--psm", "6"],
         capture_output=True, timeout=300, check=False)

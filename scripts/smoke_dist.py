@@ -81,6 +81,13 @@ def main() -> int:
     check("opencc 简繁转换词典", find_one(dist, "TSCharacters", "STCharacters",
                                           "opencc") is not None)
     check("jieba 分词词典", find_one(dist, "dict.txt") is not None)
+    # OCR 内置（v1.5.0）：Tesseract 二进制与中文包随包分发
+    tess = find_one(dist, "tesseract.exe", "tesseract")
+    check("内置 Tesseract 可执行文件", tess is not None,
+          str(tess.relative_to(dist)) if tess else "缺失则 OCR 不可用")
+    chi = find_one(dist, "chi_sim.traineddata")
+    check("内置中文 OCR 包 chi_sim", chi is not None,
+          str(chi.relative_to(dist)) if chi else "缺失则中文 OCR 不可用")
 
     # ---- 2. 真实启动 ----
     print("\n-- 启动实测 --")

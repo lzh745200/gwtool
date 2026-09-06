@@ -99,18 +99,35 @@ def check_text(text: str) -> list[Correction]:
     return _dedupe(found)
 
 
+def _buckets() -> dict[str, list[str]]:
+    """首字 -> 词列表 的匹配桶（最长优先），随词库缓存避免每次 4 万条重建。"""
+    buckets = _RULES_CACHE.get("buckets")
+    if buckets is None:
+        patterns = _load_patterns()
+        buckets = {}
+        for w in patterns:
+            buckets.setdefault(w[0], []).append(w)
+        for first in buckets:
+            buckets[first].sort(key=len, reverse=True)  # 最长优先
+        _RULES_CACHE["buckets"] = buckets
+    return buckets
+
+
+_NEG_COMPILED: dict[str, list] = {}
+
+
 def _check_exact(text: str) -> list[Correction]:
     patterns = _load_patterns()
     ignore = _RULES_CACHE.get("ignore") or set()
     if not patterns:
         return []
-    by_first: dict[str, list[str]] = {}
-    for w in patterns:
-        by_first.setdefault(w[0], []).append(w)
-    for first in by_first:
-        by_first[first].sort(key=len, reverse=True)  # 最长优先
+    by_first = _buckets()
     raw: list[tuple[int, int, str, str, str, float]] = []
     i, n = 0, len(text)
+    # 书名号前缀计数：O(n) 预计算，命中处 O(1) 判定（原为每命中 O(n) 全扫）
+    q_open = q_close = 0   # text[:i] 中的书名号计数（随 i 推进更新）
+    # 负向上下文预编译（当前仅 1 条规则，模式均为锚定短语）
+    neg_rx: dict[str, list] = {}
     while i < n:
         cands = by_first.get(text[i])
         if cands:
@@ -124,18 +141,26 @@ def _check_exact(text: str) -> list[Correction]:
                     i += len(hit)
                     continue
                 correct, cat, conf = patterns[hit]
-                # 负向上下文：检查命中词之前的文本
-                neg = NEGATIVE_CONTEXTS.get(hit, [])
-                if any(re.search(rx, text[:i]) for rx in neg):
+                # 负向上下文：检查命中词之前的文本（窗口 120 字足够——
+                # 模式均为紧邻短语；原实现对全前缀 re.search，O(命中×文本长)）
+                neg = neg_rx.get(hit)
+                if neg is None:
+                    neg = neg_rx[hit] = [re.compile(rx) for rx
+                                         in NEGATIVE_CONTEXTS.get(hit, [])]
+                if any(rx.search(text[max(0, i - 120):i]) for rx in neg):
                     i += 1
                     continue
                 # 书名号内的文件标题按原文引用，不作纠错提示
-                if text[:i].count("《") > text[:i].count("》"):
+                if q_open > q_close:
                     i += len(hit)
                     continue
                 raw.append((i, i + len(hit), hit, correct, cat, conf))
                 i += len(hit)
                 continue
+        if text[i] == "《":
+            q_open += 1
+        elif text[i] == "》":
+            q_close += 1
         i += 1
     return _suppress_inside_common_words(text, raw)
 
@@ -154,7 +179,8 @@ def _suppress_inside_common_words(
          避免误伤"同为真实词的易混对"（如 度过/渡过 类）。
     """
     boundaries: set[int] = set()
-    token_spans: list[tuple[int, int]] = []
+    inside_mask = bytearray(len(text) + 2)   # 位置 -> 是否严格位于某 token 内部
+    has_tokens = False
     if raw:
         try:
             import jieba
@@ -163,14 +189,16 @@ def _suppress_inside_common_words(
             for _w, a, b in jieba.tokenize(text):
                 boundaries.add(a)
                 boundaries.add(b)
-                token_spans.append((a, b))
+                for k in range(a + 1, b):
+                    inside_mask[k] = 1
+                has_tokens = True
         except Exception:
             boundaries = set()
     out: list[Correction] = []
     for s, e, hit, correct, cat, conf in raw:
         both_ends = s in boundaries and e in boundaries
+        inside = bool(inside_mask[s])
         if conf < 0.7 and jieba_freq(hit) < 30:
-            inside = any(ts < s and te > e for ts, te in token_spans)
             if not (both_ends and not inside):
                 continue  # 低置信：跨词/词内命中 -> 误报
         else:
