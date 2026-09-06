@@ -83,6 +83,14 @@ jobs:
     steps:
       - name: 安装构建工具链（Python 3.9 + Qt 运行库 + Tesseract OCR）
         run: |
+          # bullseye-security 池被上游逐步清理（.deb 随机 404），在线源不可复现：
+          # 固定到 snapshot.debian.org 时间戳快照（2026-06-01 时点安全包完整）。
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates
+          echo 'deb [trusted=yes] https://snapshot.debian.org/archive/debian/20260601T000000Z/ bullseye main' > /etc/apt/sources.list
+          echo 'deb [trusted=yes] https://snapshot.debian.org/archive/debian-security/20260601T000000Z/ bullseye-security main' >> /etc/apt/sources.list
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/81-no-valid-until
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip git file binutils libpython3.9 \
             libgl1 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
