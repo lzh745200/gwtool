@@ -2,6 +2,7 @@
 """应用装配：数据库初始化 + 种子数据导入 + 主窗口启动。"""
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -130,8 +131,30 @@ def run(import_path: str = "") -> int:
     ensure_cjk_font()
 
     from .db import connection as dbconn
-    dbconn.configure(db_path())
-    ensure_database_seeded()
+    # 启动防护（第 20 轮）：库文件损坏（磁盘故障/异常断电）时不带栈崩溃，
+    # 指向最近的备份让用户自救；绝不静默、也绝不自动覆盖用户数据。
+    try:
+        dbconn.configure(db_path())
+        ensure_database_seeded()
+    except sqlite3.DatabaseError as exc:
+        from .paths import backup_dir
+        nl = chr(10)
+        lines = [f"数据库文件损坏，无法打开：{exc}"]
+        backups = sorted(backup_dir().glob("*.zip"))
+        if backups:
+            lines.append(f"最近备份：{backups[-1].name}")
+            lines.append("重新启动后可在「备份/恢复」中还原；或将备份包内的 "
+                         "gwtool.db 覆盖到数据目录后重启。")
+        else:
+            lines.append("未找到历史备份。数据目录：" + str(db_path()))
+        text = nl.join(lines)
+        print(text, file=sys.stderr)
+        try:
+            (Path.home() / "gwtool_启动诊断.log").write_text(text + nl,
+                                                             encoding="utf-8")
+        except OSError:
+            pass
+        return 2
 
     from .ui.main_window import MainWindow
     # 口令锁（启用后启动先解锁）
