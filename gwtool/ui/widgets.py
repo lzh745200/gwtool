@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QMessageBox, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QDoubleSpinBox, QMessageBox, QPushButton, QWidget)
 
 from ..core.template import FONT_BODY, FONT_HEI, FONT_KAI, FONT_SONG, FONT_XBS
 
@@ -70,3 +70,24 @@ def ask(parent: QWidget | None, text: str, title: str = "确认") -> bool:
     ret = QMessageBox.question(parent, title, text,
                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
     return ret == QMessageBox.Yes
+
+
+def dialog_buttons(parent, *specs) -> QHBoxLayout:
+    """统一按钮行：主按钮在右、次按钮在左、中间 stretch。
+
+    specs 每项 = (text, callback, is_default)；仅一项时全宽（如"关闭"）。
+    主按钮自动 setDefault(True) 以获得 QSS 主色底。
+    """
+    layout = QHBoxLayout()
+    layout.setContentsMargins(0, 0, 0, 0)
+    if len(specs) == 1:
+        layout.addStretch(1)
+    for text, cb, *rest in specs:
+        is_default = rest[0] if rest else False
+        btn = QPushButton(text, parent)
+        btn.clicked.connect(cb)
+        if is_default:
+            btn.setDefault(True)
+            layout.addStretch(1)
+        layout.addWidget(btn)
+    return layout

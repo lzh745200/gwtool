@@ -2,7 +2,7 @@
 """主窗口：三栏布局（资料库 | 编辑器 | 纠错与参考）+ 全部功能入口。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
                                QMainWindow, QSplitter, QStatusBar)
@@ -34,6 +34,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{__version__}（单机离线版）")
         self.resize(1360, 820)
+        from . import icons
+        self.setWindowIcon(icons.icon("new_doc"))
         self._tts_worker = None
         self._build_ui()
         self._build_menu()
@@ -77,10 +79,16 @@ class MainWindow(QMainWindow):
         split.addWidget(self.editor)
         split.addWidget(self.reference)
         split.setSizes([300, 640, 380])
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
+        for i in range(3):
+            split.setCollapsible(i, False)
         self.setCentralWidget(split)
 
         tb = self.addToolBar("主工具栏")
         tb.setMovable(False)
+        tb.setIconSize(QSize(24, 24))
         from . import icons
         act_new = QAction("新建公文", self)
         act_new.setShortcut("Ctrl+Shift+N")
@@ -121,11 +129,16 @@ class MainWindow(QMainWindow):
         act_anydoc.triggered.connect(self.open_anydoc_correct)
         for a, ic in ((act_new, "new_doc"), (act_import, "import"),
                       (act_compile, "compile"), (act_tpl, "template"),
-                      (act_check, "check"), (act_inspect, "inspect"),
+                      ("SEP", ""), (act_check, "check"), (act_anydoc, "anydoc"),
+                      (act_inspect, "inspect"), ("SEP", ""),
                       (act_tts, "tts"), (act_clip, "clipboard"),
-                      (act_fmt, "cleanup"), (act_compare, "compare"),
-                      (act_dict, "book"), (act_backup, "backup"),
-                      (act_registry, "registry"), (act_anydoc, "check")):
+                      (act_fmt, "cleanup"), ("SEP", ""),
+                      (act_compare, "compare"), (act_dict, "book"),
+                      (act_registry, "registry"), ("SEP", ""),
+                      (act_backup, "backup")):
+            if a == "SEP":
+                tb.addSeparator()
+                continue
             ic_obj = icons.icon(ic)
             if not ic_obj.isNull():
                 a.setIcon(ic_obj)
@@ -134,6 +147,10 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        # 常驻信息（不会被瞬态 showMessage 覆盖）
+        from PySide6.QtWidgets import QLabel
+        self._perm_label = QLabel()
+        self.status.addPermanentWidget(self._perm_label)
 
     def _build_menu(self):
         m_file = self.menuBar().addMenu("文件(&F)")
@@ -508,9 +525,10 @@ class MainWindow(QMainWindow):
         pairs = dao.count_error_pairs()
         from ..paths import is_portable
         mode = "（便携模式）" if is_portable() else ""
+        self._perm_label.setText(
+            f"资料 {n} 篇 | 纠错库 {pairs} 条 | 完全离线运行{mode}")
         self.status.showMessage(
-            f"资料 {n} 篇 | 纠错库 {pairs} 条 | 输出目录：{export_dir()} | "
-            f"数据目录：{db_path().parent} {mode}| 完全离线运行")
+            f"输出目录：{export_dir()} | 数据目录：{db_path().parent}", 10000)
 
     # ------------------------------------------------ 关闭
     def closeEvent(self, event):

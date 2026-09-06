@@ -126,6 +126,10 @@ def run(import_path: str = "") -> int:
     if app is None:
         return 1
 
+    # 全局样式（第 25 轮 UI 完善）：统一字体/间距/控件外观，取值来自 theme token
+    from .ui.theme import build_qss
+    app.setStyleSheet(build_qss())
+
     # 零中文字体的机器上，界面与 PDF 的中文都会渲染成空白：启动时注入兜底字体
     from .core.pdfrender import ensure_cjk_font
     ensure_cjk_font()

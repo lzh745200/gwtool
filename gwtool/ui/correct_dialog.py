@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..core import corrector, importer
 from ..db import dao
-from .theme import severity_color
+from .theme import MUTED, severity_color
 from .workers import FnWorker
 
 # 逐处确认、不参与"全部应用"的类别（与纠错面板口径一致）
@@ -55,7 +55,7 @@ class AnyDocCorrectDialog(QDialog):
         self.btn_run = QPushButton("开始纠错")
         self.btn_run.setEnabled(False)
         self.lbl_source = QLabel("未选择内容（支持 docx/doc/pdf/txt/rtf/md/html，或直接粘贴）")
-        self.lbl_source.setStyleSheet("color: gray;")
+        self.lbl_source.setStyleSheet(f"color:{MUTED};")
         bar.addWidget(self.btn_file)
         bar.addWidget(self.btn_clip)
         bar.addWidget(self.lbl_source, 1)
@@ -102,7 +102,7 @@ class AnyDocCorrectDialog(QDialog):
         root.addWidget(split, 1)
 
         self.lbl_stat = QLabel("就绪")
-        self.lbl_stat.setStyleSheet("color: gray;")
+        self.lbl_stat.setStyleSheet(f"color:{MUTED};")
         root.addWidget(self.lbl_stat)
 
         self.btn_file.clicked.connect(self.pick_file)

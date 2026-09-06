@@ -78,7 +78,7 @@ class EditorPanel(QWidget):
             "双击左侧材料打开编辑；或直接粘贴文字。\n"
             "支持：Ctrl+S 保存到资料库；选中文字后右键可用文秘工具箱"
             "（金额大写/简繁转换等）；每 3 分钟自动保存快照。")
-        font = QFont("仿宋", 13)
+        font = QFont("仿宋_GB2312", 13)
         self.editor.setFont(font)
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
