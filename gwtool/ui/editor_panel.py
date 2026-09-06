@@ -300,7 +300,7 @@ class EditorPanel(QWidget):
             cur = self.editor.textCursor()
             cur.setPosition(block.position())
             self.editor.setTextCursor(cur)
-            self.editor.centerCursor()
+            self.editor.ensureCursorVisible()
             self.editor.setFocus()
 
     def load_document(self, doc_id: int):
@@ -365,7 +365,9 @@ class EditorPanel(QWidget):
                 return
             title = next((ln.strip() for ln in text.splitlines() if ln.strip()),
                          "")[:60] or "未命名"
-            did = dao.add_document(dao.Document(title=title, content_text=text))
+            did = dao.add_document(dao.Document(
+                title=title, content_text=text,
+                blocks_json=self._blocks_json_from_text(text)))
             if did > 0:
                 self.doc_id = did
                 self._dirty = False
@@ -379,9 +381,42 @@ class EditorPanel(QWidget):
         # 保存前快照（覆盖前留档）
         if d and d.content_text != text:
             dao.add_snapshot(self.doc_id, title, d.content_text, reason="保存前")
-        dao.update_document_content(self.doc_id, title, text)
+        # 结构保全（逐模块探测第 16 轮修复）：update_document_content 不传
+        # blocks_json 会把结构清成 "[]"——导入的表格/标题层级随一次编辑保存
+        # 全部丢失，汇编输出随之降级。文本未改动时原样保留；有改动时按标题
+        # 正则重建（表格属纯文本编辑的固有取舍）。
+        if d:
+            blocks_json = (d.blocks_json or "[]") if d.content_text == text                 else self._blocks_json_from_text(text)
+        else:
+            blocks_json = self._blocks_json_from_text(text)
+        dao.update_document_content(self.doc_id, title, text, blocks_json)
         self._dirty = False
         self._update_status(f"已保存：{title}")
+
+    def _blocks_json_from_text(self, text: str) -> str:
+        """按标题正则把纯文本重建为块结构（编辑器是纯文本形态，表格无法从
+        文本恢复——但标题层级不应随一次保存而丢失）。"""
+        import json as _json
+        from ..core.model import Block, HEADING, PARAGRAPH
+        blocks = []
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            m = _HEADING_RE.match(s)
+            if m and len(s) <= 50:
+                prefix = m.group(1)
+                # 层级与大纲树一致：一、/第x=1，（一）=2，1.=3
+                if prefix.startswith("（"):
+                    level = 2
+                elif re.match(r"\d", prefix):
+                    level = 3
+                else:
+                    level = 1
+                blocks.append({"type": HEADING, "level": level, "text": s})
+            else:
+                blocks.append({"type": PARAGRAPH, "text": line})
+        return _json.dumps(blocks, ensure_ascii=False)
 
     def _auto_snapshot(self):
         """自动保存：有修改且已关联文档时快照当前内容。"""

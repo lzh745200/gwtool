@@ -22,6 +22,7 @@ def tmp_db(tmp_path, monkeypatch):
     """
     data_dir = tmp_path / "data"
     monkeypatch.setattr(paths, "_override", data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)  # 首个 DAO 调用前就可能写文件
     db_file = data_dir / "test_gwtool.db"
     dbconn.configure(db_file)
     corrector.invalidate_cache()

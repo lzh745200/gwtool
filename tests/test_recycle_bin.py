@@ -201,7 +201,7 @@ def test_purge_removes_row_fts_and_attachments(tmp_db, monkeypatch, tmp_path):
     import gwtool.paths as paths
 
     data = tmp_path / "data"
-    data.mkdir()
+    data.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(paths, "app_data_dir", lambda: data)
 
     did = _mk()
@@ -226,7 +226,7 @@ def test_purge_documents_batch_and_orphan_sweep(tmp_db, monkeypatch, tmp_path):
     import gwtool.paths as paths
 
     data = tmp_path / "data"
-    data.mkdir()
+    data.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(paths, "app_data_dir", lambda: data)
 
     ids = [_mk(title=f"材料{i}", text=f"第{i}篇材料的布署内容。") for i in range(3)]
