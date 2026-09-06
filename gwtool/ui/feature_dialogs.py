@@ -236,7 +236,19 @@ class _BulkReplaceWorker(QThread):
                 self.done.emit([("正则错误", str(exc), 0)])
                 return
             if n:
-                dao.update_document_content(did, d.title, new_text)
+                # 写回前快照 + 结构保全（第 23 轮修复）：不传 blocks_json 会把
+                # 结构清成 "[]"——跨文档批量替换清空所有受影响文档的表格/标题
+                # 层级。查找可能是跨行正则，无法映射回旧块，故按标题正则从新
+                # 文本重建块结构（与编辑器保存的重建策略一致）；并补上此前
+                # 文档承诺的「写回前每篇留快照」。
+                try:
+                    dao.add_snapshot(did, d.title, d.content_text,
+                                     reason="批量替换前")
+                except Exception:  # noqa: BLE001  快照失败不拦替换
+                    pass
+                from ..core.importer import _text_to_tree
+                blocks = _text_to_tree(new_text).to_json()
+                dao.update_document_content(did, d.title, new_text, blocks_json=blocks)
                 results.append((d.title, "", n))
         self.done.emit(results)
 
