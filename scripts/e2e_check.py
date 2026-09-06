@@ -47,6 +47,28 @@ def main() -> int:
     seed_t = __import__("time").time() - t0
     from gwtool.db import dao
     step("首启动种子导入(秒)", seed_t < 15, f"耗时 {seed_t:.1f}s")
+    # 启动性能基线（第 18 轮固化）：主窗口离屏构造须秒级，
+    # 防止面板/词典/图标路径的回归把冷启动拖垮。
+    from gwtool.ui import main_window as _mw
+    from PySide6.QtWidgets import QApplication as _QA
+    _qa = _QA.instance() or _QA([])   # MainWindow 需要 QApplication 先行
+    # 主窗口构造中的字体缺失提示是模态框（QMessageBox 静态方法），
+    # 离屏自检必须临时屏蔽，测完恢复。
+    from PySide6.QtWidgets import QMessageBox as _MB
+    _saved_mb = {m: getattr(_MB, m) for m in
+                 ("information", "warning", "critical", "question")}
+    _MB.information = staticmethod(lambda *a, **k: None)
+    _MB.warning = staticmethod(lambda *a, **k: None)
+    _MB.critical = staticmethod(lambda *a, **k: None)
+    _MB.question = staticmethod(
+        lambda *a, **k: _MB.StandardButton.No)
+    _t0 = __import__("time").time()
+    _win = _mw.MainWindow()
+    _win_t = __import__("time").time() - _t0
+    _win.close()
+    for _m, _f in _saved_mb.items():
+        setattr(_MB, _m, _f)
+    step("主窗口离屏构造(秒)", _win_t < 5, f"耗时 {_win_t:.2f}s")
     step("纠错库≥3万", dao.count_error_pairs() >= 30000,
          f"{dao.count_error_pairs()} 条")
 
