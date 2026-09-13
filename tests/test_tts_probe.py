@@ -11,6 +11,35 @@ import pytest
 from gwtool.core import tts
 from gwtool.db import dao
 
+# SAPI 朗读链路能力探测结果（进程内缓存，避免每个用例都多发一次声音）
+_SAPI_READY: bool | None = None
+_SAPI_SKIP_REASON = ""
+
+
+def _require_real_sapi() -> None:
+    """探测真实 SAPI 朗读链路（Dispatch + 同步朗读）是否可用，不可用才跳过。
+
+    ``pytest.importorskip("win32com.client")`` 只能证明 pywin32 可导入；
+    GitHub 的 Windows runner 恰好能导入 pywin32，却没有可用的语音引擎 /
+    音频输出设备，``Speak`` 当场抛 ``pywintypes.com_error``（CI 实测）。
+    这里用一次最小真实朗读做能力门控：能发声才继续跑朗读断言，否则跳过
+    ——不是无条件跳过，装有真实 SAPI 的机器上这些用例照常执行。
+    """
+    global _SAPI_READY, _SAPI_SKIP_REASON
+    if _SAPI_READY is None:
+        try:
+            import win32com.client
+            # 与产品一致：默认标志即同步朗读；不抛异常即代表链路可用
+            win32com.client.Dispatch("SAPI.SpVoice").Speak("测")
+        except Exception as exc:  # noqa: BLE001
+            _SAPI_READY = False
+            _SAPI_SKIP_REASON = (
+                f"SAPI 朗读链路不可用（无语音引擎/音频设备），跳过朗读用例：{exc}")
+        else:
+            _SAPI_READY = True
+    if not _SAPI_READY:
+        pytest.skip(_SAPI_SKIP_REASON)
+
 
 @pytest.fixture()
 def tts_settings(tmp_db):
@@ -83,6 +112,7 @@ def test_engine_init_raises_without_engine(tmp_db, monkeypatch):
 def test_speak_short_sentence_real(tts_settings):
     """真实同步朗读一句：Rate 设置 + Speak 全链路（约 1-2 秒）。"""
     pytest.importorskip("win32com.client")
+    _require_real_sapi()
     eng = tts.TTSEngine()
     eng.speak("公文汇编助手朗读测试。")
     assert eng._voice is not None          # 真实 Dispatch 已发生
@@ -91,6 +121,7 @@ def test_speak_short_sentence_real(tts_settings):
 def test_speak_with_unknown_voice_keyword(tts_settings):
     """语音名关键字不命中任何已装语音：循环真实遍历后仍正常朗读。"""
     pytest.importorskip("win32com.client")
+    _require_real_sapi()
     dao.set_setting("tts_voice", "绝不存在的语音引擎名字")
     eng = tts.TTSEngine()
     eng.speak("语音名未命中时照常朗读。")
@@ -100,6 +131,7 @@ def test_speak_with_unknown_voice_keyword(tts_settings):
 def test_speak_with_real_voice_keyword(tts_settings):
     """语音名关键字取真实已装语音描述子串：命中并切换 Voice 后朗读。"""
     pytest.importorskip("win32com.client")
+    _require_real_sapi()
     voices = tts.list_voices()
     if not voices:
         pytest.skip("本机 SAPI 无已装语音")
@@ -122,6 +154,7 @@ def test_stop_then_speak_short_circuits(tts_settings):
 def test_stop_after_speak_skips_sentence(tts_settings):
     """真实朗读后 stop：voice 已 Dispatch → SAPI Skip("Sentence") 真实执行。"""
     pytest.importorskip("win32com.client")
+    _require_real_sapi()
     eng = tts.TTSEngine()
     eng.speak("先朗读一句再停止。")          # 同步完成后 _voice 已就绪
     assert eng._voice is not None

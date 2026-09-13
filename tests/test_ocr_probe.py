@@ -163,6 +163,12 @@ def test_bundled_tessdata_false_when_dir_missing(tmp_db):
     exe_dir = Path(sys.executable).resolve().parent
     root = exe_dir / "tesseract"
     exe_link = root / "tesseract.exe"
+    # 捆绑树必须建在「解释器所在目录」下（对齐 ocr._bundled 第一候选）。CI 的
+    # Linux 容器解释器位于 /usr/bin，而容器已 apt 安装真实 /usr/bin/tesseract
+    # （普通文件）：root 与其撞名，mkdir 的 exist_ok 只豁免目录、遇文件仍抛
+    # FileExistsError（CI 实测）。此类环境无法在此处构造捆绑树，探测后跳过。
+    if (root.exists() or root.is_symlink()) and not root.is_dir():
+        pytest.skip(f"解释器旁已被同名非目录文件占用，无法构造捆绑树：{root}")
     _wipe_bundled_tree()
     tess = _real_tess()
     if not tess:

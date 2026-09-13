@@ -51,20 +51,26 @@ def test_requirements_has_no_unpinned_runtime_deps():
 
 # ------------------------------------------------------------ Inno Setup
 def test_installer_code_has_no_unguarded_msgbox():
-    """[Code] 段里的 MsgBox 必须由 WizardSilent 守卫。
+    """[Code] 段里**若**出现 MsgBox，则必须由 WizardSilent 守卫。
 
     普通 MsgBox 不受 /SUPPRESSMSGBOXES 影响，静默安装时会弹模态框并永久阻塞
     （实测 /VERYSILENT 安装挂住 5 分钟以上毫无进展），批量部署直接挂死。
+
+    v1.5.3 起安装包内置 OCR，过时的引导提示弹窗已从 [Code] 段整体删除：
+    「无 [Code] 段」与「有 [Code] 段但段内无 MsgBox」两种形态都不存在静默
+    安装挂死风险，视为通过；但只要段内出现未守卫的 MsgBox 仍必须报错。
     """
     text = _read("scripts", "setup_windows.iss")
-    code = text.split("[Code]", 1)
-    assert len(code) == 2, "未找到 [Code] 段"
+    parts = text.split("[Code]", 1)
+    if len(parts) != 2:
+        return  # 无 [Code] 段 → 无 MsgBox → 无静默安装挂死风险
     # 先剥离 Pascal 注释，否则注释里提到的 MsgBox 字样会干扰下面的顺序判断
-    body = re.sub(r"\{.*?\}", "", code[1], flags=re.S)
+    body = re.sub(r"\{.*?\}", "", parts[1], flags=re.S)
     body = re.sub(r"//[^\n]*", "", body)
 
     calls = [ln.strip() for ln in body.splitlines() if re.search(r"\bMsgBox\s*\(", ln)]
-    assert calls, "预期 [Code] 段里有 MsgBox 提示；若已删除请同步调整本测试"
+    if not calls:
+        return  # [Code] 段存在但没有 MsgBox → 同样无风险
     assert "WizardSilent" in body, (
         "[Code] 段存在 MsgBox 却没有 WizardSilent 守卫，静默安装会挂死")
 
