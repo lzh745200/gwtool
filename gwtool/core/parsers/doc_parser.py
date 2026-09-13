@@ -36,8 +36,13 @@ def _looks_like_word_doc(path: str) -> bool:
     `except Exception` 根本接不住，会直接把整个进程带走（批量导入时表现为
     “导入到一半程序没了”）。所以在进 COM 之前先按结构把明显不可能的挡掉。
 
-    判定只看 OLE 文件头 + 是否存在 WordDocument 流：不要求能解析，只要求
-    “值得一试”。读不动就返回 False，交给后面的 LibreOffice / 纯 Python 兜底。
+    判定看三层：OLE 文件头 + WordDocument 流存在 + 流首 FIB 魔数 0xA5EC
+    （与纯 Python 解析器同一标准）。只看前两层不够 —— 真实探测发现 WPS
+    对 FIB 魔数被破坏的 doc 照样“成功打开”，却产出整篇乱码的 docx（比
+    提取不到还糟）；而这类文件恰恰也是 SEH 崩进程的高危对象，理应拦在
+    COM 之外，交给纯 Python 链路的 raw_scan 兜底。
+
+    读不动就返回 False，交给后面的 LibreOffice / 纯 Python 兜底。
     """
     try:
         with open(path, "rb") as fh:
@@ -50,7 +55,10 @@ def _looks_like_word_doc(path: str) -> bool:
 
         ole = olefile.OleFileIO(path)
         try:
-            return ole.exists("WordDocument")
+            if not ole.exists("WordDocument"):
+                return False
+            word = ole.openstream("WordDocument").read(2)
+            return len(word) == 2 and struct.unpack("<H", word)[0] == 0xA5EC
         finally:
             ole.close()
     except Exception:
@@ -129,12 +137,19 @@ def _extract_text(path: str) -> str:
     conv = _convert_via_com(path)
     if conv:
         from .docx_parser import parse_docx
-        return parse_docx(conv).plain_text()
+        text = parse_docx(conv).plain_text()
+        if text.strip():
+            return text
+        # WPS 对 FIB 损坏的 doc 可能“成功打开”却产出空文档 —— 空结果不算
+        # 成功，继续降级（真实探测发现：此时纯 Python 路径本可救回全文）。
+        # 真为空文档时后面 raw_scan 也返回空，无额外代价。
     # 2) LibreOffice
     conv = _convert_via_soffice(path)
     if conv:
         from .docx_parser import parse_docx
-        return parse_docx(conv).plain_text()
+        text = parse_docx(conv).plain_text()
+        if text.strip():
+            return text
     # 3) 纯 Python 分片表解析
     try:
         return _extract_text_olefile(path)
@@ -202,8 +217,12 @@ def _parse_clx(clx: bytes) -> list[tuple[int, int, int]]:
             cps = struct.unpack_from("<%dI" % (count + 1), plc, 0)
             out = []
             base = 4 * (count + 1)
+            # PCD 布局（Word97）：2B 标志位 + 4B fc + 2B prm，共 8 字节。
+            # fc 取偏移 +2 处的 4 字节；此前写成 "<HII"（10 字节）越过 PCD
+            # 边界，最后一个分片必然 struct.error —— 纯 Python 解析整条
+            # 路径从未真正工作过，一直靠 raw_scan 兜底伪装正常。
             for k in range(count):
-                _, fc, _ = struct.unpack_from("<HII", plc, base + 8 * k)
+                fc = struct.unpack_from("<I", plc, base + 8 * k + 2)[0]
                 out.append((cps[k], cps[k + 1], fc))
             return out
         else:
