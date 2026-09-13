@@ -23,10 +23,19 @@ from pathlib import Path
 REPO = "lzh745200/gwtool"
 API_HOST = "api.github.com"
 
-# 本地产物与虚拟环境，绝不能上传（与 .gitignore 保持一致）
-SKIP_DIRS = {".git", "__pycache__", ".venv", "build", "dist", ".pytest_cache",
-             ".ruff_cache", "node_modules", ".qoder", "wheels_aarch64",
-             "dist_samples"}
+# 本地产物与虚拟环境，绝不能上传（与 .gitignore 保持一致）。
+# 深探修复（2026-09-13）：此前 SKIP_DIRS 漏掉 .venv64/.convlib/.zcode/
+# .workbuddy 与 packs/，--auto 会把 3.7 万个环境文件（含 740MB 模型包，
+# 超 GitHub 100MB 单文件上限）全部读入比对并逐个上传，永久卡死且污染仓库。
+SKIP_DIRS = {".git", "__pycache__", ".venv", ".venv64", "build", "dist",
+             ".pytest_cache", ".ruff_cache", "node_modules", ".qoder",
+             "wheels_aarch64", "dist_samples", ".convlib", ".zcode",
+             ".workbuddy", "packs", "backups", "Data", "attachments"}
+
+# 文件级忽略（目录名过滤覆盖不到的单文件），与 .gitignore 同步
+SKIP_FILE_PATTERNS = ("*.pyc", "*.tmp", ".coverage", "m1.pdf", "probe.pdf",
+                      "t1.pdf", "t2.pdf", "_diag_*.py", "_quant_variants*.py",
+                      "_t5_diag.py", "_t5_quant_test.py")
 
 
 def git_blob_sha(raw: bytes) -> str:
@@ -39,14 +48,15 @@ def git_blob_sha(raw: bytes) -> str:
 
 def scan_local(root: Path = Path(".")) -> dict[str, bytes]:
     """收集本地待比对文件的相对路径与内容。"""
+    import fnmatch
     out: dict[str, bytes] = {}
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
+            if any(fnmatch.fnmatch(name, pat) for pat in SKIP_FILE_PATTERNS):
+                continue
             full = Path(dirpath) / name
             rel = full.relative_to(root).as_posix()
-            if name.endswith((".pyc", ".tmp")):
-                continue
             out[rel] = full.read_bytes()
     return out
 
