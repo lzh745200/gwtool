@@ -30,12 +30,13 @@ API_HOST = "api.github.com"
 SKIP_DIRS = {".git", "__pycache__", ".venv", ".venv64", "build", "dist",
              ".pytest_cache", ".ruff_cache", "node_modules", ".qoder",
              "wheels_aarch64", "dist_samples", ".convlib", ".zcode",
-             ".workbuddy", "packs", "backups", "Data", "attachments"}
+             ".workbuddy", "packs", "backups", "Data", "attachments",
+             "dist_old", "install_test"}
 
 # 文件级忽略（目录名过滤覆盖不到的单文件），与 .gitignore 同步
-SKIP_FILE_PATTERNS = ("*.pyc", "*.tmp", ".coverage", "m1.pdf", "probe.pdf",
+SKIP_FILE_PATTERNS = ("*.pyc", "*.tmp", "*.log", ".coverage", "m1.pdf", "probe.pdf",
                       "t1.pdf", "t2.pdf", "_diag_*.py", "_quant_variants*.py",
-                      "_t5_diag.py", "_t5_quant_test.py")
+                      "_t5_diag.py", "_t5_quant_test.py", ".workbuddy_collect.txt")
 
 
 def git_blob_sha(raw: bytes) -> str:

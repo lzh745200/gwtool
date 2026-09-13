@@ -144,10 +144,27 @@ def main() -> int:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
 
-    # 便携 Data/ 是本次校验造的，清掉以免混进安装包产物
+    # 便携 Data/ 是本次校验造的，清掉以免混进安装包产物。
+    # Windows 上进程退出后句柄释放有延迟：立即 rmtree 会因 gwtool.db(-wal)
+    # 仍被锁定而静默失败（ignore_errors），残留的测试数据库会混进后续的
+    # 便携 zip / Inno 安装包。这里带重试的硬删除，全失败则显式报失败。
     if fresh:
-        shutil.rmtree(data_dir, ignore_errors=True)
+        removed = False
+        for _ in range(6):
+            try:
+                shutil.rmtree(data_dir)
+                removed = True
+                break
+            except OSError:
+                time.sleep(2)
+        if not removed:
+            check("便携 Data/ 清理", False,
+                  "测试数据库残留，产物不可发布（含约 33MB 冒烟数据）")
 
     print(f"\n===== 产物冒烟：{len(failures)} 项失败 =====")
     if failures:
