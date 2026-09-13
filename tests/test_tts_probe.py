@@ -6,6 +6,10 @@
 CI Linux 容器无语音引擎时，available()=False 的路径由真实环境覆盖，
 本机不可达的分支以能力门控跳过。
 """
+# 麒麟 CI 容器是 Python 3.9：`bool | None` 这类 PEP 604 注解会在模块级
+# 求值而炸收集。future 导入让全部注解延迟为字符串，3.9/3.13 通吃。
+from __future__ import annotations
+
 import pytest
 
 from gwtool.core import tts

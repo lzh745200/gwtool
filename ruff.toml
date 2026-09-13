@@ -1,5 +1,12 @@
-# 静态检查门槛：只拦截语法错误与未定义名称
+# 静态检查门槛：拦截语法错误、未定义名称，以及 py39 下会炸的注解
 # （如 UI 类漏导入控件导致的 NameError——构造对话框即崩的那类缺陷）
+#
+# FA100/FA102：本项目 target-version = py39，但开发机可能是 3.13。若在模块级
+# 或运行时求值处直接写 `X | None`（PEP 604）、`list[str]` / `dict[K, V]`
+# （PEP 585）这类新式注解而不加 `from __future__ import annotations`，在麒麟
+# CI 的 Python 3.9 上会于「收集/定义时」即求值而崩（本地 3.13 完全看不出来）。
+# 启用后这类缺陷会被本地 `ruff check .` 当场拦下，无需等 CI 复现。
+# （历史案例：test_corrector_l5.py / test_tts_probe.py 均因此加过 future 导入。）
 target-version = "py39"
 
 exclude = [
@@ -13,4 +20,4 @@ exclude = [
 ]
 
 [lint]
-select = ["E9", "F821"]
+select = ["E9", "F821", "FA100", "FA102"]
