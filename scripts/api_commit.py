@@ -192,9 +192,10 @@ def main() -> int:
                 {"sha": commit["sha"], "force": True})
             print(f"[api] tag {tag} 已移动 -> 触发工作流")
         except RuntimeError as exc:
-            if "404" not in str(exc):
+            # 标签尚不存在时 GitHub 返回 404 或 422（"Reference does not
+            # exist"）。两者都回退到 POST 创建，其余错误照常抛出。
+            if not any(s in str(exc) for s in ("404", "422", "does not exist")):
                 raise
-            # 标签尚不存在：PATCH 会 404，改用 POST 创建
             api("POST", "/git/refs", token,
                 {"ref": f"refs/tags/{tag}", "sha": commit["sha"], "force": True})
             print(f"[api] tag {tag} 已创建 -> 触发工作流")
