@@ -178,23 +178,32 @@ def _load_engine() -> _Engine | None:
     _ENGINE_KEY = key
     _ENGINE = None
     _ENGINE_ERROR = ""
-    try:
-        import numpy as np
-        import onnxruntime as ort
-    except Exception as e:                       # 依赖缺失
-        _ENGINE_ERROR = f"缺少推理依赖：{e}"
-        return None
+    # ① 增强包存在性检查不依赖重依赖：没导入包的用户不该看到
+    #    「缺少 numpy」这种运维向报错——不装包是完全正常的关闭态。
     info = enhance_pack.installed_pack(_KIND)
     if info is None or info.installed_dir is None:
         _ENGINE_ERROR = "未导入精度增强包"
         return None
     mdir: Path = info.installed_dir
+    # ② 词汇表文件级校验同样不依赖 numpy/onnxruntime：坏包在创建
+    #    推理会话之前就该被拒（纯文件读取，零重依赖）。
     try:
         vocab_path = mdir / "vocab.txt"
         vocab = vocab_path.read_text(encoding="utf-8").splitlines()
         vocab = [v if v else "\u0000" for v in vocab]
         if len(vocab) < 100:
             raise ValueError(f"词汇表过小（{len(vocab)} 行），疑似文件错误")
+    except Exception as e:
+        _ENGINE_ERROR = f"加载模型失败：{e}"
+        return None
+    # ③ 真正的重依赖：只有前两级都通过才需要 numpy/onnxruntime。
+    try:
+        import numpy as np
+        import onnxruntime as ort
+    except Exception as e:                       # 依赖缺失
+        _ENGINE_ERROR = f"缺少推理依赖：{e}"
+        return None
+    try:
         token_to_id = {t: i for i, t in enumerate(vocab)}
 
         opts = ort.SessionOptions()

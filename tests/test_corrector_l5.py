@@ -10,6 +10,10 @@
 不该被这两个重依赖绑死，否则 CI 为了跑纯逻辑断言得多装几百 MB。
 `csc_gec` 的张量构造在无 numpy 时自动退化为 list，假会话照吃。
 """
+# 麒麟 CI 容器是 Python 3.9：`dict | None` 这类 PEP 604 注解会在类定义时
+# 求值而炸收集。future 导入让全部注解延迟为字符串，3.9/3.13 通吃。
+from __future__ import annotations
+
 import pytest
 
 from gwtool.core import corrector, csc_gec, enhance_pack

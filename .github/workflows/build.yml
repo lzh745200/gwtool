@@ -31,6 +31,7 @@ jobs:
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
         run: python -m pytest tests/ -q --timeout=300
 
       - name: 端到端自检（导入→汇编→PDF→检索→纠错→备份 全流程）
@@ -131,6 +132,7 @@ jobs:
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
         run: $PYBIN -m pytest tests/ -q --timeout=300
 
       - name: 端到端自检（导入→汇编→PDF→检索→纠错→备份 全流程）

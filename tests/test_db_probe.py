@@ -293,7 +293,7 @@ class TestPreMigrateBackup:
         db_file = tmp_path / "odd" / "gwtool.db"
         db_file.parent.mkdir(parents=True)
         self._make_v1_db(db_file)
-        (db_file.parent / "backups").write_text("占位，非目录")  # mkdir 必失败
+        (db_file.parent / "backups").write_text("占位，非目录", encoding="utf-8")  # mkdir 必失败
         dbconn.configure(db_file)
         try:
             conn = dbconn.get_conn()

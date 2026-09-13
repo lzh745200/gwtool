@@ -100,9 +100,18 @@ class TestDocxToPdfReal:
         has_soffice = bool(shutil.which("soffice") or shutil.which("libreoffice"))
         com_ok = False
         if not has_soffice and shutil.os.name == "nt":
+            # pywin32 可导入 ≠ 机器上真的有 WPS/Word（CI runner 就是这种）。
+            # 用真 Dispatch 探测：任一组件能创建并正常退出才算可用。
             try:
-                import win32com.client  # noqa: F401
-                com_ok = True
+                import win32com.client
+                for prog_id in ("KWPS.Application", "Word.Application"):
+                    try:
+                        app = win32com.client.Dispatch(prog_id)
+                        app.Quit()
+                        com_ok = True
+                        break
+                    except Exception:
+                        com_ok = False
             except ImportError:
                 com_ok = False
         if not has_soffice and not com_ok:
