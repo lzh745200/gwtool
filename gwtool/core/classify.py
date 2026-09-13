@@ -24,11 +24,17 @@ def _tokens(text: str) -> list[str]:
 
 
 def category_profiles(max_docs_per_category: int = 200) -> dict[int, Counter]:
-    """每个分类的词频画像：{category_id: Counter(token -> 次数)}。"""
+    """每个分类的词频画像：{category_id: Counter(token -> 次数)}。
+
+    必须带正文（include_content=True）：正文才是词频主体，漏了它画像就
+    退化为纯标题画像，建议质量大幅缩水（曾因此在探测中发现的缺陷）。
+    """
     profiles: dict[int, Counter] = {}
     for cat in dao.list_categories():
         counter: Counter = Counter()
-        for doc in dao.list_documents(category_id=cat.id)[:max_docs_per_category]:
+        docs = dao.list_documents(category_id=cat.id,
+                                  include_content=True)[:max_docs_per_category]
+        for doc in docs:
             counter.update(_tokens(doc.title))
             counter.update(_tokens(doc.content_text))
         if counter:

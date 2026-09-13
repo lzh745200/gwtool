@@ -83,7 +83,7 @@ const BGWHITE = "FFFFFF";
   s.addText("GWTOOL · 单机离线版 v1.5.1", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
   s.addText("公文汇编助手", { x: M, y: 2.15, w: 9.2, h: 1.25, fontSize: 60, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("面向党政机关、企事业单位的单机智能公文汇编与写作辅助工具", { x: 0.53, y: 3.5, w: 8.6, h: 0.5, fontSize: 17, color: DMUTED, fontFace: FONT, margin: 0 });
-  const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GB/T 9704 公文格式", "87 项自动化测试"];
+  const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GB/T 9704 公文格式", "465 项自动化测试"];
   chips.forEach((t, i) => {
     const cx = M + (i % 2) * 4.55, cy = 4.35 + Math.floor(i / 2) * 0.68;
     s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: cx, y: cy, w: 4.3, h: 0.52, rectRadius: 0.08, fill: { color: DCARD }, line: { color: DLINE, width: 1 } });
@@ -106,7 +106,7 @@ const BGWHITE = "FFFFFF";
   const items = [
     ["01", "认识公文汇编助手", "定位 · 四大痛点 · 关键数据 · 功能全景"],
     ["02", "系统架构", "技术选型 · 三层架构 · 数据层 · 检索 · 线程模型"],
-    ["03", "材料导入与资料库", "7 种文档格式 · OCR 回退 · .doc 四级降级 · 资料库管理"],
+    ["03", "材料导入与资料库", "8 种文档格式 · OCR 内置 · .doc 四级降级 · 资料库管理"],
     ["04", "智能写作辅助", "15 种文种骨架 · 文秘工具箱 · 写作参考 · 三级纠错"],
     ["05", "一键汇编与成品输出", "三步向导 · 国标模板 · Word 引擎 · 两遍渲染 · A3 小册子"],
     ["06", "质检、对比与安全", "格式体检 · 文档对比查重 · 历史快照 · 加密备份"],
@@ -132,7 +132,7 @@ const BGWHITE = "FFFFFF";
 divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么问题、整体能力有多大", [
   "定位：单机离线的公文汇编与写作辅助工具",
   "四大痛点：材料散乱 · 格式繁琐 · 错字难查 · 写作无参考",
-  "一屏看懂：40220 条纠错对 · 12.3 万词典 · 17 个功能模块",
+  "一屏看懂：40220 条纠错对 · 12.3 万词典 · 24 个功能模块",
 ]);
 
 /* ================= S4 定位与痛点 ================= */
@@ -149,7 +149,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
     { text: "党政机关办文 · 企事业单位综合部门 · 涉密内网环境 · 麒麟信创终端", options: { fontSize: 12.5, color: "F5E3DC" } },
   ], { x: 0.85, y: 5.3, w: 3.7, h: 1.2, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
   const pains = [
-    ["材料收集散乱", "7 种文档格式批量导入，分类标签 + 全文检索，随手可查"],
+    ["材料收集散乱", "8 种文档格式批量导入，分类标签 + 全文检索，随手可查"],
     ["格式调整繁琐", "GB/T 9704 默认模板 + 一键汇编，红头目录页码自动生成"],
     ["错别字难查", "4 万条纠错库三级流水线，精标对 100% 识别（测试验收）"],
     ["写作无参考", "15 种法定文种骨架 + 三库联合检索，双击即插入"],
@@ -174,7 +174,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
     ["40220", "纠错对（条）", "精标 220 + 程序生成 40000"],
     ["123393", "词典词条（条）", "开源 CC-CEDICT，随包分发"],
     ["15", "法定文种骨架", "对应《公文处理工作条例》"],
-    ["7+4", "可导入格式", "文档 7 种 + 图片 4 类（OCR）"],
+    ["8+4", "可导入格式", "文档 8 种 + 图片 4 类（内置 OCR）"],
     ["87", "自动化测试用例", "pytest 全量回归 + 性能验收"],
     ["<10s", "50 个文件导入", "后台线程批量解析入库"],
     ["<1s", "全文检索响应", "FTS5 + jieba，20 万字语料"],
@@ -197,7 +197,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
 /* ================= S6 功能全景 ================= */
 {
   const s = p.addSlide();
-  header(s, "01 认识公文汇编助手", "功能全景：六大能力域，17 个功能模块", 6);
+  header(s, "01 认识公文汇编助手", "功能全景：六大能力域，24 个功能模块", 6);
   const groups = [
     ["材料导入", "批量导入去重 · OCR 识别\n剪贴板入库 · 右键菜单"],
     ["写作辅助", "15 文种骨架 · 文秘工具箱\n写作参考 · 朗读校对"],
@@ -276,7 +276,7 @@ divider(7, "02", "系统架构", "三层解耦的可测试架构：界面、逻�
   arrow(s, 2.7, 3.4, 2.7, 3.62); arrow(s, 6.67, 3.4, 6.67, 3.62); arrow(s, 10.65, 3.4, 10.65, 3.62);
   const layers = [
     ["ui / 界面层", "main_window 三栏主窗口", "编辑 · 资料库 · 参考三面板", "12 个功能对话框", "workers 后台线程机制"],
-    ["core / 纯逻辑层", "parsers 六格式解析", "corrector 纠错 · inspector 体检", "docxgen · pdfrender · booklet", "reference · differ · simhash"],
+    ["core / 纯逻辑层", "parsers 多格式解析", "corrector 纠错 · inspector 体检", "docxgen · pdfrender · booklet", "reference · differ · simhash"],
     ["db / 数据层", "dao.py 唯一数据入口", "9 张业务表 + 3 个 FTS5 虚表", "WAL + 线程本地连接", "schema v2 自动迁移"],
   ];
   layers.forEach(([t, ...its], i) => {
@@ -396,8 +396,8 @@ divider(7, "02", "系统架构", "三层解耦的可测试架构：界面、逻�
 }
 
 /* ================= S13 章节 03 ================= */
-divider(13, "03", "材料导入与资料库", "七种格式进得来，一座资料库管得住", [
-  "格式解析全部本地完成，扫描件可选 OCR",
+divider(13, "03", "材料导入与资料库", "八种格式进得来，一座资料库管得住", [
+  "格式解析全部本地完成，扫描件 OCR 内置开箱即用",
   "老 .doc 二进制格式四级降级解析，尽力提取",
   "分类树 + 标签 + FTS 检索 + 快照版本",
 ]);
@@ -405,11 +405,11 @@ divider(13, "03", "材料导入与资料库", "七种格式进得来，一座资
 /* ================= S14 导入 ================= */
 {
   const s = p.addSlide();
-  header(s, "03 材料导入与资料库", "一站式导入：7 种文档格式 + 图片 OCR", 14);
-  const exts = ["docx", "doc", "txt", "rtf", "pdf", "md", "html", "png/jpg/bmp/tif"];
+  header(s, "03 材料导入与资料库", "一站式导入：8 种文档格式 + 图片 OCR", 14);
+  const exts = ["docx", "doc", "wps", "txt", "rtf", "pdf", "md", "html", "png/jpg/bmp/tif"];
   let x = M;
   exts.forEach((e, i) => {
-    const w = i === 7 ? 2.5 : 1.18;
+    const w = i === 8 ? 2.5 : 1.02;
     chip(s, x, 1.95, w, 0.62, e, { fill: i === 7 ? TINT : PAPER, bold: true, fontSize: 13, color: i === 7 ? PRIMARY : INK });
     x += w + 0.18;
   });
@@ -418,7 +418,7 @@ divider(13, "03", "材料导入与资料库", "七种格式进得来，一座资
     ["拖拽即进", "支持拖入文件或整个文件夹（递归扫描），也可从右键菜单 / 剪贴板一键入库"],
     ["后台解析", "ImportWorker 逐个解析入库，进度条含“OCR 第 x/y 页”页级反馈，可中途停止"],
     ["内容去重", "入库即算 SHA-256 指纹，重复内容自动跳过；完成统计“成功 N / 重复失败 M”"],
-    ["失败友好", "扫描版 PDF 无文字层且缺 OCR 中文包时，返回可操作的安装指引而非静默空白"],
+    ["失败友好", "扫描版 PDF 无文字层时自动走内置 OCR；中文包随安装包内置，缺包场景（源码运行）返回可操作指引而非静默空白"],
     ["标题识别", "复用公文编号正则识别“一、（一）1.”标题层级，首行 ≤50 字提为文档标题"],
   ];
   let y = 3.35;
@@ -960,8 +960,8 @@ divider(30, "06", "质检、对比与安全", "交出去之前，再把它从头
 /* ================= S35 章节 07 ================= */
 divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全、发得出", [
   "Windows x64 + 麒麟 V10 ARM64 双平台交付",
-  "4 类安装包自动构建，GitHub Actions 全自动发布",
-  "87 项测试 + 端到端自检脚本",
+  "2 个离线安装包自动构建，GitHub Actions 全自动发布",
+  "465 项测试 + 18 步端到端自检",
 ]);
 
 /* ================= S36 双平台 ================= */
@@ -998,7 +998,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
 /* ================= S37 打包矩阵 ================= */
 {
   const s = p.addSlide();
-  header(s, "07 交付、质量与生态", "打包矩阵：一份 spec，四类产物", 37);
+  header(s, "07 交付、质量与生态", "打包矩阵：一份 spec，两大离线安装包", 37);
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: 3.87, y: 1.9, w: 5.6, h: 1.55, rectRadius: 0.08, fill: { color: PRIMARY }, line: { type: "none" }, shadow: { type: "outer", color: "3A2E28", blur: 7, offset: 2, angle: 90, opacity: 0.18 } });
   s.addText([
     { text: "gwtool.spec · PyInstaller onedir", options: { bold: true, fontSize: 15.5, color: "FFFFFF", breakLine: true } },
@@ -1021,23 +1021,23 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
   });
   s.addText([
     { text: "系统集成：", options: { bold: true, color: PRIMARY, fontSize: 12.5 } },
-    { text: "install_context_menu.bat 写当前用户注册表（无需管理员）挂右键菜单；gwtool.desktop 注册 6 类文档“打开方式”；OCR 安装引导在安装包初始化时弹窗提示。", options: { color: MUTED, fontSize: 12.5 } },
+    { text: "install_context_menu.bat 写当前用户注册表（无需管理员）挂右键菜单；gwtool.desktop 注册 6 类文档“打开方式”；OCR 引擎与中文包已内置，两个安装包均离线安装、开箱即用。", options: { color: MUTED, fontSize: 12.5 } },
   ], { x: M, y: 5.85, w: 12.3, h: 0.8, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
 }
 
 /* ================= S38 CI/CD ================= */
 {
   const s = p.addSlide();
-  header(s, "07 交付、质量与生态", "CI/CD：打一个 tag，四类安装包自动发布", 38);
+  header(s, "07 交付、质量与生态", "CI/CD：打一个 tag，两大离线安装包自动发布", 38);
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: M, y: 1.95, w: 2.5, h: 3.9, rectRadius: 0.08, fill: { color: DARK }, line: { type: "none" } });
   s.addText([
     { text: "触发", options: { bold: true, fontSize: 15, color: "F2D8A0", breakLine: true } },
     { text: "push v* 标签\n或手动触发\n\nbuild.yml\nGitHub Actions", options: { fontSize: 12.5, color: DTEXT } },
   ], { x: 0.72, y: 2.15, w: 2.1, h: 3.5, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
   const jobs = [
-    ["Job 1 · windows-latest", ["ruff 静态检查（gwtool/scripts/tests）", "pytest 全量 87 用例（offscreen + 300s 超时）", "PyInstaller 按 spec 打包", "便携 zip + ISCC 安装包（版本号取自代码）"]],
-    ["Job 2 · ubuntu-24.04-arm", ["原生 ARM64 runner（非交叉编译）", "apt 装 Qt offscreen 运行库", "同一 spec 打包 + dpkg-deb 组装", "deb 声明依赖，推荐 tesseract 中文包"]],
-    ["Job 3 · release", ["依赖前两个 Job 全绿", "gh release create 自动建发布", "附 4 类安装包 + 自动 Release Notes", "标题“公文汇编助手 v TAG”"]],
+    ["Job 1 · windows-latest", ["ruff 静态检查（gwtool/scripts/tests）", "pytest 全量 465 用例 + 18 步端到端自检", "PyInstaller 按 spec 打包 + Tesseract/中文包内置", "smoke_dist 冒烟校验 → ISCC 安装包（版本号取自代码）"]],
+    ["Job 2 · ubuntu-24.04-arm", ["原生 ARM64 runner（非交叉编译）", "Debian 11 容器（glibc 2.31 对齐麒麟 V10）", "同一 spec 打包 + OCR 集成 + 运行库自检", "smoke_dist 冒烟校验 → dpkg-deb 组装 .deb"]],
+    ["Job 3 · release", ["依赖前两个 Job 全绿（含打包与冒烟）", "推 v* 标签触发 / 手动 workflow_dispatch", "gh release create 自动建发布", "附 2 个安装包 + 自动 Release Notes"]],
   ];
   jobs.forEach(([t, items], i) => {
     const y = 1.95 + i * 1.38;
@@ -1068,7 +1068,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     s.addText(String(v), { x: bx0 + bw2 * v / maxV + 0.08, y: by, w: 0.6, h: 0.34, valign: "middle", fontSize: 11.5, bold: true, color: PRIMARY, fontFace: FONT, margin: 0 });
     by += 0.44;
   });
-  s.addText("合计 87 用例 · 每次提交 ruff E9+F821 静态门槛（拦截“忘导入即崩溃”）", { x: M, y: 6.5, w: 7, h: 0.4, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
+  s.addText("合计 465 用例 · 32 个测试文件 · 每次提交 ruff E9+F821 静态门槛（拦截“忘导入即崩溃”）", { x: M, y: 6.5, w: 7, h: 0.4, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
   // 右侧性能验收
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: 7.6, y: 1.9, w: 5.23, h: 4.95, rectRadius: 0.08, fill: { color: DARK }, line: { type: "none" } });
   s.addText("性能验收（写进测试的硬指标）", { x: 7.88, y: 2.08, w: 4.7, h: 0.4, fontSize: 13.5, bold: true, color: "F2D8A0", fontFace: FONT, margin: 0 });
@@ -1077,7 +1077,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     ["20 万字语料检索", "< 1 秒"],
     ["精标 100 对识别率", "100%"],
     ["首启种子导入", "< 15 秒"],
-    ["端到端自检", "9 步全 PASS"],
+    ["端到端自检", "18 步全 PASS"],
     ["网络请求", "0 次"],
   ];
   let py = 2.62;
@@ -1087,7 +1087,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     if (i < 5) s.addShape(p.shapes.LINE, { x: 7.88, y: py + 0.5, w: 4.65, h: 0, line: { color: DLINE, width: 1 } });
     py += 0.62;
   });
-  s.addText("另有 e2e_check.py：模拟真实数据目录走通 9 大流程，逐项 PASS/FAIL", { x: 7.88, y: 6.35, w: 4.7, h: 0.45, fontSize: 11, color: DMUTED, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.2 });
+  s.addText("另有 e2e_check.py：模拟真实数据目录走通 18 大流程，逐项 PASS/FAIL", { x: 7.88, y: 6.35, w: 4.7, h: 0.45, fontSize: 11, color: DMUTED, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.2 });
 }
 
 /* ================= S40 结束页 ================= */
@@ -1095,7 +1095,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("公文汇编助手 · 单机离线版 v1.2.0", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
+  s.addText("公文汇编助手 · 单机离线版 v1.5.1", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
   s.addText("完全离线 · 数据自主 · 开箱即用", { x: M, y: 2.3, w: 11.5, h: 1.0, fontSize: 42, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("不联网、不上传、不留痕 —— 一台电脑，就是一座公文资料馆。", { x: 0.53, y: 3.45, w: 10, h: 0.5, fontSize: 16, color: DMUTED, fontFace: FONT, margin: 0 });
   const docs = [

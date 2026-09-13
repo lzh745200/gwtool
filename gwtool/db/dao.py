@@ -329,8 +329,12 @@ def get_document(doc_id: int) -> Document | None:
     return Document(**dict(row)) if row else None
 
 
-def list_documents(category_id: int | None = None) -> list[Document]:
+def list_documents(category_id: int | None = None,
+                   include_content: bool = False) -> list[Document]:
     """category_id=None 返回全部（标题列表用，不含正文以省内存）。
+
+    include_content=True 时额外带出 content_text —— 供画像/统计等需要
+    逐篇正文的场景；列表展示类调用保持默认 False，避免整库正文进内存。
 
     回收站里的文档（deleted_time 非空）一律不返回 —— 这是软删除语义的关键，
     资料库列表、汇编选料、查重、批量替换都走本函数。
@@ -338,6 +342,8 @@ def list_documents(category_id: int | None = None) -> list[Document]:
     conn = dbconn.get_conn()
     cols = ("id,title,tags,category_id,file_type,word_count,import_time,"
             "updated_time,deleted_time")
+    if include_content:
+        cols += ",content_text"
     if category_id is None:
         rows = conn.execute(
             f"SELECT {cols} FROM documents WHERE deleted_time=''"
