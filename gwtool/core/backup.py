@@ -583,8 +583,13 @@ def _restore_attachments(zf) -> int:
     for name in zf.namelist():
         if not name.startswith("attachments/") or name.endswith("/"):
             continue
+        # pathlib 会把 "attachments/." 规范化出 name="attachments"——不加防御
+        # 会在附件目录里落一个与目录同名的垃圾文件。点条目只能在**原始相对段**
+        # 上识别（规范化后已失真），"."/".." 一律拒绝
+        rel = name[len("attachments/"):]
         file_name = Path(name).name
-        if not file_name:
+        if (not file_name or file_name in (".", "..")
+                or rel in (".", "..")):
             continue
         target = (dest_dir / file_name).resolve()
         if dest_dir != target and dest_dir not in target.parents:

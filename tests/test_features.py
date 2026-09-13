@@ -200,7 +200,7 @@ def test_password_lock(tmp_db):
     assert not security.has_password()
 
 
-def test_encrypted_backup_roundtrip(tmp_db, tmp_path):
+def test_encrypted_backup_roundtrip(tmp_db, tmp_path, monkeypatch):
     pytest.importorskip("pyzipper")
     import gwtool.core.backup as bk
     from gwtool import paths
@@ -210,7 +210,9 @@ def test_encrypted_backup_roundtrip(tmp_db, tmp_path):
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    bk.paths.backup_dir = fake_dir
+    # 必须走 monkeypatch：裸赋值会永久污染 paths 模块（teardown 不恢复），
+    # 后续任何依赖 backup_dir 真实行为的测试都会被殃及（曾致全量跑不稳定）
+    monkeypatch.setattr(paths, "backup_dir", fake_dir)
     from gwtool.db import dao
     dao.add_document(dao.Document(title="加密备份测试", content_text="机密内容。"))
     z = bk.create_backup(note="加密", password="pass1234")
@@ -227,7 +229,7 @@ def test_encrypted_backup_roundtrip(tmp_db, tmp_path):
     assert d and "机密内容" in d.content_text
 
 
-def test_backup_rotation(tmp_db, tmp_path):
+def test_backup_rotation(tmp_db, tmp_path, monkeypatch):
     import gwtool.core.backup as bk
 
     def fake_dir():
@@ -235,7 +237,9 @@ def test_backup_rotation(tmp_db, tmp_path):
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    bk.paths.backup_dir = fake_dir
+    # 必须走 monkeypatch：裸赋值会永久污染 paths 模块（teardown 不恢复），
+    # 后续任何依赖 backup_dir 真实行为的测试都会被殃及（曾致全量跑不稳定）
+    monkeypatch.setattr(bk.paths, "backup_dir", fake_dir)
     for i in range(23):
         (fake_dir() / f"gwtool_backup_{i:08d}_000.zip").write_text("x")
     removed = bk.rotate_backups(keep_recent=20)
