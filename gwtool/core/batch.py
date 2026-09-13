@@ -78,6 +78,8 @@ class CorrectHit:
     category: str = ""
     confidence: float = 0.0
     context: str = ""
+    # 改动类型：replace / insert / delete（由 L5 Seq2Seq 层产生变长输出时区分）
+    kind: str = "replace"
 
     @property
     def label(self) -> str:
@@ -176,7 +178,8 @@ def _scan(category_id: int | None, doc_ids: list[int] | None,
                     continue
                 hits.append(CorrectHit(c.start, c.end, c.wrong, c.suggestion,
                                        c.category, c.confidence,
-                                       _context(text, c.start, c.end)))
+                                       _context(text, c.start, c.end),
+                                       getattr(c, "kind", "replace")))
             if hits:
                 result.plans.append(DocCorrection(int(row["id"]), title, hits))
         except Exception as exc:  # noqa: BLE001  单篇失败不中断整批
@@ -188,13 +191,71 @@ def _scan(category_id: int | None, doc_ids: list[int] | None,
     return result
 
 
+def _relocate(text: str, wrong: str, context: str) -> int:
+    """文本变动后为命中词重新定位；只有上下文能对上才返回下标，否则 -1。
+
+    `context` 是预览时抓取的 ±14 字窗口（空白已压平），用它做锚点：
+    候选位置两侧的文本若与预览上下文一致，才认为仍是原来那一处。
+    同一篇里出现多个同词时，只有上下文唯一的候选才会被采纳；
+    无法确认时宁可返回 -1（跳过），也绝不改到别处。
+    """
+    if not wrong:
+        return -1
+    anchors = _context_anchors(context, wrong)
+    if anchors is None:
+        # 预览未带上下文：退化为"全文唯一"这一弱保证（历史行为）
+        idx = text.find(wrong)
+        return idx if idx >= 0 and text.find(wrong, idx + 1) < 0 else -1
+    prefix, suffix = anchors
+    found = -1
+    pos = text.find(wrong)
+    while pos >= 0:
+        if _context_matches(text, pos, pos + len(wrong), prefix, suffix):
+            if found >= 0:
+                return -1          # 多处都对得上 -> 无法确认是哪一处，跳过
+            found = pos
+        pos = text.find(wrong, pos + 1)
+    return found
+
+
+def _context_anchors(context: str, wrong: str):
+    """从压平的上下文里剥出 (前缀, 后缀) 两个锚串；无法解析返回 None。"""
+    if not context or wrong not in context:
+        return None
+    left, _, right = context.partition(wrong)
+    if not left and not right:
+        return None
+    return left, right
+
+
+def _flat(s: str) -> str:
+    return re.sub(r"\s+", " ", s)
+
+
+def _context_matches(text: str, s: int, e: int, prefix: str, suffix: str) -> bool:
+    """候选位置两侧的原文（压平后）是否以预览锚串收/起。"""
+    if prefix:
+        lo = max(0, s - len(prefix) * 2)      # 留出空白差异的余量
+        if not _flat(text[lo:s]).endswith(_flat(prefix)[-max(1, len(prefix) // 2):]):
+            return False
+    if suffix:
+        hi = min(len(text), e + len(suffix) * 2)
+        if not _flat(text[e:hi]).startswith(_flat(suffix)[: max(1, len(suffix) // 2)]):
+            return False
+    return True
+
+
 def _apply_hits(text: str, hits: list[CorrectHit]
-                ) -> tuple[str, int, int, set[tuple[str, str]]]:
+                ) -> tuple[str, int, int, list[tuple[int, int, str, str]]]:
     """把预览命中写进正文：位置校验 -> 漂移重定位 -> 去重叠 -> 从后往前替换。
 
-    返回 (新正文, 已替换处数, 跳过处数, 已替换的 (错, 对) 集合)。
-    预览与执行之间文档可能已被编辑，因此位置对不上时按原词重新定位，
-    且只有全文唯一命中才替换（多处同词时宁可跳过，也不改错地方）。
+    返回 (新正文, 已替换处数, 跳过处数, 已替换位置列表)。
+    已替换位置列表是 (start, end, 错, 对)，坐标基于**替换前的旧正文**，
+    供 _apply_to_blocks 精确同步结构化块 —— 只同步用户确认过的那几处，
+    不能只凭「错词」把全文同形词一并改掉。
+    预览与执行之间文档可能已被编辑，因此位置对不上时按「上下文锚点」重新
+    定位：只有候选位置的上下文与预览时一致才替换；无法确认（多处同形、
+    或上下文对不上）时一律跳过 —— 宁可不改，也绝不改错地方。
     """
     resolved: list[tuple[int, int, str, str]] = []
     skipped = 0
@@ -205,8 +266,8 @@ def _apply_hits(text: str, hits: list[CorrectHit]
         if 0 <= h.start < h.end <= len(text) and text[h.start:h.end] == h.wrong:
             resolved.append((h.start, h.end, h.wrong, h.suggestion))
             continue
-        idx = text.find(h.wrong)
-        if idx >= 0 and text.find(h.wrong, idx + 1) < 0:
+        idx = _relocate(text, h.wrong, h.context)
+        if idx >= 0:
             resolved.append((idx, idx + len(h.wrong), h.wrong, h.suggestion))
         else:
             skipped += 1
@@ -217,39 +278,74 @@ def _apply_hits(text: str, hits: list[CorrectHit]
             skipped += 1          # 重定位后与已保留的命中重叠
             continue
         kept.append((s, e, wrong, sug))
-    pairs: set[tuple[str, str]] = set()
-    for s, e, wrong, sug in reversed(kept):
+    for s, e, _wrong, sug in reversed(kept):
         text = text[:s] + sug + text[e:]
-        pairs.add((wrong, sug))
-    return text, len(kept), skipped, pairs
+    return text, len(kept), skipped, kept
 
 
-def _apply_to_blocks(blocks_json: str, pairs: set[tuple[str, str]]) -> str:
-    """把已确认的 (错, 对) 同步进结构化块，汇编出的公文才是改后的文本。
+def _apply_to_blocks(blocks_json: str, old_text: str,
+                     confirmed: list[tuple[int, int, str, str]]) -> str:
+    """把已确认的命中同步进结构化块，汇编出的公文才是改后的文本。
 
     dao.update_document_content(blocks_json=None) 会把块清成 '[]'，汇编随即退回
-    按纯文本分段（标题层级全丢），所以必须显式回写。逐块重跑一遍纠错再按 pairs
-    过滤：既只改用户预览确认过的词，又继承 corrector 的书名号与词边界保护
-    （不会误改《》里引用的原文标题）。直接操作 JSON 字典而不是 Block(**d)，
-    以容忍未来新增字段；任何异常都退回原块，宁可不改也不把结构写坏。
+    按纯文本分段（标题层级全丢），所以必须显式回写。
+
+    `old_text` 是替换前的正文，`confirmed` 是 _apply_hits 返回的已替换位置
+    （坐标基于 old_text）。做法：沿 old_text 顺序定位每块文本，得到块内每个
+    命中在 old_text 中的全局坐标；只有坐标与 confirmed 完全一致的才替换 ——
+    用户没确认的同形词一律不动。
+
+    此前只按 (错, 对) 词对过滤逐块重跑纠错，位置信息全丢：正文按位置只改了
+    确认过的那一处，块却把全文同词全改，同一篇文档的正文与块出现两个版本，
+    汇编出的公文与资料库预览对不上。任何异常都退回原块，宁可不改也不把结构
+    写坏。
     """
-    if not pairs or not blocks_json:
+    if not confirmed or not blocks_json or not old_text:
         return blocks_json or "[]"
     try:
         import json
 
-        from .corrector import apply_all, check_text
+        from .corrector import check_text
 
         data = json.loads(blocks_json)
         if not isinstance(data, list) or not data:
             return blocks_json
 
+        # 已确认区间 -> 建议词，便于按全局坐标精确命中
+        by_span = {(s, e): sug for s, e, _w, sug in confirmed}
+
+        # 沿正文顺序前进的游标：块文本按出现顺序在正文里定位，避免重复词错位。
+        # 定位不到（块文本被规范化过、或与正文不一致）就停用坐标同步，
+        # 改用「原文出现次数」这一更弱的保证。
+        cursor = 0
+
+        def locate(text: str) -> int:
+            """返回 text 在正文中的起点（从当前游标起找）；找不到返回 -1。"""
+            nonlocal cursor
+            idx = old_text.find(text, cursor)
+            if idx < 0:
+                idx = old_text.find(text)
+            if idx < 0:
+                return -1
+            cursor = idx + len(text)
+            return idx
+
         def fix(text):
             if not isinstance(text, str) or not text:
                 return text
-            picked = [c for c in check_text(text)
-                      if (c.wrong, c.suggestion) in pairs]
-            return apply_all(text, picked) if picked else text
+            base = locate(text)
+            if base < 0:
+                return text
+            picked = [(c, by_span[(base + c.start, base + c.end)])
+                      for c in check_text(text)
+                      if (base + c.start, base + c.end) in by_span]
+            if not picked:
+                return text
+            # 从后往前替换，前面的位置不受影响
+            out = text
+            for c, sug in sorted(picked, key=lambda t: t[0].start, reverse=True):
+                out = out[:c.start] + sug + out[c.end:]
+            return out
 
         for blk in data:
             if not isinstance(blk, dict):
@@ -279,8 +375,8 @@ def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectRe
                 raise ValueError("文档不存在（可能已被彻底删除）")
             if d.deleted_time:
                 raise ValueError("文档已在回收站，未改动")
-            new_text, applied, skipped, pairs = _apply_hits(d.content_text or "",
-                                                            plan.hits)
+            old_text = d.content_text or ""
+            new_text, applied, skipped, confirmed = _apply_hits(old_text, plan.hits)
             result.skipped += skipped
             if not applied:
                 continue        # 一处都没改成就不写库，避免白刷 updated_time
@@ -290,7 +386,7 @@ def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectRe
                 dao.add_snapshot(d.id, d.title, d.content_text, reason="批量纠错前")
             except Exception:  # noqa: BLE001
                 pass
-            blocks = _apply_to_blocks(d.blocks_json, pairs)
+            blocks = _apply_to_blocks(d.blocks_json, old_text, confirmed)
             dao.update_document_content(d.id, d.title, new_text, blocks_json=blocks)
             result.applied.append(d.id)
             result.changes += applied

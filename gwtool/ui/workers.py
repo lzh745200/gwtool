@@ -9,8 +9,23 @@ from PySide6.QtCore import QThread, Signal
 
 from ..core import compiler, importer
 from ..core.booklet import make_booklet
+from ..db import connection as dbconn
 from ..db import dao
 from ..core.model import Block
+
+
+def _close_thread_conn() -> None:
+    """收尾：关闭本工作线程持有的 SQLite 连接。
+
+    SQLite 连接按 thread-local 缓存，QThread 每次 start() 都是新 OS 线程，
+    不主动关闭的话线程结束后连接对象与 -wal/-shm 句柄会随线程一起泄漏。
+    长会话里反复「查重/批量纠错/对比/PDF 预览」会持续堆积句柄，
+    麒麟上容易触发 too many open files。
+    """
+    try:
+        dbconn.close_current_thread()
+    except Exception:
+        pass
 
 
 class FnWorker(QThread):
@@ -32,6 +47,8 @@ class FnWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             self.failed.emit(str(exc))
+        finally:
+            _close_thread_conn()
 
 
 class ImportWorker(QThread):
@@ -82,6 +99,8 @@ class ImportWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             self.failed.emit(str(exc))
+        finally:
+            _close_thread_conn()
 
 
 class CompileWorker(QThread):
@@ -106,6 +125,8 @@ class CompileWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             self.error.emit(str(exc))
+        finally:
+            _close_thread_conn()
 
 
 class PdfRenderWorker(QThread):
@@ -135,6 +156,8 @@ class PdfRenderWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             self.error.emit(str(exc))
+        finally:
+            _close_thread_conn()
 
 
 class BookletWorker(QThread):
@@ -156,6 +179,8 @@ class BookletWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             self.error.emit(str(exc))
+        finally:
+            _close_thread_conn()
 
 
 class TTSWorker(QThread):
@@ -185,11 +210,14 @@ class TTSWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
             return
-        sentences = tts_core.split_sentences(self.text)
-        for i, s in enumerate(sentences):
-            if self._stop:
-                break
-            self.sentence.emit(i, len(sentences), s)
-            self._engine._stopped = False
-            self._engine.speak(s)
-        self.finished_ok.emit()
+        try:
+            sentences = tts_core.split_sentences(self.text)
+            for i, s in enumerate(sentences):
+                if self._stop:
+                    break
+                self.sentence.emit(i, len(sentences), s)
+                self._engine._stopped = False
+                self._engine.speak(s)
+            self.finished_ok.emit()
+        finally:
+            _close_thread_conn()

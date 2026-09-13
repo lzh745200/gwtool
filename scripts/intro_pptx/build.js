@@ -80,7 +80,7 @@ const BGWHITE = "FFFFFF";
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("GWTOOL · 单机离线版 v1.2.0", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
+  s.addText("GWTOOL · 单机离线版 v1.5.1", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
   s.addText("公文汇编助手", { x: M, y: 2.15, w: 9.2, h: 1.25, fontSize: 60, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("面向党政机关、企事业单位的单机智能公文汇编与写作辅助工具", { x: 0.53, y: 3.5, w: 8.6, h: 0.5, fontSize: 17, color: DMUTED, fontFace: FONT, margin: 0 });
   const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GB/T 9704 公文格式", "87 项自动化测试"];
@@ -110,7 +110,7 @@ const BGWHITE = "FFFFFF";
     ["04", "智能写作辅助", "15 种文种骨架 · 文秘工具箱 · 写作参考 · 三级纠错"],
     ["05", "一键汇编与成品输出", "三步向导 · 国标模板 · Word 引擎 · 两遍渲染 · A3 小册子"],
     ["06", "质检、对比与安全", "格式体检 · 文档对比查重 · 历史快照 · 加密备份"],
-    ["07", "交付、质量与生态", "双平台 · 打包矩阵 · CI/CD · 87 项测试与性能验收"],
+    ["07", "交付、质量与生态", "双平台 · 打包矩阵 · CI/CD · 465 项测试与性能验收"],
   ];
   let y = 1.78;
   items.forEach(([n, t, d]) => {
@@ -225,7 +225,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: cx, y: cy, w: cw, h: ch, rectRadius: 0.1, fill: { color: PRIMARY }, line: { type: "none" }, shadow: shadow() });
   s.addText([
     { text: "公文汇编助手", options: { bold: true, fontSize: 17, color: "FFFFFF", breakLine: true } },
-    { text: "17 个功能模块", options: { fontSize: 12, color: "F2D8D0" } },
+    { text: "24 个功能模块", options: { fontSize: 12, color: "F2D8D0" } },
   ], { x: cx, y: cy + 0.12, w: cw, h: ch - 0.2, align: "center", fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
   s.addText("全部功能共享同一本地数据库与模板体系，任何一个模块的产出都可直接被其他模块使用", { x: 4.45, y: 5.55, w: 4.55, h: 1.2, align: "center", valign: "middle", fontSize: 12, color: MUTED, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
 }
@@ -413,7 +413,7 @@ divider(13, "03", "材料导入与资料库", "七种格式进得来，一座资
     chip(s, x, 1.95, w, 0.62, e, { fill: i === 7 ? TINT : PAPER, bold: true, fontSize: 13, color: i === 7 ? PRIMARY : INK });
     x += w + 0.18;
   });
-  s.addText("文档 7 种格式直读（markdown / htm 等同族扩展名均支持）　·　图片 4 类走 OCR（Tesseract 5 + chi_sim，可选功能）", { x: M, y: 2.72, w: 12, h: 0.36, fontSize: 12.5, color: MUTED, fontFace: FONT, margin: 0 });
+  s.addText("文档 8 种格式直读（.wps 按内容嗅探路由，装 WPS 机器 COM 保真）　·　图片 4 类走内置 OCR（Tesseract + chi_sim 随安装包分发）", { x: M, y: 2.72, w: 12, h: 0.36, fontSize: 12.5, color: MUTED, fontFace: FONT, margin: 0 });
   const rows = [
     ["拖拽即进", "支持拖入文件或整个文件夹（递归扫描），也可从右键菜单 / 剪贴板一键入库"],
     ["后台解析", "ImportWorker 逐个解析入库，进度条含“OCR 第 x/y 页”页级反馈，可中途停止"],
@@ -589,7 +589,7 @@ divider(17, "04", "智能写作辅助", "从“憋公文”到“填公文”：
 /* ================= S21 纠错流水线 ================= */
 {
   const s = p.addSlide();
-  header(s, "04 智能写作辅助", "纠错引擎：三级流水线，像老编辑一样过稿", 21);
+  header(s, "04 智能写作辅助", "纠错引擎：三级流水线 + 可选 L4/L5 神经增强包", 21);
   const stages = [
     ["第一级 · 精确匹配", "4 万条错别字/混淆对，首字桶索引 + 最长优先", "内置精标 + 程序生成 + 用户自定义 + 机构沿革（提示级 0.7）"],
     ["第二级 · 上下文规则", "同一个词，不同语境不同结论", "“截止日期”保留；“截止 8 月底”改“截至”；火山爆发 / 山洪暴发"],
@@ -969,8 +969,8 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
   const s = p.addSlide();
   header(s, "07 交付、质量与生态", "双平台交付：从 Windows 办公机到麒麟信创终端", 36);
   const plats = [
-    ["Windows 10 / 11 · x64", ["目录版 dist\\gwtool\\gwtool.exe（启动 ≤5 秒）", "便携版 zip：免安装压缩包", "Inno Setup 安装包（无需管理员权限）", "右键菜单“用公文汇编助手导入”"]],
-    ["麒麟 V10 · ARM64", ["原生 ARM64 runner 打包（非模拟）", "deb 包：desktop 入口 + Qt 运行库依赖声明", "makeself 自解压 .run 安装包", "离线 wheels：有网机预下载，内网纯离线装"]],
+    ["Windows 10 / 11 · x64", ["Inno Setup 安装包（免管理员权限，装完即用）", "Tesseract OCR + 中文包内置，离线开箱即用", "便携模式 --portable：数据随程序走，U 盘可用", "右键菜单“用公文汇编助手导入”"]],
+    ["麒麟 V10 · ARM64", ["原生 ARM64 runner 打包（非交叉编译模拟）", "deb 包：desktop 入口 + Qt 运行库依赖声明", "Tesseract 与中文包内置（glibc 与麒麟对齐）", "启动器预检缺库，给出确切 apt 安装命令"]],
   ];
   plats.forEach(([t, items], i) => {
     const x = M + i * 6.25;
@@ -1005,21 +1005,19 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     { text: "双平台共用唯一配置：携带 seed.db + OpenCC 数据；排除 17 个网络/重型模块；UPX 压缩；窗口程序无控制台", options: { fontSize: 11.5, color: "F2D8D0" } },
   ], { x: 4.15, y: 2.05, w: 5.05, h: 1.3, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.25 });
   const outs = [
-    ["Windows 目录版", "gwtool.exe 启动最快，配便携 zip 分发"],
-    ["Windows 安装包", "Inno Setup · lzma2 固实压缩 · 装完可启动"],
-    ["ARM64 deb 包", "内置 desktop 文件，声明 Qt 运行库依赖"],
-    ["ARM64 tar.gz / .run", "免 root 解压即用；makeself 自解压安装"],
+    ["Windows x64 安装包", "gwtool_setup_win64.exe · Inno Setup LZMA2 固实压缩 · Tesseract OCR 与中文包内置 · 装完即启动，全程零网络"],
+    ["麒麟 ARM64 deb 包", "gwtool_<版本>_linux_arm64.deb · dpkg-deb 组装 · desktop 入口 + Qt 运行库依赖声明 · OCR 内置，glibc 对齐麒麟 V10"],
   ];
   s.addShape(p.shapes.LINE, { x: 6.67, y: 3.45, w: 0, h: 0.35, line: { color: "B9A79A", width: 1.25 } });
-  s.addShape(p.shapes.LINE, { x: M + 1.49, y: 3.8, w: 11.34 - M - 1.49, h: 0, line: { color: "B9A79A", width: 1.25 } });
+  s.addShape(p.shapes.LINE, { x: M + 3.0, y: 3.8, w: 6.25, h: 0, line: { color: "B9A79A", width: 1.25 } });
   outs.forEach(([t, d], i) => {
-    const x = M + i * 3.14;
-    arrow(s, x + 1.49, 3.8, x + 1.49, 4.0, { color: "B9A79A", width: 1.25 });
-    s.addShape(p.shapes.ROUNDED_RECTANGLE, { x, y: 4.0, w: 2.98, h: 1.5, rectRadius: 0.08, fill: { color: PAPER }, line: { color: LINE, width: 1 } });
+    const x = M + i * 6.25;
+    arrow(s, x + 3.0, 3.8, x + 3.0, 4.0, { color: "B9A79A", width: 1.25 });
+    s.addShape(p.shapes.ROUNDED_RECTANGLE, { x, y: 4.0, w: 6.05, h: 1.5, rectRadius: 0.08, fill: { color: PAPER }, line: { color: LINE, width: 1 } });
     s.addText([
       { text: t, options: { bold: true, fontSize: 13.5, color: PRIMARY, breakLine: true } },
       { text: d, options: { fontSize: 11.5, color: MUTED } },
-    ], { x: x + 0.2, y: 4.14, w: 2.6, h: 1.25, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.25 });
+    ], { x: x + 0.22, y: 4.14, w: 5.6, h: 1.25, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.25 });
   });
   s.addText([
     { text: "系统集成：", options: { bold: true, color: PRIMARY, fontSize: 12.5 } },
@@ -1054,15 +1052,15 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
 /* ================= S39 质量保障 ================= */
 {
   const s = p.addSlide();
-  header(s, "07 交付、质量与生态", "质量保障：87 项测试，性能指标写进断言", 39);
+  header(s, "07 交付、质量与生态", "质量保障：465 项测试，性能指标写进断言", 39);
   // 手绘条形图
-  s.addText("测试分布（pytest，按文件）", { x: M, y: 1.9, w: 5, h: 0.38, fontSize: 13.5, bold: true, color: INK, fontFace: FONT, margin: 0 });
+  s.addText("测试分布（pytest，按文件 · 前 9）", { x: M, y: 1.9, w: 5, h: 0.38, fontSize: 13.5, bold: true, color: INK, fontFace: FONT, margin: 0 });
   const bars = [
-    ["test_features", 24], ["test_corrector", 11], ["test_p2p3_features", 11],
-    ["test_parsers", 9], ["test_p1_features", 9], ["test_data_search", 8],
-    ["test_compile_pdf", 6], ["test_ui_guard", 5], ["test_app_smoke", 4],
+    ["test_corrector_l5", 46], ["test_features", 24], ["test_attachments", 20],
+    ["test_corrector_l4", 19], ["test_correction_highlighter", 19], ["test_backup_limits", 19],
+    ["test_stage3_extras", 19], ["test_batch_correct", 17], ["test_registry", 17],
   ];
-  const maxV = 24, bx0 = 3.15, bw2 = 3.55;
+  const maxV = 46, bx0 = 3.15, bw2 = 3.55;
   let by = 2.42;
   bars.forEach(([t, v], i) => {
     s.addText(t, { x: M, y: by, w: 2.6, h: 0.34, valign: "middle", align: "right", fontSize: 11, color: MUTED, fontFace: FONT, margin: 0 });
@@ -1103,7 +1101,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
   const docs = [
     ["README.md", "功能总览 · 快速开始 · 打包发布 · 验收对照"],
     ["项目文件结构说明.md", "写给新手的逐文件导读与“改 X 去哪”速查表"],
-    ["scripts/e2e_check.py", "9 步端到端自检，部署后一键验货"],
+    ["scripts/e2e_check.py", "18 步端到端自检，部署后一键验货"],
   ];
   docs.forEach(([t, d], i) => {
     const x = M + i * 4.2;

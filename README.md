@@ -1,7 +1,7 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.5.0**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.5.1**。
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
@@ -35,6 +35,7 @@
 | 排版微调 | 一键处理首行缩进、多余空格、全半角、段间空行、标题编号 |
 | 历史版本 | 每 3 分钟自动快照（每文档保留 30 版），差异预览一键回滚 |
 | 朗读校对 | 离线 TTS 逐句朗读（Win SAPI / 麒麟 espeak-ng），F9 开停 |
+| 精度增强包（可选） | 词表外错字的「L4 神经精排」：主包**不带模型**，需要时离线导入独立 `.zip` 增强包（ONNX，含 sha256 校验与 zip-slip/zip-bomb 防护），未导入时纠错行为与三级流水线完全一致 |
 | 便携模式 | `main.py --portable` 数据存程序同级 Data/，U 盘随带随走 |
 | 安全 | 启动口令锁（PBKDF2·12万次迭代）、AES 加密备份（pyzipper）、退出自动备份+轮转保留 20 份；附件按体积上限随包（手动/自动分别可配），装不下的写进包内清单、恢复时明确提醒，绝不静默丢 |
 | 系统集成 | Windows 右键菜单（`scripts/install_context_menu.bat`）、剪贴板一键入库 |
@@ -59,11 +60,11 @@ python scripts\smoke_dist.py dist\gwtool   # 打包后校验产物（需先打�
 推送 `v*` 标签或手动触发 `.github/workflows/build.yml` 即自动完成：
 两个平台（windows-latest x64 与 ubuntu-24.04-arm **原生 ARM64** runner）各自
 执行 ruff 静态检查 → pytest 全量测试 → **端到端自检**（`scripts/e2e_check.py`，
-14 步全流程）→ PyInstaller 打包（共用 `gwtool.spec`）→ **产物冒烟校验**
+18 步全流程）→ PyInstaller 打包（共用 `gwtool.spec`）→ **产物冒烟校验**
 （`scripts/smoke_dist.py`：资源齐全 + 真实启动 + 首启动种子导入）→
-产出 4 类安装包（Windows 便携 zip、Windows Inno Setup 安装 exe、ARM64 deb、
-ARM64 便携 tar.gz）并自动创建 GitHub Release（deb 内置 desktop 文件并声明
-Qt 运行库依赖，推荐安装 tesseract-ocr-chi-sim 以启用 OCR）。
+产出 2 个离线安装包（Windows Inno Setup 安装 exe、ARM64 deb）并自动创建
+GitHub Release（两包均把 Tesseract OCR 引擎与中文包打包在内、零网络依赖；
+deb 内置 desktop 文件并声明 Qt 运行库依赖）。
 
 依赖已在 `requirements.txt` **精确锁定**。两处必须分档，不能一刀切：
 PySide6 分平台（Windows 6.11.2；Linux/麒麟 6.8.0.2，因官方 aarch64 wheel
@@ -169,6 +170,11 @@ CI 以 dpkg-deb 打成唯一安装包 `gwtool_<版本>_linux_arm64.deb`。
 | 检索 1 秒内 | FTS5 + jieba 预分词 | test_fts_search_speed_and_snippet |
 | 写作参考可插入 | BM25 三库联合检索 | test_reference_lookup |
 | 零网络请求 | 全离线设计 | 代码审计：无 socket/requests 调用 |
+| 小册子确实生成 | 向导勾选后 worker 真正启动 | test_bugfix_regression::TestBookletWorkerStarted |
+| 批量纠错不改错位置 | 上下文锚点重定位 | test_bugfix_regression::TestBatchRelocate |
+| 分词不可用不误吞命中 | 门控降级为不过滤 | test_bugfix_regression::TestCorrectorTokenizeFallback |
+| 多处日期全报 | 体检遍历全部命中 | test_bugfix_regression::TestInspectorDateAllOccurrences |
+| 拖放展开文件夹 | 列表控件自持拖放 | test_bugfix_regression::TestImportDialogDrop |
 
 ## 目录结构
 
@@ -198,6 +204,8 @@ gwtool/
 │   │   ├── booklet.py          #   A3 骑马订小册子（页序算法）
 │   │   ├── corrector.py        #   三级纠错流水线 + 词边界保护
 │   │   ├── corrector_data.py   #   内置精标对/机构沿革/上下文与标点规则
+│   │   ├── csc_neural.py       #   L4 神经精排层（可选 opt-in，依赖缺失即静默降级）
+│   │   ├── enhance_pack.py     #   精度增强包导入/校验/卸载（zip 安全 + sha256）
 │   │   ├── inspector.py        #   GB/T 9704 格式体检（文本级 + docx 级）
 │   │   ├── toolbox.py          #   文秘工具箱（金额/日期大写、简繁、全半角）
 │   │   ├── formatter.py        #   一键排版微调
@@ -236,7 +244,7 @@ gwtool/
 │   ├── install_context_menu.bat / uninstall_context_menu.bat  # 右键菜单
 │   ├── gwtool.desktop          #   Linux 桌面入口
 │   ├── seed_data.py            #   构建期生成 seed.db（词典下载+混淆对生成）
-│   ├── e2e_check.py            #   端到端自检（9 步全流程）
+│   ├── e2e_check.py            #   端到端自检（18 步全流程）
 │   └── api_commit.py           #   GitHub API 提交备援工具
 └── .github/workflows/build.yml # CI：双平台测试+打包+自动 Release
 ```

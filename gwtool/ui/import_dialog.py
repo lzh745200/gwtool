@@ -20,6 +20,41 @@ FILE_FILTER = ("支持的文件 (*.docx *.doc *.wps *.txt *.rtf *.pdf *.md *.mar
                "文本 (*.txt);;RTF (*.rtf);;Markdown (*.md);;HTML (*.html *.htm);;全部文件 (*)")
 
 
+class _DropListWidget(QListWidget):
+    """接受拖放的列表：把拖入的文件/文件夹交给宿主对话框处理。
+
+    QListWidget 默认的拖放实现会把 URL 当成纯文本项插进来（拖文件夹只会
+    插入一条 "file:///…" 文本行）。这里改写了 dragEnter/dragMove/drop，
+    把事件转给自己的宿主，由宿主完成扩展名过滤与目录递归展开。
+    """
+
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self._owner = owner
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DropOnly)
+        self.setSelectionMode(QListWidget.ExtendedSelection)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self._owner._drop_urls(e.mimeData().urls())
+        else:
+            super().dropEvent(e)
+
+
 class ImportDialog(QDialog):
     def __init__(self, category_id: int = 0, parent=None):
         super().__init__(parent)
@@ -33,13 +68,10 @@ class ImportDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         tip = QLabel("把文件拖到下方列表（支持 .docx .doc .txt .rtf .pdf .md .html），\n"
-                     "内容重复的文件将自动跳过。")
+                     "也可拖入整个文件夹；内容重复的文件将自动跳过。")
         layout.addWidget(tip)
 
-        self.file_list = QListWidget()
-        self.file_list.setAcceptDrops(True)
-        self.file_list.setDragDropMode(QListWidget.DropOnly)
-        self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.file_list = _DropListWidget(self)
         layout.addWidget(self.file_list, 1)
 
         row = QHBoxLayout()
@@ -105,20 +137,29 @@ class ImportDialog(QDialog):
         for item in self.file_list.selectedItems():
             self.file_list.takeItem(self.file_list.row(item))
 
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
+    def _drop_urls(self, urls):
+        """把拖入的 URL 列表展开为待导入文件（目录递归、按扩展名过滤）。"""
         files = []
-        for url in e.mimeData().urls():
+        for url in urls:
             p = url.toLocalFile()
+            if not p:
+                continue
             if Path(p).is_dir():
-                for ext in SUPPORTED_EXTS:
+                for ext in (SUPPORTED_EXTS | IMAGE_EXTS):
                     files.extend(str(x) for x in Path(p).rglob(f"*{ext}"))
             else:
                 files.append(p)
         self._add_files(files)
+
+    def dragEnterEvent(self, e):
+        # 对话框空白处的拖放（列表之外的区域）
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self._drop_urls(e.mimeData().urls())
 
     # ------------------------------------------------ 导入
     def _start(self):

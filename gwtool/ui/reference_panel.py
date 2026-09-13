@@ -16,6 +16,7 @@ class ReferencePanel(QWidget):
     """纠错建议列表（可一键替换）+ 写作参考（检索+一键插入）。"""
     insert_text = Signal(str)
     apply_edit = Signal(int, int, str)   # start, end, replacement -> 编辑器
+    corrections_ready = Signal(list)     # 一次检查完成 -> 编辑器画波浪线
 
     def __init__(self, editor_getter, parent=None):
         super().__init__(parent)
@@ -123,6 +124,13 @@ class ReferencePanel(QWidget):
         self._corrections = corrections
         self.btn_check.setEnabled(True)
         self._fill_corr_list()
+        # 通知编辑器把结果画成波浪线。这里发的坐标是**全文坐标**
+        # （_checked_text 取自编辑器全文），与编辑器文档坐标天然对齐，
+        # 无需任何换算。
+        try:
+            self.corrections_ready.emit(corrections)
+        except Exception:
+            pass
 
     def _on_check_failed(self, msg):
         self.btn_check.setEnabled(True)

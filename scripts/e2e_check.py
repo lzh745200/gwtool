@@ -157,6 +157,19 @@ def main() -> int:
     pairs = {c.wrong: c.suggestion for c in corr}
     step("纠错：布署→部署", pairs.get("布署") == "部署")
     step("纠错：截止→截至", pairs.get("截止") == "截至")
+    # 标点重复：同字符重复合并，但不同标点相邻不得被错并
+    punct = {(c.wrong, c.suggestion) for c in corrector.check_text("工作结束。。。")}
+    step("纠错：标点重复合并", ("。。。", "。") in punct)
+    mixed = {(c.wrong, c.suggestion) for c in corrector.check_text("甲。，乙")}
+    step("纠错：不同标点不误并", ("。，", "，") not in mixed)
+
+    # 8b) 格式体检：正文里多处日期都应报出（原 break 只报第一处）
+    from gwtool.core import inspector
+    _txt = "第一处 2026年08月30日，第二处 2026年09月01日。"
+    _dates = "".join(f.detail for f in inspector.inspect_text(_txt)
+                     if f.item == "成文日期")
+    step("体检：多处日期全部报出",
+         "2026年08月30日" in _dates and "2026年09月01日" in _dates)
 
     # 9) 备份
     from gwtool.core.backup import create_backup

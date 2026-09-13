@@ -56,7 +56,9 @@ def _paragraph_block(para: Paragraph) -> Block | None:
         level = int(digits) if digits.isdigit() else 1
     if level:
         return Block(type=HEADING, level=min(level, 4), text=text)
-    if para.style.name and "list" in para.style.name.lower():
+    # 中文 Word 的列表样式本地化名为「列表段落」（List Paragraph），
+    # 原判定只查英文 "list" 会把中文版 Word 的列表项全部降级成正文。
+    if style_name and ("list" in style_name or "列表" in style_name):
         return Block(type=LIST_ITEM, text=text)
     # 大纲级别也可能写在段落属性里（outlineLvl）
     lvl = _outline_level(para)

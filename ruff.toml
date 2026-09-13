@@ -2,5 +2,15 @@
 # （如 UI 类漏导入控件导致的 NameError——构造对话框即崩的那类缺陷）
 target-version = "py39"
 
+exclude = [
+    ".convlib",     # 模型转换期依赖（torch/transformers），仅转换机使用
+    ".models",      # 原始模型权重，不入库
+    ".venv",
+    ".venv64",
+    "build",
+    "dist",
+    "packs",
+]
+
 [lint]
 select = ["E9", "F821"]

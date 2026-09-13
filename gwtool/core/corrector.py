@@ -25,9 +25,13 @@ class Correction:
     end: int
     wrong: str
     suggestion: str
-    category: str      # 错别字 / 易混词 / 禁用词 / 标点 / 数字用法 / 用户词库
+    category: str      # 错别字 / 易混词 / 禁用词 / 标点 / 数字用法 /
+                       # 用户词库 / 神经纠错 / 语法纠错
     reason: str
     confidence: float
+    # 改动类型：replace（替换，默认）/ insert（增字）/ delete（删字）。
+    # 默认值保证历史构造点零改动；L5 Seq2Seq 层需用它区分变长输出。
+    kind: str = "replace"
 
     @property
     def label(self) -> str:
@@ -85,6 +89,12 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
 def invalidate_cache() -> None:
     """用户增删词库后调用，使缓存失效。"""
     _RULES_CACHE.clear()
+    try:                       # 顺带失效神经层的开关缓存（默认关闭时零成本）
+        from . import csc_gec, csc_neural
+        csc_neural.invalidate_cache()
+        csc_gec.invalidate_cache()
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ 引擎
@@ -96,7 +106,53 @@ def check_text(text: str) -> list[Correction]:
     found.extend(_check_regex_group(text, CONTEXT_RULES, "易混词"))
     found.extend(_check_regex_group(text, PUNCT_RULES, "标点"))
     found.extend(_check_regex_group(text, NUMBER_RULES, "数字用法"))
-    return _dedupe(found)
+    found = _apply_neural_layer(text, _dedupe(found))     # L4 单字替换精排
+    return _apply_gec_layer(text, found)                  # L5 语法纠错
+
+
+def _apply_neural_layer(text: str,
+                        corrections: list[Correction]) -> list[Correction]:
+    """可选第 4 级：神经网络精排（默认关闭，需导入增强包并手动开启）。
+
+    设计约束：
+      - 未安装/未开启时**零成本**：`enabled()` 只做一次内存布尔判断；
+      - L4 只补前三层没有覆盖的位置，输出同样是 `Correction`，
+        所以 UI 层（纠错面板 / 任意文档纠错 / 标记视图）无需任何改动；
+      - **异常一律咽掉**：增强包损坏、依赖缺失、推理报错，都只回落三级
+        流水线，绝不让纠错主流程失败。
+    """
+    try:
+        from . import csc_neural
+        if not csc_neural.enabled():
+            return corrections
+        extra = csc_neural.enhance(text, corrections)
+        if not extra:
+            return corrections
+        return _dedupe(list(corrections) + list(extra))
+    except Exception:
+        return corrections
+
+
+def _apply_gec_layer(text: str,
+                     corrections: list[Correction]) -> list[Correction]:
+    """可选第 5 级：Seq2Seq 语法纠错（默认关闭，需导入 cgec 增强包并开启）。
+
+    与 L4 的分工：
+      - L4 是「单字替换」分类器，逐位判定，补前三层漏掉的错字；
+      - L5 是「变长输出」生成模型，能处理增字/删字/改序类语病。
+    因此 L5 在 L4 之后运行，其输出仍挂在 `occupied` 之外——L4 优先、L5 补漏，
+    同一位置不会双报。异常同样一律咽掉，未开启时只做一次内存布尔判断。
+    """
+    try:
+        from . import csc_gec
+        if not csc_gec.enabled():
+            return corrections
+        extra = csc_gec.enhance(text, corrections)
+        if not extra:
+            return corrections
+        return _dedupe(list(corrections) + list(extra))
+    except Exception:
+        return corrections
 
 
 def _buckets() -> dict[str, list[str]]:
@@ -176,11 +232,22 @@ def _suppress_inside_common_words(
          拦截跨词命中（如 '全厂生产' 分词 全厂|生产，'厂生' 右端在边界）；
       2) 命中不得严格位于任何分词 token 内部；
       3) 例外：命中本身是 jieba 高频词（词频≥30）时退回原规则，
-         避免误伤"同为真实词的易混对"（如 度过/渡过 类）。
+         避免误伤"同为真实词的易混对"（如 度过/渡过 类）；
+      4) 追加防线（v1.5.1）：命中若由**≥2 个高频常用字**组成
+         （如 这是/没又/住要 —— 生成器的"同音错形"恰好落在常用字上），
+         它在任何正常行文中随处可见，属结构性误报，一律抑制。
+         实测 seed.db 的 4 万条生成对中有 925 条属此类。
+         判据刻意用**逐字词频**而非分词结果：jieba 会把"这是"整体并成
+         一个词、把"请驶用"并成一个词，依赖分词边界并不可靠。
+         本条只对"低置信且命中非高频词"的命中生效，绝不触碰人工精标对。
     """
     boundaries: set[int] = set()
     inside_mask = bytearray(len(text) + 2)   # 位置 -> 是否严格位于某 token 内部
     has_tokens = False
+    # 分词不可用（jieba 未装/词典损坏/运行期异常）时为 None：门控整体**降级为不过滤**。
+    # 注意不能退化成空集 —— 空集会让 both_ends 恒为 False，把低置信命中全部吞掉，
+    # 与"宁少报不误报的过滤器"这一设计意图正好相反（漏报比误报更不可接受）。
+    tokenized: bool | None = None
     if raw:
         try:
             import jieba
@@ -192,20 +259,54 @@ def _suppress_inside_common_words(
                 for k in range(a + 1, b):
                     inside_mask[k] = 1
                 has_tokens = True
+            tokenized = has_tokens
         except Exception:
-            boundaries = set()
+            tokenized = None
     out: list[Correction] = []
     for s, e, hit, correct, cat, conf in raw:
+        if tokenized is None:
+            # 无分词信息：跳过词边界门控，只保留确定性的结构规则
+            if conf < _LOW_CONF and jieba_freq(hit) < 30 \
+                    and _is_common_char_sequence(hit):
+                continue
+            out.append(Correction(s, e, hit, correct, cat, "词库匹配", conf))
+            continue
         both_ends = s in boundaries and e in boundaries
         inside = bool(inside_mask[s])
-        if conf < 0.7 and jieba_freq(hit) < 30:
+        if conf < _LOW_CONF and jieba_freq(hit) < 30:
             if not (both_ends and not inside):
                 continue  # 低置信：跨词/词内命中 -> 误报
+            if _is_common_char_sequence(hit):
+                continue  # 逐字皆为高频常用字 -> 结构性误报
         else:
             if boundaries and s not in boundaries and e not in boundaries:
                 continue  # 两端均在词内部 -> 误报
         out.append(Correction(s, e, hit, correct, cat, "词库匹配", conf))
     return out
+
+
+_LOW_CONF = 0.7            # 低于此置信度走严格门控
+# “高频常用字”门槛（jieba 单字词频）。取值依据实测权衡（语料：本仓库 2331 段
+# /5.2 万字正常中文；样本：seed.db 4 万条生成对随机 600 条）：
+#     门槛      生成层召回    每万字误报命中
+#     关闭       85.3%        26.15
+#     5000       70.3%         8.84   <- 采用
+#     20000      82.5%        13.84
+# 取 5000 的理由：公文篇幅长、以"零误报"为红线，宁可少报也不要在每 300 字
+# 就弹一个假建议。**逃生通道**：用户手动添加的词条置信度会被抬到 0.99，
+# 永不进入本门控——任何被误抑制的真错，用户加一次即永久生效。
+_COMMON_CHAR_FREQ = 5000
+
+
+def _is_common_char_sequence(hit: str) -> bool:
+    """命中是否由 ≥2 个高频常用字逐一组成（结构性误报的特征）。
+
+    例：'这是'(这 261791 / 是 796991)、'没又'、'住要' → True；
+        '驶用'(驶 422) → False —— 真错别字得以保留。
+    """
+    if len(hit) < 2:
+        return False
+    return all(jieba_freq(ch) >= _COMMON_CHAR_FREQ for ch in hit)
 
 
 def jieba_freq(word: str) -> int:
@@ -268,6 +369,8 @@ _MARK_STYLE = {
     "标点": ("#e8eaf6", "#283593"),
     "数字用法": ("#e0f2f1", "#004d40"),
     "用户词库": ("#fdecea", "#8c1d18"),
+    "神经纠错": ("#ede7f6", "#4527a0"),   # L4 神经精排（可选增强包）
+    "语法纠错": ("#e3f2fd", "#0d47a1"),   # L5 Seq2Seq 语法纠错（可选增强包）
 }
 _MARK_FALLBACK = ("#eceff1", "#37474f")
 

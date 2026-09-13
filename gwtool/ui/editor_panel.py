@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu,
 
 from ..core import toolbox
 from ..core.model import DocTree, HEADING, PARAGRAPH
+from .correction_highlighter import CorrectionHighlighter
 
 _HEADING_RE = re.compile(
     r"^([一二三四五六七八九十]+、|（[一二三四五六七八九十]+）|\d{1,2}[、．.](?!\d)|"
@@ -83,6 +84,8 @@ class EditorPanel(QWidget):
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(self._editor_menu)
+        # 纠错波浪线：默认空，由主窗口把纠错结果喂进 set_corrections()
+        self._corr_hl = CorrectionHighlighter(self.editor.document())
 
         edit_page = QWidget()
         outer = QVBoxLayout(edit_page)
@@ -248,6 +251,26 @@ class EditorPanel(QWidget):
             self._update_status("● 修改未保存")
         self._outline_timer.start()
         self._preview_timer.start()
+        # 注意：这里**不清**纠错波浪线。正文一变，旧标记的坐标确实可能失效，
+        # 但用户每敲一个键就抹掉所有标记，会让波浪线一直在闪。
+        # 等下一次「检查当前文档」出结果时由 set_corrections() 统一覆盖。
+
+    def set_corrections(self, corrections) -> None:
+        """把纠错结果画成编辑器内的波浪线（由主窗口在检查完成后调用）。
+
+        坐标是全文坐标（与 `corrector.check_text` 的输出一致），
+        由 highlighter 自己按 QTextBlock 换算，这里不需要做任何偏移处理。
+        """
+        try:
+            self._corr_hl.set_corrections(corrections)
+        except Exception:
+            pass                 # 画线失败绝不影响编辑
+
+    def clear_corrections(self) -> None:
+        try:
+            self._corr_hl.clear()
+        except Exception:
+            pass
 
     def _on_preview_timer(self):
         if self.tabs.currentWidget() is self.preview:
@@ -312,6 +335,7 @@ class EditorPanel(QWidget):
             return
         self.doc_id = doc_id
         self.editor.setPlainText(d.content_text)
+        self.clear_corrections()      # 换文档：旧波浪线的坐标已无意义
         self._dirty = False
         self._update_status(f"已打开：{d.title}")
         self.rebuild_outline()

@@ -302,6 +302,7 @@ class CompileWizard(QWizard):
             self._booklet_worker = BookletWorker(path, out_bk, parent=self)
             self._booklet_worker.done.connect(lambda p: self._finish(path, p))
             self._booklet_worker.error.connect(self._fail)
+            self._booklet_worker.start()
         else:
             self._finish(path)
 

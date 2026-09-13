@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths
+from PySide6.QtCore import Qt, QStandardPaths
 from PySide6.QtWidgets import QApplication, QDialog
 
 from . import APP_NAME, __version__
@@ -113,7 +113,14 @@ def _pass_lock() -> bool:
     from .core.security import has_password
     if not has_password():
         return True
+    from .ui.feature_dialogs import LockDialog
     dlg = LockDialog()
+    # 无父窗口的对话框在部分窗口管理器（麒麟/Wayland）下可能不上焦点，
+    # 用户无法输入口令 —— 显式置顶并抢焦点。
+    dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    dlg.show()
+    dlg.activateWindow()
+    dlg.ed_pw.setFocus()
     return dlg.exec() == QDialog.DialogCode.Accepted
 
 

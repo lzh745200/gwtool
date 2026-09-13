@@ -9,5 +9,25 @@ wheels_aarch64/
 .ruff_cache/
 dist_samples/
 *.tmp
+.convlib/
+.coverage
+.workbuddy/
+.zcode/
 # 仅忽略仓库根目录的便携模式数据目录（不匹配子目录里的 data/）
 /Data/
+
+# ---- 精度增强包（模型二进制，共 ~740MB，超 GitHub 100MB 单文件上限；
+# ---- 由 scripts/build_csc_pack.py / build_cgec_pack.py 本地构建，不入库）----
+/packs/
+
+# ---- 开发期诊断脚本（临时量化/排障实验，非产品代码，不入库）----
+/_diag_*.py
+/_quant_variants*.py
+/_t5_diag.py
+/_t5_quant_test.py
+
+# ---- 开发期手工测试样张（无代码引用，见 项目文件结构说明.md）----
+/m1.pdf
+/probe.pdf
+/t1.pdf
+/t2.pdf

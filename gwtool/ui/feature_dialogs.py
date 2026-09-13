@@ -6,7 +6,7 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFileDialog, QHBoxLayout, QHeaderView,
@@ -302,8 +302,16 @@ class BulkReplaceDialog(QDialog):
         v.addLayout(row)
         self._worker = None
 
-    def _docs(self) -> list[int]:
-        docs = dao.list_documents(self.scope_combo.currentData())
+    def _docs(self, scope=None) -> list[int]:
+        """当前范围内的文档 id。
+
+        scope 可以从主线程预取后传入：本方法会在工作线程里被调用，
+        而传入前就读取控件值（`currentData()`）属于跨线程访问 QObject，
+        在麒麟/Wayland 下可能读到脏值或崩溃。
+        """
+        if scope is None:
+            scope = self.scope_combo.currentData()
+        docs = dao.list_documents(scope)
         return [d.id for d in docs]
 
     def _preview(self):
@@ -313,24 +321,28 @@ class BulkReplaceDialog(QDialog):
             return
         from .workers import FnWorker
 
+        # 主线程先把所有控件值取出来，worker 里只碰纯数据
+        scope_id = self.scope_combo.currentData()
+        use_regex = self.chk_regex.isChecked()
+
         def work():
             """后台：逐文档统计命中数与上下文（正则编译在 worker 内完成）。"""
             import re as _re
             rows = []
             total = 0
             regex_error = None
-            for did in self._docs():
+            for did in self._docs(scope_id):
                 d = dao.get_document(did)
                 if not d:
                     continue
                 try:
-                    if self.chk_regex.isChecked():
+                    if use_regex:
                         n = len(_re.findall(find, d.content_text))
                     else:
                         n = d.content_text.count(find)
                     if n:
                         idx = d.content_text.find(
-                            find if not self.chk_regex.isChecked()
+                            find if not use_regex
                             else _re.search(find, d.content_text).group(0))
                         ctx = d.content_text[max(0, idx - 15): idx + 40].replace(
                             "\n", " ")
@@ -775,11 +787,14 @@ class SimilarityDialog(QDialog):
             return
         from .workers import FnWorker
 
+        # 主线程取阈值，避免工作线程读 QSpinBox（跨线程访问 QObject）
+        threshold = self.sp_thresh.value() / 100
+
         def work():
             """后台：读正文 + 查表 SimHash 粗筛 + 精算 Jaccard。"""
             docs = {d.id: d.title for d in dao.list_documents()}
             texts = {did: dao.get_document(did).content_text for did in docs}
-            pairs = simhash.find_similar(texts, self.sp_thresh.value() / 100,
+            pairs = simhash.find_similar(texts, threshold,
                                          hashes=dao.all_simhashes())
             return docs, pairs
 
@@ -809,7 +824,7 @@ class SecurityDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置 —— 系统与安全")
-        self.resize(600, 560)
+        self.resize(640, 720)
         v = QVBoxLayout(self)
 
         g1 = QLabel("口令锁（启动程序时需输入口令）")
@@ -949,9 +964,42 @@ class SecurityDialog(QDialog):
         row_tts.addWidget(self.cmb_tts_voice, 1)
         v.addLayout(row_tts)
 
-        g6 = QLabel("数据维护")
+        g6 = QLabel("文字纠错 —— 精度增强（可选）")
         g6.setStyleSheet("font-weight:bold;margin-top:8pt;")
         v.addWidget(g6)
+        self.lbl_neural_help = QLabel(
+            "纠错默认走「精确词表 → 上下文规则 → 词边界保护」三级流水线，"
+            "完全离线、零依赖。如需更高精度，可额外导入神经网络模型"
+            "（拼写与语法各自独立，可只装其一，也可两个都装）：\n"
+            "· 模型不随主包分发（动辄上百 MB），须在一台有网机器上取得 .zip 增强包后"
+            "拷到本机、在此**离线导入**；\n"
+            "· 需要在系统里预先安装 onnxruntime（见 requirements-optional.txt）；"
+            "语法纠错包还需要 tokenizers；\n"
+            "· 未导入或未开启时，纠错行为与之前**完全一致**，也不会变慢；\n"
+            "· 增强包必须携带许可证标识（面向党政机关，来源须可追溯）。")
+        self.lbl_neural_help.setWordWrap(True)
+        self.lbl_neural_help.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_neural_help)
+
+        # ---- 拼写纠错包（csc，第四级） ----
+        v.addWidget(self._build_pack_group(
+            kind="csc",
+            title="拼写纠错包（第四级精排）",
+            checkbox_text="启用神经网络精排（作为第四级，仅补充前三级未覆盖处）",
+        ))
+
+        # ---- 语法纠错包（cgec，第五级） ----
+        v.addWidget(self._build_pack_group(
+            kind="cgec",
+            title="语法纠错包（第五级，Seq2Seq）",
+            checkbox_text="启用语法纠错（作为第五级，可发现增字/删字/语序类语病）",
+        ))
+
+        self._refresh_pack_groups()
+
+        g7 = QLabel("数据维护")
+        g7.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        v.addWidget(g7)
         self.lbl_fts = QLabel("全文检索异常（搜不到已导入材料）时可重建索引。")
         self.lbl_fts.setStyleSheet(f"color:{theme.MUTED};")
         v.addWidget(self.lbl_fts)
@@ -1007,6 +1055,139 @@ class SecurityDialog(QDialog):
             self.ed_tess.setText(path)
             dao.set_setting("tesseract_path", path)
             self._check_tess()
+
+    # ------------------------------------------------ 文字纠错：精度增强包（L4/L5）
+    def _build_pack_group(self, kind: str, title: str, checkbox_text: str) -> QWidget:
+        """构造一个增强包分组（导入 / 卸载 / 开关 / 状态）。
+
+        kind 取 "csc"（拼写，第四级）或 "cgec"（语法，第五级）。
+        两组靠 `_pack_ui` 字典各自持有控件，逻辑共用本类的方法。
+        """
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 6, 0, 0)
+
+        lbl = QLabel(title)
+        lbl.setStyleSheet("font-weight:bold;")
+        v.addWidget(lbl)
+
+        chk = QCheckBox(checkbox_text)
+        chk.toggled.connect(lambda on, k=kind: self._on_pack_toggled(k, on))
+        v.addWidget(chk)
+
+        state = QLabel("")
+        state.setWordWrap(True)
+        state.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(state)
+
+        row = QHBoxLayout()
+        btn_imp = QPushButton("导入增强包…")
+        btn_imp.clicked.connect(lambda _=False, k=kind: self._import_pack(k))
+        btn_rm = QPushButton("卸载增强包")
+        btn_rm.clicked.connect(lambda _=False, k=kind: self._remove_pack(k))
+        row.addWidget(btn_imp)
+        row.addWidget(btn_rm)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        if not hasattr(self, "_pack_ui"):
+            self._pack_ui: dict = {}
+        self._pack_ui[kind] = {
+            "chk": chk, "state": state, "import": btn_imp, "remove": btn_rm,
+        }
+        return box
+
+    def _pack_modules(self):
+        from ..core import csc_gec, csc_neural
+        return {"csc": csc_neural, "cgec": csc_gec}
+
+    def _refresh_pack_groups(self):
+        for kind in ("csc", "cgec"):
+            self._refresh_pack_group(kind)
+
+    def _refresh_pack_group(self, kind: str):
+        """刷新某个分组的开关可用性与状态文案。"""
+        from ..core import enhance_pack
+        ui = getattr(self, "_pack_ui", {}).get(kind)
+        mod = self._pack_modules().get(kind)
+        if ui is None or mod is None:
+            return
+        ui["syncing"] = True
+        try:
+            ui["chk"].setChecked(
+                str(dao.get_setting(mod.SETTING_KEY, "0")).strip() == "1")
+        finally:
+            ui["syncing"] = False
+        ready = mod.available()
+        ui["chk"].setEnabled(ready)
+        ui["chk"].setToolTip("" if ready else
+                             "尚未就绪：请先安装所需依赖并导入对应的增强包")
+        ui["state"].setText("状态：" + mod.status_text())
+        installed = enhance_pack.installed_pack(kind)
+        ui["remove"].setEnabled(installed is not None)
+
+    def _on_pack_toggled(self, kind: str, on: bool):
+        ui = getattr(self, "_pack_ui", {}).get(kind) or {}
+        if ui.get("syncing"):
+            return                      # 程序回填勾选态时不落库
+        mod = self._pack_modules().get(kind)
+        if mod is None:
+            return
+        try:
+            mod.set_setting(bool(on))
+            mod.reset()                 # 下次纠错时按需（重新）加载
+        except Exception as exc:        # noqa: BLE001
+            warn(self, f"保存设置失败：{exc}")
+        self._refresh_pack_group(kind)
+
+    def _import_pack(self, kind: str = "csc"):
+        from ..core import enhance_pack
+        mod = self._pack_modules().get(kind)
+        if mod is None:
+            return
+        label = "拼写纠错" if kind == "csc" else "语法纠错"
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"选择{label}增强包", "", "增强包 (*.zip)")
+        if not path:
+            return
+        if not ask(self, f"导入将以新{label}包替换现有同类型包（如有）。\n"
+                         "增强包须离线取得、携带许可证标识，导入时会做完整性校验。\n"
+                         "确定导入？"):
+            return
+        try:
+            pack = enhance_pack.install_pack(path, kind=kind)
+        except enhance_pack.EnhancePackError as exc:
+            warn(self, f"导入失败：{exc}")
+            return
+        except Exception as exc:        # noqa: BLE001
+            warn(self, f"导入失败：{exc}")
+            return
+        mod.reset()
+        try:
+            mod.set_setting(True)      # 导入成功即默认开启，用户可随时关
+        except Exception:              # noqa: BLE001
+            pass
+        self._refresh_pack_group(kind)
+        info(self, f"已导入{label}增强包：\n{pack.summary()}\n\n已为你开启该层。")
+
+    def _remove_pack(self, kind: str = "csc"):
+        from ..core import enhance_pack
+        mod = self._pack_modules().get(kind)
+        if mod is None:
+            return
+        label = "拼写纠错" if kind == "csc" else "语法纠错"
+        if not ask(self, f"卸载当前{label}增强包？\n"
+                         "卸载后该层停用，其余纠错功能不受影响。"):
+            return
+        removed = enhance_pack.remove_pack(kind)
+        mod.reset()
+        try:
+            mod.set_setting(False)
+        except Exception:              # noqa: BLE001
+            pass
+        self._refresh_pack_group(kind)
+        info(self, f"已卸载{label}增强包。" if removed
+             else f"当前没有已安装的{label}增强包。")
 
     def _rebuild_fts(self):
         if not ask(self, "重建全文索引可能需要片刻（与资料库大小相关），继续？"):
@@ -1067,22 +1248,34 @@ class LockDialog(QDialog):
         self.lbl = QLabel("")
         self.lbl.setStyleSheet(f"color:{theme.DANGER};")
         v.addWidget(self.lbl)
-        btn = QPushButton("解锁")
-        btn.clicked.connect(self._try)
-        v.addWidget(btn)
+        self.btn = QPushButton("解锁")
+        self.btn.clicked.connect(self._try)
+        v.addWidget(self.btn)
         self._fail_count = 0
+        self._lock_until_timer = QTimer(self)
+        self._lock_until_timer.setSingleShot(True)
+        self._lock_until_timer.timeout.connect(self._unlock_input)
 
     def _try(self):
         from ..core.security import verify_password
+        if self.btn.isEnabled() is False:
+            return                              # 罚时期间忽略连点/回车
         if verify_password(self.ed_pw.text()):
             self.accept()
             return
         self._fail_count += 1
         self.lbl.setText(f"口令错误（已失败 {self._fail_count} 次）")
         if self._fail_count >= 5:
-            from PySide6.QtCore import QEventLoop, QTimer
-            self.lbl.setText("失败次数过多，请等待 10 秒后重试…")
-            loop = QEventLoop()
-            QTimer.singleShot(10000, loop.quit)
-            loop.exec()
+            # 原实现用嵌套 QEventLoop 阻塞 10 秒：模态框内仍可继续点击，
+            # 递归 exec() 会互相干扰。改为禁用输入 + 定时恢复。
             self._fail_count = 0
+            self.lbl.setText("失败次数过多，请等待 10 秒后重试…")
+            self.ed_pw.setEnabled(False)
+            self.btn.setEnabled(False)
+            self._lock_until_timer.start(10000)
+
+    def _unlock_input(self):
+        self.ed_pw.setEnabled(True)
+        self.btn.setEnabled(True)
+        self.ed_pw.setFocus()
+        self.lbl.setText("")

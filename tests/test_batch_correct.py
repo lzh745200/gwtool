@@ -146,6 +146,38 @@ def test_apply_fixes_blocks_and_keeps_structure(tmp_db):
     assert out[2]["rows"][1] == ["安全生产", "已完成"], "没命中的单元格被改动了"
 
 
+def test_apply_blocks_only_change_confirmed_occurrences(tmp_db):
+    """正文有多处同词、只确认了其中一处时，结构化块也只能改那一处。
+
+    回归：_apply_to_blocks 曾只按 (错,对) 词对过滤逐块重跑纠错，丢失了
+    位置信息，于是正文按位置只改一处、块却把全文同词全改 —— 同一篇文档的
+    正文与块出现两个版本，汇编出的公文与资料库预览不一致。
+    """
+    blocks = [
+        {"type": "paragraph", "level": 0, "text": "请加强按装管理。", "align": "left"},
+        {"type": "paragraph", "level": 0, "text": "确保按装质量达标。", "align": "left"},
+    ]
+    content = "请加强按装管理。\n确保按装质量达标。"
+    did = _mk(title="按装材料", text=content,
+              blocks_json=json.dumps(blocks, ensure_ascii=False))
+
+    prev = batch.batch_correct()
+    hits = [h for p in prev.plans for h in p.hits]
+    assert len(hits) == 2, "两处「按装」都该被预览到"
+
+    # 用户只确认第一篇那处（第二处保持不动）
+    prev.plans[0].hits = [hits[0]]
+    res = batch.batch_correct(apply=True, plans=prev.plans)
+    assert res.applied == [did] and res.changes == 1
+
+    d = dao.get_document(did)
+    assert d.content_text == "请加强安装管理。\n确保按装质量达标。", "正文改错了"
+    out = json.loads(d.blocks_json)
+    assert "安装管理" in out[0]["text"], "已确认那处没同步到块"
+    assert "按装质量" in out[1]["text"], \
+        "未确认那处被块连带改掉了（正文与块出现两个版本）"
+
+
 def test_apply_relocates_hits_after_document_changed(tmp_db):
     """预览与执行之间文档被编辑过：位置对不上时按原词重新定位，仍然改对。"""
     did = _mk()

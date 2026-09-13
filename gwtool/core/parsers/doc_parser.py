@@ -24,27 +24,87 @@ def parse_doc(path: str) -> DocTree:
     return _text_to_tree(text, title_hint=Path(path).stem)
 
 
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _looks_like_word_doc(path: str) -> bool:
+    """粗筛：是不是一个可能含 Word 正文的 OLE 复合文档。
+
+    为什么要先筛再交给 COM：把明显不是 Word 文档的文件（全零、截断的垃圾、
+    纯文本）喂给 WPS/Word，Open 失败时 COM 层的报错不一定是 Python 异常 ——
+    实测会抛 Windows 原生 SEH 异常（0x800706be，RPC 服务已崩），这种异常
+    `except Exception` 根本接不住，会直接把整个进程带走（批量导入时表现为
+    “导入到一半程序没了”）。所以在进 COM 之前先按结构把明显不可能的挡掉。
+
+    判定只看 OLE 文件头 + 是否存在 WordDocument 流：不要求能解析，只要求
+    “值得一试”。读不动就返回 False，交给后面的 LibreOffice / 纯 Python 兜底。
+    """
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(8) != _OLE_MAGIC:
+                return False
+    except OSError:
+        return False
+    try:
+        import olefile
+
+        ole = olefile.OleFileIO(path)
+        try:
+            return ole.exists("WordDocument")
+        finally:
+            ole.close()
+    except Exception:
+        # olefile 打不开（结构坏）—— 同样不值得交给 COM
+        return False
+
+
 # ------------------------------------------------------------------ 转换路径
 def _convert_via_com(path: str) -> str | None:
-    """Windows 下用 Word/WPS COM 转 docx，返回临时 docx 路径。"""
+    """Windows 下用 Word/WPS COM 转 docx，返回临时 docx 路径。
+
+    每个 progid 无论成功失败都必须把派发出来的 COM 实例 Quit 掉，并显式
+    释放引用：Dispatch 之后只要 Open/SaveAs2/Close 任一步出错，旧实现的
+    `except: continue` 会直接跳到下一个 progid，把已经起来的隐藏 Word 进程
+    丢在原地 —— 批量导入 .doc 时会累积成十几个隐藏进程，拖到最后 COM 服务
+    崩掉，整个导入进程跟着挂。
+
+    进入 COM 之前先做结构粗筛（_looks_like_word_doc）：喂给 Word 一个明显
+    不是 Word 文档的文件，Open 失败时可能抛原生 SEH 异常（0x800706be），
+    `except Exception` 接不住，会直接终结进程。
+    """
     if not shutil.which("cmd"):
+        return None
+    if not _looks_like_word_doc(path):
         return None
     try:
         import win32com.client  # type: ignore
     except ImportError:
         return None
     for progid in ("kwps.Application", "wps.Application", "Word.Application"):
+        app = doc = None
         try:
             app = win32com.client.Dispatch(progid)
             app.Visible = False
             doc = app.Documents.Open(str(Path(path).resolve()), ReadOnly=True)
             out = Path(tempfile.gettempdir()) / (Path(path).stem + "_conv.docx")
             doc.SaveAs2(str(out), FileFormat=16)  # 16 = wdFormatDocumentDefault(docx)
-            doc.Close(False)
-            app.Quit()
             return str(out)
         except Exception:
             continue
+        finally:
+            # 顺序反过来关：先文档后应用；任何一步失败都不能挡住后续清理，
+            # 否则又会把进程漏在这里。
+            try:
+                if doc is not None:
+                    doc.Close(False)
+            except Exception:
+                pass
+            try:
+                if app is not None:
+                    app.Quit()
+            except Exception:
+                pass
+            doc = app = None
     return None
 
 
@@ -79,7 +139,16 @@ def _extract_text(path: str) -> str:
     try:
         return _extract_text_olefile(path)
     except Exception:
+        pass
+    # 4) 最后兜底：扫描流内可打印片段。
+    # 这一级是「绝不再抛」的底线 —— 前面每一级都可能失败（结构坏、库版本差异），
+    # 兜底自己再抛就等于让 parse_doc 直接炸给用户看。olefile 面对畸形 OLE 会抛
+    # ValueError（如 "bytes length not a multiple of item size"），必须接住并
+    # 退化成空文本，由上层按「提取不到内容」处理。
+    try:
         return _extract_text_raw_scan(path)
+    except Exception:
+        return ""
 
 
 def _extract_text_olefile(path: str) -> str:

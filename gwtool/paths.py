@@ -99,6 +99,19 @@ def logs_dir() -> Path:
     return d
 
 
+def enhance_dir() -> Path:
+    """「精度增强包」目录（可选的神经纠错模型，**不随主包分发**）。
+
+    为什么不打包进安装包：模型动辄上百 MB（KenLM 默认语言模型甚至 2.8 GB），
+    而本产品的定位是「小体积、离线、U 盘随带」。因此把重模型做成独立的
+    `.zip` 增强包，由用户在有网机器上下载后**离线导入**——主包体积不增长，
+    未导入时纠错功能照常（走三级流水线），导入后自动叠加第四级。
+    """
+    d = app_data_dir() / "enhance"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def resource_dir() -> Path:
     """随程序分发的只读资源目录（种子数据等）。
 

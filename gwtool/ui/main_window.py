@@ -45,15 +45,23 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _setup_backup_timer(self):
-        """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。"""
-        self._backup_timer = QTimer(self)
-        self._backup_timer.timeout.connect(self._scheduled_backup)
+        """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。
+
+        可被反复调用（设置改动后重设）：先停掉旧定时器再按新值启动，
+        避免重复 start 造成多个定时器叠加。
+        """
+        timer = getattr(self, "_backup_timer", None)
+        if timer is None:
+            self._backup_timer = QTimer(self)
+            self._backup_timer.timeout.connect(self._scheduled_backup)
+            timer = self._backup_timer
+        timer.stop()
         try:
             hours = float(dao.get_setting("backup_interval_hours", "0") or 0)
         except ValueError:
             hours = 0.0
         if hours > 0:
-            self._backup_timer.start(int(hours * 3600 * 1000))
+            timer.start(int(hours * 3600 * 1000))
 
     def _scheduled_backup(self):
         """定时备份走自动档：附件预算小，不卡界面；有附件没随包时在状态栏留痕。"""
@@ -200,6 +208,7 @@ class MainWindow(QMainWindow):
         self.library.import_requested.connect(self.import_materials)
         self.reference.insert_text.connect(self._insert_at_cursor)
         self.reference.apply_edit.connect(self._apply_edit)
+        self.reference.corrections_ready.connect(self.editor.set_corrections)
         self.editor.content_modified.connect(self._on_editor_saved)
         sc_f3 = QShortcut(QKeySequence("F3"), self)
         sc_f3.activated.connect(self.library.focus_search)
@@ -350,6 +359,9 @@ class MainWindow(QMainWindow):
     def open_security(self):
         dlg = SecurityDialog(self)
         dlg.exec()
+        # 设置里可能改过「定时备份间隔」，关闭后重读并重启定时器，
+        # 否则要重启程序才生效（用户会以为改了没用）。
+        self._setup_backup_timer()
 
     # ------------------------------------------------ 朗读校对
     def toggle_tts(self):

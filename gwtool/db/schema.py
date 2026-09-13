@@ -55,12 +55,10 @@ TABLES = [
         simhash INTEGER,
         deleted_time TEXT NOT NULL DEFAULT ''
     )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_hash ON documents(text_hash)""",
-    """CREATE INDEX IF NOT EXISTS idx_documents_cat ON documents(category_id)""",
-    # 注意：回收站索引 idx_documents_deleted 只能写在 MIGRATIONS[3] 里，不能放这儿。
-    # TABLES 在迁移之前执行且不容错，老库此时还没有 deleted_time 列，
-    # 在这里建索引会抛 "no such column: deleted_time"，用户升级即启动崩溃
-    # （与 idx_documents_simhash 同理，它也只在 MIGRATIONS[2] 里）。
+    # 注意：全部二级索引都在 INDEXES 里（依赖 text_hash/category_id 等列）。
+    # 深探确认（2026-09-13）：TABLES 在迁移之前执行且不容错，老库此时还没有
+    # 新列，在这里建索引会抛 "no such column: deleted_time"，
+    # 用户升级即启动崩溃。现已把全部二级索引统一挪到 INDEXES、在迁移之后执行。
     # 词典（词条、拼音、释义、例句）
     """CREATE TABLE IF NOT EXISTS dictionary(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +153,22 @@ TABLES = [
         size INTEGER NOT NULL DEFAULT 0,
         added_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )""",
+]
+
+# 二级索引：统一在"建表+迁移"之后创建。
+# 索引依赖的列可能来自新表结构，也可能来自 MIGRATIONS 补的列——放在迁移之后
+# 两种情况都已就位，杜绝老库升级时 "no such column" 直接崩启动。
+INDEXES = [
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_hash ON documents(text_hash)""",
+    """CREATE INDEX IF NOT EXISTS idx_documents_cat ON documents(category_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_documents_simhash ON documents(simhash)""",
+    """CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted_time)""",
+    """CREATE INDEX IF NOT EXISTS idx_dictionary_word ON dictionary(word)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_error_pairs_key ON error_pairs(wrong, correct)""",
+    """CREATE INDEX IF NOT EXISTS idx_snapshots_doc ON snapshots(doc_id, id DESC)""",
+    """CREATE INDEX IF NOT EXISTS idx_dispatch_no ON dispatch_register(doc_no)""",
+    """CREATE INDEX IF NOT EXISTS idx_dispatch_sign_date ON dispatch_register(sign_date)""",
+    """CREATE INDEX IF NOT EXISTS idx_dispatch_org ON dispatch_register(org)""",
     """CREATE INDEX IF NOT EXISTS idx_attachments_doc ON attachments(doc_id, id)""",
 ]
 
@@ -170,14 +184,19 @@ FTS_TABLES = [
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """建库建表并执行版本化迁移；设置用户版本号以支持后续迁移。"""
+    """建库建表并执行版本化迁移；设置用户版本号以支持后续迁移。
+
+    执行顺序（深探修复后固化，勿再调换）：
+      1. TABLES   —— 纯建表（新库建新结构，老库整表跳过）；
+      2. MIGRATIONS —— 老库逐版本补列；
+      3. INDEXES  —— 全部二级索引（此时新列两种来源都已就位）；
+      4. FTS_TABLES —— 全文检索虚表。
+    """
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA foreign_keys=ON")
     old_ver = cur.execute("PRAGMA user_version").fetchone()[0]
     for ddl in TABLES:
-        cur.execute(ddl)
-    for ddl in FTS_TABLES:
         cur.execute(ddl)
     # 老库逐版本迁移；新库建表已含新列时 ALTER 重复报错属预期，忽略
     for v in range(old_ver + 1, SCHEMA_VERSION + 1):
@@ -186,5 +205,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
                 cur.execute(stmt)
             except sqlite3.OperationalError:
                 pass
+    for ddl in INDEXES:
+        cur.execute(ddl)
+    for ddl in FTS_TABLES:
+        cur.execute(ddl)
     cur.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
     conn.commit()

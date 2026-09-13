@@ -1,0 +1,51 @@
+# 公文汇编助手 —— 【可选】精度增强包依赖（不并入主 requirements.txt）
+#
+# ⚠️ 为什么单独一个文件
+# ---------------------------------------------------------------------------
+# 主 requirements.txt 是 CI 双平台（windows-latest x64 + ubuntu-24.04-arm）
+# 构建与打包装箱单的唯一来源。把 onnxruntime 塞进去会带来两个直接风险：
+#   1) 麒麟 CI 在 Debian 11 容器内用 **Python 3.9** 构建（为守住 glibc 2.31
+#      底线不能升级容器），而 onnxruntime 新版本要求 Python >= 3.11；
+#   2) 一旦装不上或版本解错，打包会以「同源码、不同日期产物行为不同」的方式
+#      失败——这正是 v1.2.1「启用口令锁即崩」事故的成因。
+# 因此**默认安装不包含**本文件，纠错功能在无 onnxruntime 时照常工作
+# （走三级流水线，见 gwtool/core/csc_neural.py 的硬约束说明）。
+#
+# 何时安装
+# ---------------------------------------------------------------------------
+# 只有在准备启用「L4 神经精排」时，才需要在一台有网的机器上执行：
+#     pip install -r requirements-optional.txt
+# 然后**离线**取得一个精度增强包（.zip），在软件「设置 → 文字纠错」里导入。
+#
+# 版本必须分档（与主 requirements 同一套纪律：不写浮动版本）
+# ---------------------------------------------------------------------------
+# · Python >= 3.11：可用 1.19 ~ 1.27 一档；
+# · Python 3.9（麒麟 CI 容器）：只能停在 1.17 一档——更高版本已放弃 3.9；
+# · aarch64（麒麟 V10）：上游提供 manylinux 轮子，但**上机前必须核对
+#   `ldd --version` 与轮子的 glibc 基线**（本项目 ARM64 底线 glibc >= 2.31）。
+#   若目标机不满足，请保持 L4 关闭——三级流水线不受影响。
+#
+# 注意：onnxruntime 会引入 numpy 依赖；本项目其余代码不需要 numpy。
+
+# ---- x86_64 / Windows 与通用 Linux（Python >= 3.11） ----
+onnxruntime==1.27.0 ; python_version >= '3.11'
+
+# ---- Python 3.9（麒麟 CI 容器一档；支持 3.9 的最后一档） ----
+onnxruntime==1.17.3 ; python_version < '3.11'
+
+# ---- aarch64 备选（若上机核对 glibc 后确认可用，取消注释并锁到实测通过的版本） ----
+# onnxruntime==1.17.3 ; platform_machine == 'aarch64'
+
+# ---- L5 语法纠错包（Seq2Seq / BART 一类）额外需要的分词器 ----
+# 只装 L4（拼写）不需要它；不装本包时 L5 自动静默，纠错行为不变。
+#
+# 为什么选 tokenizers 而不是自研分词器：
+#   Seq2Seq 模型对分词极度敏感（`##` 续接、[CLS]/[SEP] 包裹、全角/半角归属），
+#   自研实现与预训练时用的 WordPiece 只要有一处偏差，精度就会明显掉。
+#   tokenizers 是 HuggingFace 官方的 **Rust** 实现，约 5–8 MB，**不含 torch**，
+#   与本项目"不引入 torch"的红线不冲突。
+# 上机前同样要核对 aarch64 轮的 glibc 基线（本项目 ARM64 底线 glibc >= 2.31）。
+#
+# 版本分档：新版已放弃 3.9，故与 onnxruntime 同样分两档。
+tokenizers==0.22.0 ; python_version >= '3.11'
+tokenizers==0.15.2 ; python_version < '3.11'

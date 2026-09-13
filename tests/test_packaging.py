@@ -104,9 +104,13 @@ def test_spec_bundles_seed_db():
 
 # ------------------------------------------------------------ 硬编码路径
 def test_no_hardcoded_build_machine_paths():
-    """全库不得出现构建机的绝对路径 C:\\gwtool——用户机上它不存在。"""
+    """全库不得出现构建机的绝对路径 C:\\gwtool——用户机上它不存在。
+
+    .workbuddy 是 IDE 工作目录（memory/skills/agent 记录），非产品代码，
+    笔记里写本机解释器路径属正常使用，扫描应跳过。
+    """
     skip_dirs = {".git", "__pycache__", "build", "dist", ".pytest_cache",
-                 "node_modules", ".qoder"}
+                 "node_modules", ".qoder", ".workbuddy"}
     # 虚拟环境目录按前缀匹配（.venv / .venv64 / .venv_win …），里面必然有本机路径
     skip_prefixes = (".venv",)
     skip_suffix = {".pyc", ".pdf", ".pptx", ".db", ".zip", ".exe", ".png", ".ico"}

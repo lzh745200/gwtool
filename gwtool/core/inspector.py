@@ -121,16 +121,25 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
     for m in re.finditer(r"[二〇○○○O零一二三四五六七八九]{4}年", text):
         out.append(Finding("info", "成文日期",
                            f"「{m.group(0)}」建议改为阿拉伯数字，如“2026年”"))
+    # 逐处报告：原实现的 break 无条件在首轮末尾执行（不在 if 内），
+    # 导致正文里第二处起的日期问题全部漏报。改为遍历全部命中，
+    # 用 seen 去重避免同一写法的重复提示刷屏。
+    seen_date: set[str] = set()
     for m in re.finditer(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text):
         if len(m.group(2)) == 2 and m.group(2)[0] == "0" \
                 or len(m.group(3)) == 2 and m.group(3)[0] == "0":
+            if m.group(0) in seen_date:
+                continue
+            seen_date.add(m.group(0))
             out.append(Finding("warn", "成文日期",
                                f"「{m.group(0)}」月/日不应有前导零，应为“{int(m.group(2))}月{int(m.group(3))}日”"))
-        break
+    seen_slash: set[str] = set()
     for m in re.finditer(r"\d{4}[./]\d{1,2}[./]\d{1,2}", text):
+        if m.group(0) in seen_slash:
+            continue
+        seen_slash.add(m.group(0))
         out.append(Finding("warn", "成文日期",
                            f"「{m.group(0)}」公文成文日期建议写为“2026年8月30日”式"))
-        break
 
     # ---- 结束语与文种匹配 ----
     closings = {
