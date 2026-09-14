@@ -46,12 +46,24 @@ jobs:
           if ($bad) { $bad | ForEach-Object { Write-Error $_ }; exit 1 }
           Write-Output "批处理脚本行尾检查通过（CRLF）"
 
-      # 必须在「运行测试」之前装 Tesseract：否则 pytest 阶段本机还没有
-      # tesseract，tests/test_ocr_probe.py 在 Windows 上会整组 skip（而 Linux job
-      # 是在 pytest 之前 apt 装的、会真跑）——即"Windows 的 OCR 路径从未在 CI
-      # 被验证过"。提到这里后两个平台的 OCR 测试都真实执行。
-      - name: 安装 Tesseract OCR（供测试 + 打包内置）
-        run: choco install tesseract -y --no-progress
+      # 必须在「运行测试」之前装 Tesseract 且**带中文包**：choco 的 tesseract
+      # 只带 eng/osd，而 tests/test_ocr_probe.py::test_has_chi_sim_real 会真跑
+      # `tesseract --list-langs` 断言里面有 chi_sim —— 缺包时该用例失败
+      # （CI 曾因此红，而本地因为装了中文包一直是绿的）。
+      # 打包阶段后面还会用同一份 tessdata，这里装到系统目录即可复用。
+      - name: 安装 Tesseract OCR + 中文包（供测试 + 打包内置）
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          $ts = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path "$ts\tesseract.exe")) { throw "choco Tesseract 未安装成功" }
+          # 与打包阶段同源（tessdata_fast），避免"测试用一份、交付用另一份"
+          Invoke-WebRequest -Uri $env:TESS_FAST -OutFile "$ts\tessdata\chi_sim.traineddata"
+          $chi = (Get-Item "$ts\tessdata\chi_sim.traineddata").Length
+          if ($chi -lt 1MB) { throw "chi_sim.traineddata 下载异常（$chi 字节）" }
+          $langs = & "$ts\tesseract.exe" --list-langs 2>&1 | Out-String
+          if ($langs -notmatch "chi_sim") { throw "tesseract 未识别到 chi_sim：$langs" }
+          Write-Output "Tesseract 就绪，chi_sim $chi 字节"
 
       - name: 运行测试
         env:
@@ -64,25 +76,24 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python scripts/e2e_check.py
 
-      - name: 安装 Tesseract OCR（内置到安装包）
-        run: choco install tesseract -y --no-progress
-
       - name: PyInstaller 打包（参数统一于 gwtool.spec）
         run: pyinstaller --noconfirm --clean gwtool.spec
 
       - name: 集成 Tesseract + 中文包进产物
         shell: pwsh
         run: |
+          # 安装步骤已在测试前完成（含 chi_sim），这里只做拷贝，
+          # 保证"测试验证的引擎"与"打进包里的引擎"是同一份。
           $ts = "C:\Program Files\Tesseract-OCR"
-          if (-not (Test-Path "$ts\tesseract.exe")) { throw "choco Tesseract 未安装成功" }
+          if (-not (Test-Path "$ts\tesseract.exe")) { throw "未找到 Tesseract" }
           New-Item -ItemType Directory -Force -Path "dist\gwtool\tesseract\tessdata" | Out-Null
           Copy-Item "$ts\tesseract.exe"  "dist\gwtool\tesseract\"
           Copy-Item "$ts\*.dll"          "dist\gwtool\tesseract\"
           Copy-Item "$ts\tessdata\eng.traineddata"  "dist\gwtool\tesseract\tessdata\"
           Copy-Item "$ts\tessdata\osd.traineddata"  "dist\gwtool\tesseract\tessdata\"
-          Invoke-WebRequest -Uri $env:TESS_FAST -OutFile "dist\gwtool\tesseract\tessdata\chi_sim.traineddata"
+          Copy-Item "$ts\tessdata\chi_sim.traineddata" "dist\gwtool\tesseract\tessdata\"
           $chi = (Get-Item "dist\gwtool\tesseract\tessdata\chi_sim.traineddata").Length
-          if ($chi -lt 1MB) { throw "chi_sim.traineddata 下载异常（$chi 字节）" }
+          if ($chi -lt 1MB) { throw "chi_sim.traineddata 异常（$chi 字节）" }
           Write-Output "Tesseract 集成完成，chi_sim $chi 字节"
 
       - name: 产物冒烟校验（资源齐全 + 真实启动 + 首启动种子导入）
@@ -155,19 +166,31 @@ jobs:
         run: ruff check gwtool/ scripts/ tests/
 
       - name: Shell 脚本护栏（语法 + 行尾）
+        shell: bash
         run: |
           # .sh 必须是 LF：CRLF 会让 shebang 变成 `#!/usr/bin/env bash\r`，
           # 直接执行报 "env: 'bash\r': No such file or directory"；
           # scripts/gwtool.sh 是 deb 的桌面入口（Exec=/opt/gwtool/gwtool.sh），
           # CRLF 会让安装后"双击没反应"，而下面的自检只跑 gwtool 本体、
           # 从不执行它 —— 所以必须在这里显式守住。
+          #
+          # 显式写 shell: bash：容器 job 的默认 shell 是 `sh -e`，
+          # 而 sh 不认 $'\r' 这种 ANSI-C 引用（会被当成字面量 `\r`），
+          # 于是"没有 CR 的文件"也会被 grep 命中并误报（CI 已踩过）。
+          fail=0
           for f in scripts/*.sh; do
-            if grep -q $'\r' "$f"; then
+            if grep -qU "$(printf '\r')" "$f"; then
               echo "错误：$f 含 CR 字符（CRLF 行尾），Linux 下无法执行"
-              exit 1
+              fail=1
             fi
-            bash -n "$f" || { echo "错误：$f 语法检查未通过"; exit 1; }
+            # 语法用 POSIX sh 校验：麒麟最小安装不保证有 bash，
+            # 而这些脚本的 shebang 是 #!/bin/bash，交 posix 模式会误报
+            if ! bash -n "$f"; then
+              echo "错误：$f 语法检查未通过"
+              fail=1
+            fi
           done
+          [ "$fail" -eq 0 ] || exit 1
           echo "Shell 脚本检查通过（LF + 语法正确）"
 
       - name: 运行测试

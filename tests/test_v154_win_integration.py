@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -138,13 +139,22 @@ class TestContextMenuIntegration:
 
 class TestMainCli:
     def test_cli_uninstall_without_install_is_graceful(self):
-        """未安装时 --uninstall-context-menu 应正常退出（不抛异常）。"""
+        """未安装时 --uninstall-context-menu 应正常退出（不抛异常）。
+
+        编码必须显式钉死：子进程的 stdout 编码由**子进程自己的** locale 决定
+        （Windows 上默认是 ANSI 代码页，CI 的 runner 是 cp1252，本地是 cp936），
+        而 text=True 用**父进程**的 locale 去解码 —— 两边不一致就是乱码
+        （CI 实测拿到 'æœªå‘çŽ°å·²å®‰è£…...'）。所以两边都钉成 UTF-8。
+        """
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         r = subprocess.run([sys.executable, str(ROOT / "main.py"),
                             "--uninstall-context-menu"],
-                           capture_output=True, text=True, errors="replace",
-                           timeout=60, cwd=str(ROOT), stdin=subprocess.DEVNULL)
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60, cwd=str(ROOT),
+                           env=env, stdin=subprocess.DEVNULL)
         assert r.returncode == 0, f"rc={r.returncode} {(r.stderr or '')[:200]}"
-        assert "右键菜单" in (r.stdout or "")
+        assert "右键菜单" in (r.stdout or ""), f"输出编码不符：{r.stdout!r}"
 
     def test_main_parses_context_menu_flags(self):
         """--install-context-menu / --uninstall-context-menu 必须被解析到。"""
