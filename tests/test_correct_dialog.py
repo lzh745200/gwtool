@@ -179,12 +179,18 @@ def test_dialog_file_mode_preserves_structure(tmp_db, qapp, monkeypatch):
         staticmethod(lambda *a, **k: (str(src), "")))
     dlg.pick_file()
     # 解析现在跑在后台线程里（单个 0.1MB docx 实测要 3.78s，放 GUI 线程会冻结
-    # 整个窗口）。ok 信号是跨线程排队投递的，必须等线程结束再抽一次事件队列，
-    # 否则 _on_file_parsed 还没跑，_blocks 仍是空表。
-    if dlg._worker is not None:
-        dlg._worker.wait(30000)
-    for _ in range(5):
+    # 整个窗口）。ok 信号是跨线程排队投递的，只能靠**事件循环**派发。
+    #
+    # 不要在 wait() 之后再 processEvents()：wait() 会让工作线程跑完并销毁其
+    # thread-local 连接，随后事件循环才派发信号、槽里又起新线程 —— 这个
+    # "先 wait 再抽事件"的顺序在 Linux + PySide6 6.8 上实测会段错误
+    # （CI 报 exit 139 / Segmentation fault）。改成边抽事件边等条件成立。
+    import time as _time
+    deadline = _time.monotonic() + 60
+    while _time.monotonic() < deadline and not dlg._blocks:
         qapp.processEvents()
+        _time.sleep(0.01)
+    qapp.processEvents()
     kinds = [b["kind"] for b in dlg._blocks]
     assert "heading" in kinds and "table" in kinds, \
         f"文件解析结果应保留标题/表格结构，实得 {kinds}"
