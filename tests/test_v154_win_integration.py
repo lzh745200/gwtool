@@ -138,6 +138,7 @@ class TestContextMenuIntegration:
 
 
 class TestMainCli:
+    @win_only
     def test_cli_uninstall_without_install_is_graceful(self):
         """未安装时 --uninstall-context-menu 应正常退出（不抛异常）。
 
@@ -155,6 +156,20 @@ class TestMainCli:
                            env=env, stdin=subprocess.DEVNULL)
         assert r.returncode == 0, f"rc={r.returncode} {(r.stderr or '')[:200]}"
         assert "右键菜单" in (r.stdout or ""), f"输出编码不符：{r.stdout!r}"
+
+    def test_cli_on_non_windows_reports_unsupported(self):
+        """非 Windows 上两个开关都必须明确报"不支持"并返回 2，而不是崩或静默成功。"""
+        if sys.platform.startswith("win"):
+            pytest.skip("本用例断言的是非 Windows 行为")
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        for arg in ("--uninstall-context-menu", "--install-context-menu"):
+            r = subprocess.run([sys.executable, str(ROOT / "main.py"), arg],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=60, cwd=str(ROOT),
+                               env=env, stdin=subprocess.DEVNULL)
+            assert r.returncode == 2, f"{arg} rc={r.returncode}"
+            assert "仅支持 Windows" in (r.stderr or ""), f"{arg}: {r.stderr!r}"
 
     def test_main_parses_context_menu_flags(self):
         """--install-context-menu / --uninstall-context-menu 必须被解析到。"""
