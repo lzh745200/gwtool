@@ -45,9 +45,9 @@ def win(tmp_db, qapp, monkeypatch):
 
     w = mw.MainWindow()
     yield w
-    # 收尾顺序很重要：先抽干延迟删除队列，再关窗口。
-    # 否则 closeEvent（现在会等所有子线程收工）可能与 Qt 的 DeferredDelete
-    # 撞在一起 —— 事件循环正在删对象、同时又有槽在跑，无头/离屏平台上容易崩。
+    # 收尾：先抽干延迟删除队列，再关窗口，再抽一次。
+    # closeEvent 现在会等所有子线程收工；若与 Qt 的 DeferredDelete 同时进行，
+    # 在无头/离屏平台上容易崩（事件循环正在删对象、同时又有槽在跑）。
     from PySide6.QtCore import QCoreApplication, QEvent
     for _ in range(3):
         qapp.processEvents()
@@ -64,35 +64,59 @@ def test_all_menu_and_toolbar_actions_triggerable(win, qapp, monkeypatch):
     回归覆盖：新建公文（曾 AttributeError: 'SkeletonDialog' has no 'Accepted'）、
     朗读校对（曾 AttributeError: Qt.KeepAnchor）等。
 
-    本用例把 QThread.start 换成 no-op：它要验证的是"动作接线是否完好"，
-    而部分动作（PDF 预览渲染、朗读、相似查重）会真的起后台线程。起线程后
-    本用例会在循环里 processEvents()，此时线程可能正好结束并销毁其
-    thread-local sqlite 连接，主线程同时抽事件 —— 这个竞争在
-    Linux + PySide6 6.8 + Python 3.9 上实测直接段错误
-    （CI 报 Fatal Python error: Segmentation fault，本地 Windows 不复现）。
-    线程真正跑起来的行为由各自的专项用例覆盖（test_genchain_probe、
-    test_batch_correct、test_corrector_* 等），这里不必重复。
+    两个刻意的约束，都是为了消除"测试自己制造的不确定性"：
+    1. **QThread.start 换成 no-op**：本用例验证的是"动作接线是否完好"，
+       而部分动作（PDF 预览、朗读、相似查重）会真的起后台线程。线程真跑起来
+       的行为由 test_genchain_probe / test_batch_correct / test_corrector_*
+       等专项用例覆盖，这里不必重复。
+    2. **不在循环中途触发会关窗的动作**（"退出"）：先触发它会关掉主窗口，
+       后续动作全在"正在销毁的窗口"上执行 —— 真实用户永远不会这样操作，
+       却会在 CI 的 Linux + PySide6 6.8 上以段错误收场（实测：
+       栈顶恒为循环里的 processEvents，本地 Windows/offscreen 均不复现）。
+       关窗路径由 closeEvent 的专项用例覆盖，这里只保证它不抛异常。
+
+    每个动作触发后**只抽一次**事件队列并清空延迟删除队列：把 Qt 的
+    DeferredDelete 摊在每一步做，避免几十个动作堆下来的待删对象
+    在某一次 processEvents 里被集中销毁。
     """
-    from PySide6.QtCore import QThread
+    from PySide6.QtCore import QCoreApplication, QEvent, QThread
 
     def _no_start(self):
         return None
 
     monkeypatch.setattr(QThread, "start", _no_start)
 
+    def _pump():
+        qapp.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
     actions = [a for a in win.findChildren(QAction)
                if (a.text() or "").replace("&", "").strip() and a.isEnabled()]
     assert len(actions) >= 20, f"动作数量异常偏少：{len(actions)}"
 
+    closing = [a for a in actions
+               if "退出" in (a.text() or "") or "关闭" in (a.text() or "")]
+    normal = [a for a in actions if a not in closing]
+
     failed = []
-    for act in actions:
+    for act in normal:
         label = act.text().replace("&", "").strip()
         try:
             act.trigger()
-            qapp.processEvents()
+            _pump()
         except Exception as exc:
             failed.append(f"{label}: {type(exc).__name__}: {exc}")
     assert not failed, "以下动作触发即崩：\n" + "\n".join(failed)
+
+    # 关窗动作最后单独触发，且只要求"不抛异常"：此时窗口会真的关闭。
+    for act in closing:
+        label = act.text().replace("&", "").strip()
+        try:
+            act.trigger()
+            _pump()
+        except Exception as exc:
+            failed.append(f"{label}: {type(exc).__name__}: {exc}")
+    assert not failed, "关窗动作触发即崩：\n" + "\n".join(failed)
 
 
 DIALOG_SPECS = [
