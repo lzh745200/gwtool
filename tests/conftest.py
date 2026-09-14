@@ -8,9 +8,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from gwtool.db import connection as dbconn  # noqa: E402
-from gwtool.core import corrector  # noqa: E402
-from gwtool import paths  # noqa: E402
+from gwtool.db import connection as dbconn
+from gwtool.core import corrector
+from gwtool import paths
 
 
 @pytest.fixture(scope="session", autouse=True)

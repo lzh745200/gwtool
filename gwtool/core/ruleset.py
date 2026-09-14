@@ -74,12 +74,15 @@ def import_error_pairs(path: str, default_source: str = "用户导入",
     reader = csv.reader(io.StringIO(text))
     imported = skipped = total = 0
     first = True
-    for cells in reader:
+    for row in reader:
         if first:
             first = False
-            if _is_header(cells):
+            if _is_header(row):
                 continue
-        cells = [(c or "").strip() for c in cells]
+        # 用新名字承接规范化结果，不覆盖循环变量本身：
+        # 覆盖循环变量会让后续（或嵌套循环里）对它的引用指向被改写过的值，
+        # 这类"改了别名而非元素"的写法是静态检查与人工复核都容易漏掉的隐患。
+        cells = [(c or "").strip() for c in row]
         if not any(cells):
             skipped += 1
             continue

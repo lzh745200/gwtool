@@ -129,7 +129,7 @@ def main() -> int:
     if not alive:
         try:
             out = proc.stdout.read() if proc.stdout else b""
-        except Exception:        # noqa: BLE001  仅用于诊断输出
+        except Exception:
             out = b""
     elapsed = time.time() - started
     check(f"启动后存活 ≥{ALIVE_SECONDS}s", alive,
@@ -149,7 +149,7 @@ def main() -> int:
             n = conn.execute("SELECT count(*) FROM error_pairs").fetchone()[0]
             conn.close()
             check(f"纠错库 ≥{MIN_ERROR_PAIRS} 条", n >= MIN_ERROR_PAIRS, f"{n} 条")
-        except Exception as exc:                  # noqa: BLE001  诊断为主
+        except Exception as exc:
             check("纠错库可读", False, f"{type(exc).__name__}: {exc}")
 
     if alive:

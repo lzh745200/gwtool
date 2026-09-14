@@ -546,6 +546,15 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
         except Exception:
             pass
         dbconn.close_current_thread()
+        # 占用检查：本线程连接已关，但**其它线程**可能仍持有连接（后台导入/
+        # 汇编/查重）。此时 os.replace 覆盖主库必被 Windows 拒绝，与其让用户
+        # 看到一句含糊的"拒绝访问"，不如先点名是哪个后台任务占着库，
+        # 这样提示才是可操作的（等它结束 / 重开程序）。
+        busy = dbconn.live_connection_threads()
+        if busy:
+            raise RuntimeError(
+                "数据库正被后台任务占用（" + "、".join(busy) + "），恢复已中止，"
+                "当前数据未被改动。请等这些任务结束后重试，或关闭程序重新打开后再恢复。")
         target = dbconn.current_db_file()
         tmp = target.with_suffix(".restore.tmp")
         try:
@@ -554,9 +563,16 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
             # 校验必须在换掉真库之前：坏包一旦顶上，用户数据就没了
             _validate_restored_db(tmp)
             _replace_with_retry(tmp, target)
+            # 换上"新库"之后，必须清掉旧库遗留的 -wal/-shm。它们是**被替换掉的
+            # 那个旧库**的日志与共享内存文件，文件名却仍与 target 匹配：SQLite
+            # 下次打开新库时会把旧 WAL 当成新库的日志去"恢复"，直接导致
+            # "database disk image is malformed"。这两个附属文件必须随旧库一起消失。
+            _clean_db_sidecars(target)
         except BaseException:
-            # 校验失败/替换失败都不能把半成品留在数据目录里
+            # 校验失败/替换失败都不能把半成品留在数据目录里；tmp 在校验阶段被
+            # SQLite 打开过，可能已生成其附属 -wal/-shm，一并清掉。
             _unlink_quietly(tmp)
+            _clean_db_sidecars(tmp)
             raise
         # 模板迁移包回写（旧版只写不读）
         if "templates.json" in names:
@@ -580,6 +596,17 @@ def _unlink_quietly(p: Path) -> None:
         p.unlink()
     except OSError:
         pass
+
+
+def _clean_db_sidecars(db: Path) -> None:
+    """删除某个库文件配套的 -wal / -shm 附属文件（不存在则忽略）。
+
+    为什么必须成对清理：WAL 模式下 ``gwtool.db`` 的正确状态由主文件 + ``-wal``
+    + ``-shm`` 三者共同决定。只换主文件、留着旧库的 ``-wal``，等于给新库塞了
+    一份"别人家的日志"——下次打开时 SQLite 会拿它做崩溃恢复，把新库改坏。
+    """
+    for suffix in ("-wal", "-shm"):
+        _unlink_quietly(db.with_name(db.name + suffix))
 
 
 def _replace_with_retry(src: Path, dst: Path) -> None:

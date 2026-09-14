@@ -25,7 +25,10 @@ jobs:
 
       - name: 静态检查（ruff：语法错误/未定义名称）
         run: |
-          pip install ruff
+          # 锁死 ruff 版本：不锁的话 CI 每次装 latest，而 ruff 的规则默认集合与
+          # 语义会随版本变化 —— 同一份源码会出现"本地绿、CI 红"（本项目已反复
+          # 踩过此坑）。本地 venv 实测为 0.16.5，CI 必须与本地同版。
+          pip install ruff==0.16.5
           ruff check gwtool/ scripts/ tests/
 
       - name: 构建脚本护栏（行尾 + 批处理语法）
@@ -42,6 +45,13 @@ jobs:
           }
           if ($bad) { $bad | ForEach-Object { Write-Error $_ }; exit 1 }
           Write-Output "批处理脚本行尾检查通过（CRLF）"
+
+      # 必须在「运行测试」之前装 Tesseract：否则 pytest 阶段本机还没有
+      # tesseract，tests/test_ocr_probe.py 在 Windows 上会整组 skip（而 Linux job
+      # 是在 pytest 之前 apt 装的、会真跑）——即"Windows 的 OCR 路径从未在 CI
+      # 被验证过"。提到这里后两个平台的 OCR 测试都真实执行。
+      - name: 安装 Tesseract OCR（供测试 + 打包内置）
+        run: choco install tesseract -y --no-progress
 
       - name: 运行测试
         env:
@@ -170,6 +180,16 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: $PYBIN scripts/e2e_check.py
+
+      # 与 Windows job 一致：把可选推理栈装进打包环境（放在测试之后），
+      # 让产物带 onnxruntime+numpy，L4/L5 才可能开启。aarch64 侧 onnxruntime
+      # wheel 的可用性在各版本间不一致（本项目 ARM64 底线 glibc>=2.31）：装上
+      # 就让增强层真可用，装不上也**不能**让整条 Linux 构建红掉 —— 明确告警
+      # 后继续，主包退化为三级流水线（与"未装增强包"的语义一致）。
+      - name: 安装可选推理栈（L4/L5 精度增强；aarch64 无轮子时降级不阻断）
+        run: |
+          "$PYBIN" -m pip install -r requirements-optional.txt \
+            || echo "::warning::requirements-optional.txt 安装失败（aarch64 可能无匹配 wheel），本次 Linux 产物不含 L4/L5 推理栈"
 
       - name: PyInstaller 打包（glibc 2.31 目标，参数统一于 gwtool.spec）
         run: $PYBIN -m PyInstaller --noconfirm --clean gwtool.spec

@@ -78,7 +78,7 @@ def batch_compile_each(doc_ids: list[int], template: DocTemplate, out_dir: str,
                 k += 1
             docxgen.generate_docx(trees, tpl, str(target))
             paths.append(str(target))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             failures.append((title, str(exc)))
         finally:
             if progress_cb:
@@ -207,7 +207,7 @@ def _scan(category_id: int | None, doc_ids: list[int] | None,
                                        getattr(c, "kind", "replace")))
             if hits:
                 result.plans.append(DocCorrection(int(row["id"]), title, hits))
-        except Exception as exc:  # noqa: BLE001  单篇失败不中断整批
+        except Exception as exc:
             result.failures.append((title, str(exc)))
         finally:
             result.scanned += 1
@@ -401,7 +401,7 @@ def _apply_to_blocks(blocks_json: str, old_text: str,
                 blk["rows"] = [[fix(cell) for cell in row] if isinstance(row, list)
                                else row for row in rows]
         return json.dumps(data, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001  块结构异常不影响正文已改的成果
+    except Exception as exc:
         # 不能静默：块没同步 -> 汇编出的公文仍是改前的文字，用户必须知道
         stats["error"] = f"{type(exc).__name__}: {exc}"
         return blocks_json
@@ -430,7 +430,7 @@ def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectRe
             # 快照只是安全网，它自己失败不该拦住纠错
             try:
                 dao.add_snapshot(d.id, d.title, d.content_text, reason="批量纠错前")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             blocks_stats: dict = {}
             blocks = _apply_to_blocks(d.blocks_json, old_text, confirmed,
@@ -450,7 +450,7 @@ def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectRe
                 result.failures.append(
                     (title, "正文已修正，但结构化块同步失败（"
                             f"{blocks_stats['error']}），汇编导出可能仍是改前文字"))
-        except Exception as exc:  # noqa: BLE001  单篇失败不中断整批
+        except Exception as exc:
             result.failures.append((title, str(exc)))
         finally:
             if progress_cb:

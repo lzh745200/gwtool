@@ -17,21 +17,21 @@ _SENT_SPLIT = re.compile(r"(?<=[。！？；!?;])|\n")
 def split_sentences(text: str) -> list[str]:
     out = []
     for s in _SENT_SPLIT.split(text or ""):
-        s = s.strip()
-        if s:
-            out.append(s)
+        raw_s = s.strip()
+        if raw_s:
+            out.append(raw_s)
     return out
 
 
 def available() -> tuple[bool, str]:
     """返回 (可用性, 引擎描述)。"""
+    import importlib.util
     import sys
     if sys.platform.startswith("win"):
-        try:
-            import win32com.client  # noqa: F401
+        # find_spec 探测而非真 import：win32com 是原生扩展，
+        # 只用它判断"能不能用 SAPI"，不必真的加载。
+        if importlib.util.find_spec("win32com") is not None:
             return True, "Windows SAPI"
-        except ImportError:
-            pass
     if shutil.which("spd-say"):
         return True, "speech-dispatcher"
     if shutil.which("espeak-ng"):

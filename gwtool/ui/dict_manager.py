@@ -345,9 +345,9 @@ class DictManager(QDialog):
             return
         n = 0
         for line in Path(path).read_text(encoding="utf-8-sig", errors="replace").splitlines():
-            line = line.strip()
-            if line:
-                dao.add_phrase(line[:2000], source="导入", tag="批量导入")
+            raw_line = line.strip()
+            if raw_line:
+                dao.add_phrase(raw_line[:2000], source="导入", tag="批量导入")
                 n += 1
         invalidate_cache()
         self._reload_phrases()

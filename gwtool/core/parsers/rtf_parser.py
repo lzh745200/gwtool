@@ -16,16 +16,16 @@ def parse_rtf(path: str) -> DocTree:
     tree = DocTree()
     first = True
     for para in text.split("\n"):
-        para = para.strip()
-        if not para:
+        raw_para = para.strip()
+        if not raw_para:
             continue
         if first:
-            tree.title = para
+            tree.title = raw_para
             first = False
-            tree.blocks.append(Block(type=HEADING, level=1, text=para))
+            tree.blocks.append(Block(type=HEADING, level=1, text=raw_para))
             continue
-        if _HEADING_RE.match(para) and len(para) <= 40:
-            tree.blocks.append(Block(type=HEADING, level=2, text=para))
+        if _HEADING_RE.match(raw_para) and len(raw_para) <= 40:
+            tree.blocks.append(Block(type=HEADING, level=2, text=raw_para))
         else:
-            tree.blocks.append(Block(type=PARAGRAPH, text=para))
+            tree.blocks.append(Block(type=PARAGRAPH, text=raw_para))
     return tree

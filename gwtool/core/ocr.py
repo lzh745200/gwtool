@@ -116,11 +116,13 @@ def ocr_pdf(path: str, dpi: int = 220, progress_cb=None) -> DocTree:
             img = tmpdir / f"p{pno}.png"
             pix.save(str(img))
             text = ocr_image(str(img), tess)
-            for line in text.splitlines():
-                line = line.strip()
-                if not line or len(line) < 2:
+            for raw_line in text.splitlines():
+                # 不覆盖循环变量本身：那是"改了别名而非元素"的经典写法，
+                # 后续若在循环体里再用 line 就会拿到被裁剪过的值（PLW2901）。
+                stripped = raw_line.strip()
+                if not stripped or len(stripped) < 2:
                     continue
-                tree.blocks.append(Block(type=PARAGRAPH, text=line))
+                tree.blocks.append(Block(type=PARAGRAPH, text=stripped))
     finally:
         doc.close()
         import shutil as _sh

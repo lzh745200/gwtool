@@ -151,7 +151,7 @@ class TestRestoreSurvivesBusyDatabase:
                     "SELECT count(*) FROM documents").fetchone()
                 started.set()
                 hold.wait(timeout=20)
-            except Exception as exc:          # noqa: BLE001
+            except Exception as exc:
                 errors.append(str(exc))
             finally:
                 dbconn.close_current_thread()

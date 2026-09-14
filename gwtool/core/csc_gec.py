@@ -130,13 +130,18 @@ _SETTING_CACHE: bool | None = None
 
 # ---------------------------------------------------------------- 开关
 def runtime_available() -> bool:
-    """`tokenizers` 与 onnxruntime 是否都可导入。结果缓存，避免反复试 import。"""
+    """`tokenizers` 与 onnxruntime 是否都可导入。结果缓存，避免反复试 import。
+
+    用 ``find_spec`` 探测而不是真 import：两者都是重型原生扩展，
+    这里只需要知道"在不在"。
+    """
     global _RUNTIME_CACHE
     if _RUNTIME_CACHE is None:
         try:
-            import onnxruntime  # noqa: F401
-            import tokenizers     # noqa: F401
-            _RUNTIME_CACHE = True
+            import importlib.util
+            _RUNTIME_CACHE = all(
+                importlib.util.find_spec(m) is not None
+                for m in ("onnxruntime", "tokenizers"))
         except Exception:
             _RUNTIME_CACHE = False
     return _RUNTIME_CACHE
@@ -184,11 +189,12 @@ def invalidate_cache() -> None:
 def status_text() -> str:
     """给设置界面用的一句话状态。"""
     if not runtime_available():
-        return "未安装 onnxruntime / tokenizers —— 需要它们才能启用" \
-               "（见 requirements-optional.txt）"
+        return ("缺少推理运行时 onnxruntime / tokenizers —— 未就绪、无法启用。"
+                "可用随程序附带这些运行时的发行版（重启后生效），"
+                "或按 requirements-optional.txt 在有网机器取离线轮子拷入本机安装。")
     info = enhance_pack.installed_pack(_KIND)
     if info is None:
-        return "未导入语法纠错增强包"
+        return "未导入语法纠错增强包（点下方「导入增强包…」选择离线取得的本层 .zip）"
     if not enhance_pack.verify_installed(_KIND):
         return "语法纠错增强包不完整（缺少 model.onnx 或 tokenizer.json），请重新导入"
     state = "已开启" if _setting_on() else "已关闭"

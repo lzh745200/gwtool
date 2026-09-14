@@ -11,9 +11,9 @@ from pathlib import Path
 ROOT = Path(r"C:/gwtool")
 sys.path.insert(0, str(ROOT))
 
-from gwtool import paths  # noqa: E402
-from gwtool.db import connection as dbconn  # noqa: E402
-from gwtool.core import csc_gec, csc_neural, corrector, enhance_pack  # noqa: E402
+from gwtool import paths
+from gwtool.db import connection as dbconn
+from gwtool.core import csc_gec, csc_neural, corrector, enhance_pack
 
 
 def main() -> int:

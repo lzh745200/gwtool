@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         from . import icons
         self.setWindowIcon(icons.icon("new_doc"))
         self._tts_worker = None
+        self._external_import_worker = None
         self._build_ui()
         self._build_menu()
         self._wire()
@@ -293,22 +294,55 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def import_external_file(self, path: str):
-        """外部入口（右键菜单 --import）：导入单个文件并打开。"""
+        """外部入口（右键菜单 --import）：导入单个文件并打开。
+
+        parse_any 对扫描版 PDF 会整本 OCR，是**分钟级**操作；老实现直接同步
+        调用，用户双击一个 .pdf 关联到本程序后主窗口会整个冻结、毫无提示。
+        改走后台线程（workers.FnWorker），状态栏给出页级进度。
+        """
+        from .workers import FnWorker
+
+        worker = getattr(self, "_external_import_worker", None)
+        if worker is not None and worker.isRunning():
+            info(self, "上一次导入仍在进行，请稍候。")
+            return
         from ..core.importer import parse_any
+
+        self.status.showMessage(f"正在解析 {path}（扫描版 PDF 可能耗时较久）…")
+
+        def ocr_progress(page, n_pages, _path=path):
+            self.status.showMessage(f"正在识别 {_path}（OCR 第{page}/{n_pages}页）…")
+
+        self._external_import_worker = FnWorker(
+            parse_any, path, ocr_progress_cb=ocr_progress, parent=self)
+        self._external_import_worker.ok.connect(
+            lambda r: self._external_import_done(path, r))
+        self._external_import_worker.failed.connect(self._external_import_failed)
+        self._external_import_worker.start()
+
+    def _external_import_failed(self, msg: str):
+        self.status.showMessage("导入失败", 8000)
+        warn(self, f"导入失败：{msg}")
+
+    def _external_import_done(self, path: str, r):
+        from pathlib import Path
+
         from ..db import dao
-        r = parse_any(path)
         if not r.ok or not r.tree:
+            self.status.showMessage("导入失败", 8000)
             warn(self, f"导入失败：{r.error}")
             return
         did = dao.add_document(dao.Document(
             title=r.tree.title, content_text=r.tree.plain_text(),
             blocks_json=r.tree.to_json(), file_path=path,
-            file_type=__import__("pathlib").Path(path).suffix.lstrip(".")))
+            file_type=Path(path).suffix.lstrip(".")))
         self.library.reload()
         if did > 0:
             self.editor.load_document(did)
+            self.status.showMessage(f"已导入：{r.tree.title}", 8000)
         else:
             info(self, "该文件此前已导入（内容重复），已在列表中。")
+            self.status.showMessage("该文件此前已导入（内容重复）", 8000)
         self._update_status()
 
     def import_clipboard(self):
@@ -486,7 +520,7 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             return fn(), ""
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return None, str(exc)
         finally:
             QApplication.restoreOverrideCursor()
@@ -523,6 +557,27 @@ class MainWindow(QMainWindow):
             info(self, msg + f"\n\n附件 {len(rep.included)} 个已随包备份"
                              f"（{human_size(rep.included_bytes)}）。")
 
+    @staticmethod
+    def _restore_failure_text(err: str) -> str:
+        """把恢复失败的**真实原因**如实讲给用户，不臆断成"口令错误/文件损坏"。
+
+        老实现把一切失败都写成"恢复失败（口令错误或文件损坏）"：用户遇到
+        "库被后台任务占用"这类**可重试**的失败时，会以为手里的备份包坏了，
+        从而把一份其实完好的备份丢弃、白白损失一次灾难恢复机会。
+        这里先原样透出底层异常文本，只在**能确定**原因时才补一句提示。
+        """
+        msg = f"恢复失败：{err}"
+        low = err.lower()
+        if "password" in low or "口令" in err or "not a zip" in low:
+            return msg + "\n\n原因看起来是口令不正确——请确认这确实是该备份的口令。"
+        if "占用" in err:
+            return (msg + "\n\n库正被后台任务占用，备份包本身没有问题："
+                           "等任务结束后重试即可（当前数据未被改动）。")
+        if any(k in err for k in ("不完整", "业务表", "校验", "SQLite", "损坏")) \
+                or "not a zip" in low or "badzip" in low:
+            return msg + "\n\n这个备份文件本身不可用（内容损坏或并非本程序导出的备份）。"
+        return msg
+
     def _do_restore(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择备份文件",
                                               str(db_path().parent / "backups"),
@@ -540,7 +595,7 @@ class MainWindow(QMainWindow):
             return
         rep, err = self._guarded(lambda: restore_backup_detailed(path, password=pw))
         if rep is None:
-            warn(self, f"恢复失败（口令错误或文件损坏）：{err}")
+            warn(self, self._restore_failure_text(err))
             return
         if rep.missing:
             warn(self, f"数据库已恢复，但有 {len(rep.missing)} 个附件不在此备份包内：\n"
@@ -609,7 +664,7 @@ class MainWindow(QMainWindow):
         if dao.get_setting("auto_backup", "1") == "1":
             try:
                 create_backup_detailed(note="退出自动备份", mode=MODE_AUTO)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # 不能静默：用户会以为数据已备份。落日志 + 最后再兜一次提示，
                 # 但绝不拦住退出（关不掉程序比备份失败更糟）。
                 try:

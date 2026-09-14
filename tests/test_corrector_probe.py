@@ -349,10 +349,11 @@ class TestLoadEngineRealChain:
 
     def test_fake_onnx_fails_gracefully(self, tmp_db, tmp_path):
         """词汇表合规但 model.onnx 是伪文件：ORT 创建会话失败 → 优雅回落。"""
-        try:
-            import numpy  # noqa: F401
-            import onnxruntime  # noqa: F401
-        except ImportError:
+        import importlib.util
+        # find_spec 探测可用性（而非 import 后丢弃）：本用例只需要知道依赖在不在，
+        # 真跑推理的是被测代码本身。
+        if any(importlib.util.find_spec(m) is None
+               for m in ("numpy", "onnxruntime")):
             pytest.skip("本机无 onnxruntime/numpy：伪模型拒绝链路需真实推理依赖")
         from gwtool import paths
         slot = paths.enhance_dir() / "current" / "csc"

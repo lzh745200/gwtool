@@ -1,14 +1,20 @@
 @echo off
-REM 卸载 Windows 右键菜单
-REM 行尾必须是 CRLF（见仓库根 .gitattributes），否则 cmd.exe 解析错乱。
+REM ============================================================
+REM  Remove the per-user Explorer context menu entry for gwtool.
+REM  Line endings MUST be CRLF; file is 100%% ASCII - see the
+REM  header of install_context_menu.bat for why.
+REM ============================================================
 setlocal
-chcp 65001 >nul
-reg delete "HKCU\Software\Classes\*\shell\GongWenHuiBian" /f >nul 2>&1
+set "RUNNER="
+if exist "%~dp0..\dist\gwtool\gwtool.exe" set "RUNNER=%~dp0..\dist\gwtool\gwtool.exe"
+if not defined RUNNER if exist "%~dp0..\.venv\Scripts\python.exe" set "RUNNER=%~dp0..\.venv\Scripts\python.exe"
+if not defined RUNNER set "RUNNER=python"
+
+"%RUNNER%" --uninstall-context-menu
 if errorlevel 1 (
-    echo 未发现已安装的右键菜单（可能已卸载过）。
+    echo [ERROR] Removing the context menu failed.
     pause
-    exit /b 0
+    exit /b 1
 )
-echo 已卸载右键菜单。
 pause
 endlocal

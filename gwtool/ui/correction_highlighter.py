@@ -94,7 +94,7 @@ class CorrectionHighlighter(QSyntaxHighlighter):
         """
         return self.currentBlock().position()
 
-    def highlightBlock(self, text: str) -> None:  # noqa: N802 (Qt 命名)
+    def highlightBlock(self, text: str) -> None:
         if not self._corrections or not text:
             return
         blk_start = self._block_position()

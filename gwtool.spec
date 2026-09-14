@@ -15,15 +15,18 @@ hiddenimports = [
     # icons.py 用 QImage.fromData(..., "SVG") 画图标，需要 imageformats/qsvg 插件；
     # 代码未显式 import QtSvg，PyInstaller 不会自动收集该插件，打包后图标会全空白。
     'PySide6.QtSvg',
-    # L4 精度增强包（可选）：requirements-optional.txt 装了才真正生效。
-    # 未安装时 PyInstaller 只记为 missing（warning），不会让构建失败 ——
-    # 这正是我们要的语义："有模型依赖就把 L4 带上，没有就静默退化为三级流水线"。
-    # 注意它们都依赖 numpy，故下方 excludes 里绝不能再排除 numpy。
-    'onnxruntime',
-    'tokenizers',
 ]
 if sys.platform.startswith('win'):
     hiddenimports.append('win32timezone')   # pywin32 动态导入
+
+# 不把 onnxruntime / tokenizers 写进 hiddenimports
+# ------------------------------------------------
+# 它们是「精度增强包」（L4/L5 神经纠错）的依赖，按 requirements-optional.txt
+# 的设计**不进主包**：麒麟 CI 在 Debian 11 容器内用 Python 3.9 构建，
+# 而 onnxruntime 新版要求 Python >= 3.11，装不上就会让 Linux 打包 job 失败。
+# 主包不带模型，用户需要时离线导入独立 .zip 增强包即可。
+# 这里只保证 numpy 不被排除（见下方 excludes 注释），让"打包版装了增强包依赖
+# 就能用"与"没装就静默退化为三级流水线"两种情形都自洽。
 
 excludes = [
     'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebChannel',
@@ -34,13 +37,11 @@ excludes = [
     'PySide6.QtDataVisualization',
     'tkinter', 'matplotlib', 'pandas',
     # 不要在这里加 'numpy'：
-    #   core/csc_gec.py 与 core/csc_neural.py 都 `import numpy as np`，
-    #   onnxruntime 导入即依赖 numpy。老版本排除了 numpy，导致本机构建出的
-    #   产物"有 onnxruntime 却没有 numpy"——打包版 L4 增强包导入后静默无效
-    #   （被宽 except 兜住，不报任何错），而 CI 构建干脆不装 onnxruntime，
-    #   于是"同一份 spec、不同机器产出不同能力"。
-    # 若将来决定打包版不支持 L4，请反过来把 onnxruntime/tokenizers 显式写进
-    # 本列表，并同步修改 README 的功能表——两者必须一致。
+    #   core/csc_gec.py 与 core/csc_neural.py 都 `import numpy as np`（实测 4 处），
+    #   onnxruntime 导入即依赖 numpy。老版本把 numpy 写进 excludes，本机构建出的
+    #   产物就是"有 onnxruntime 却没有 numpy"——一旦有人给这种产物补上运行时，
+    #   L4 会在 import 阶段直接失败（被宽 except 兜成静默无效，不报任何错）。
+    # 保留 numpy 只增加约 31 MB（实测），换来增强层在依赖齐备时真的能跑。
 ]
 
 a = Analysis(

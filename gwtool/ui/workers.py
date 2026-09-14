@@ -43,7 +43,7 @@ class FnWorker(QThread):
     def run(self):
         try:
             self.ok.emit(self._fn(*self._args, **self._kwargs))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.failed.emit(str(exc))
         finally:
@@ -95,7 +95,7 @@ class ImportWorker(QThread):
                 else:
                     ok += 1
             self.finished_ok.emit(ok, skip)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.failed.emit(str(exc))
         finally:
@@ -121,7 +121,7 @@ class CompileWorker(QThread):
             self.progress.emit("正在合并材料并生成公文…")
             out = compiler.compile_docx(self.req)
             self.done.emit(out)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.error.emit(str(exc))
         finally:
@@ -152,7 +152,7 @@ class PdfRenderWorker(QThread):
             self.progress.emit("第二遍渲染与页码标注…")
             pdfrender.render_compiled_pdf(trees, self.template, self.out_pdf)
             self.done.emit(self.out_pdf)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.error.emit(str(exc))
         finally:
@@ -175,7 +175,7 @@ class BookletWorker(QThread):
             self.progress.emit("正在重排小册子页面…")
             n = make_booklet(self.src_pdf, self.out_pdf)
             self.done.emit(f"{self.out_pdf}\n共 {n} 页（A3横向，骑马钉）")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.error.emit(str(exc))
         finally:
@@ -206,7 +206,7 @@ class TTSWorker(QThread):
         try:
             from ..core import tts as tts_core
             self._engine = tts_core.TTSEngine()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.failed.emit(str(exc))
             return
         try:

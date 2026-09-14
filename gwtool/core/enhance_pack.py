@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import zipfile
 from dataclasses import dataclass, field
@@ -65,6 +66,8 @@ REQUIRED_FILES_BY_KIND = {
 REQUIRED_FILES = REQUIRED_FILES_BY_KIND["csc"]    # 历史默认值，保持向后兼容
 CURRENT_DIRNAME = "current"
 STAGING_DIRNAME = ".staging"
+# 替换旧包时的过渡后缀：旧包先改名为 <kind>.old，新包就位成功后再删。
+OLD_SUFFIX = ".old"
 
 # 增强包按 kind 分槽存放（current/csc、current/cgec），两类包可同时安装。
 # 历史布局是文件直接放在 current/ 下（只有 csc），由 migrate_layout() 自动迁移。
@@ -327,15 +330,46 @@ def install_pack(zip_path: str | Path, kind: str | None = None) -> PackInfo:
                     f"{fname} 校验失败（期望 {expect[:12]}…，实际 {got[:12]}…）")
 
         # 原子替换（只动本 kind 的槽位）
+        #
+        # 严禁"先 rmtree(cur) 再 staging.rename(cur)"：两步之间存在窗口——
+        # 一旦 rename 失败（被占用、跨卷、杀软临时锁），**原本可用的旧包就没了**，
+        # 与模块 docstring 承诺的"绝不出现装了一半"直接矛盾。改用
+        # backup/db 同款的 "改名暂存 + 就位 + 失败回滚" 手法：
+        #   1) 旧包 os.replace 到 <kind>.old（同盘改名，原子）；
+        #   2) 新包 os.replace 到 <kind>（同盘改名，原子）；
+        #   3) 成功后才删除 .old；第 2 步失败则把 .old 改回原位，旧包依旧可用。
         cur = _slot_dir(target_kind)
         cur.parent.mkdir(parents=True, exist_ok=True)
-        if cur.exists():
-            shutil.rmtree(cur, ignore_errors=True)
-        staging.rename(cur)
+        old = cur.with_name(cur.name + OLD_SUFFIX)
+        _remove_existing(old)                 # 清掉上次失败可能残留的 .old
+        had_old = cur.exists()
+        if had_old:
+            os.replace(cur, old)
+        try:
+            os.replace(staging, cur)          # 新包就位
+        except OSError:
+            if had_old:
+                try:
+                    os.replace(old, cur)      # 回滚：旧包改回原位，仍可用
+                except OSError:
+                    pass
+            raise
+        _remove_existing(old)                 # 就位成功，旧包使命完成
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return _to_info(man, _slot_dir(target_kind))
+
+
+def _remove_existing(path: Path) -> None:
+    """删除一个文件或目录（不存在则忽略；任何失败都不抛出）。"""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            path.unlink()
+    except OSError:
+        pass
 
 
 def remove_pack(kind: str = DEFAULT_KIND) -> bool:

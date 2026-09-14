@@ -15,6 +15,47 @@ from .schema import init_schema
 _local = threading.local()
 _db_file: Path | None = None
 
+# ------------------------------------------------------------------ 连接登记表
+# 记录"哪些线程当前持有打开的连接"。用途只有一个：**恢复备份**前判断库是不是
+# 正被别的线程占用（Windows 上 os.replace 覆盖被打开的文件必失败）。
+#
+# 为什么不能只靠捕获 os.replace 的异常：那样报出来的只有一句 "拒绝访问 /
+# 文件正被另一进程使用"，用户在界面上根本不知道是**哪个**后台任务在占用，
+# 也就无法"等它结束后重试"。登记表让错误文案能点名具体任务。
+#
+# 键是线程 ident，值是线程对象（用 is_alive() 过滤已退出的线程，
+# 避免线程被回收后登记项残留、把一次正常恢复误报成"被占用"）。
+_CONN_LOCK = threading.Lock()
+_OPEN_CONNS: dict[int, threading.Thread] = {}
+
+
+def live_connection_threads() -> list[str]:
+    """除当前线程外，仍持有打开连接的线程名（已退出的线程即时剔除）。
+
+    返回的是线程名的有序去重列表，供恢复备份时生成可操作的错误提示。
+    """
+    cur = threading.get_ident()
+    names: list[str] = []
+    with _CONN_LOCK:
+        for tid, th in list(_OPEN_CONNS.items()):
+            if tid == cur:
+                continue
+            if th is None or not th.is_alive():
+                _OPEN_CONNS.pop(tid, None)   # 线程已退出，登记项作废
+                continue
+            names.append(th.name)
+    return sorted(set(names))
+
+
+def _register_conn() -> None:
+    with _CONN_LOCK:
+        _OPEN_CONNS[threading.get_ident()] = threading.current_thread()
+
+
+def _unregister_conn() -> None:
+    with _CONN_LOCK:
+        _OPEN_CONNS.pop(threading.get_ident(), None)
+
 
 def configure(db_file: Path) -> None:
     """设置数据库文件位置（测试可指向临时文件）。
@@ -42,6 +83,7 @@ def get_conn() -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous=NORMAL")
         init_schema(conn)
         _local.conn = conn
+        _register_conn()
     return conn
 
 
@@ -104,6 +146,7 @@ def close_current_thread() -> None:
     if conn is not None:
         conn.close()
         _local.conn = None
+        _unregister_conn()
 
 
 def current_db_file() -> Path:

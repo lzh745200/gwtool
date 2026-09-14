@@ -10,12 +10,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 from . import APP_NAME, __version__
-# 顶层导入：这两个模块平时只在 UI 回调里延迟导入（report 用于体检报告导出、
-# classify 用于分类建议），冻结包若漏收它们，用户点按钮时才会崩。放到启动路径上，
+# 顶层导入：这两个模块平时只在 UI 回调里延迟导入（classify 用于分类建议、
+# report 用于体检报告导出），冻结包若漏收它们，用户点到才会崩。放到启动路径上，
 # CI 每次构建的启动冒烟即可覆盖。
+# 下一行刻意保留未用导入抑制：这里的"未使用"正是本段代码的目的
+# （只为让 PyInstaller 的静态分析看到这两个模块）。
 from .core import classify, report  # noqa: F401
 from .paths import bundled_db_seed_path, db_path
-from .ui.feature_dialogs import LockDialog  # noqa: F401  口令锁解锁框（顶层导入防路径拼写错误）
+from .ui.feature_dialogs import LockDialog
 
 # 麒麟/Ubuntu 下补齐 Qt6 xcb 平台插件所需的系统运行库
 XCB_HINT = ("sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 "

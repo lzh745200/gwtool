@@ -22,6 +22,7 @@ from ..core.security import clear_password, has_password, set_password
 from ..db import dao
 from . import theme
 from .widgets import ThreadSafeDialog, ask, info, warn
+from .workers import _close_thread_conn
 
 # ================================================================ 骨架向导
 class SkeletonDialog(QDialog):
@@ -221,7 +222,7 @@ class _BulkReplaceWorker(QThread):
         # 对话框的「执行替换」按钮与进度条永远停在忙碌态，只能关窗口。
         try:
             self._run()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             import traceback
             traceback.print_exc()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -259,7 +260,7 @@ class _BulkReplaceWorker(QThread):
                 try:
                     dao.add_snapshot(did, d.title, d.content_text,
                                      reason="批量替换前")
-                except Exception:  # noqa: BLE001  快照失败不拦替换
+                except Exception:
                     pass
                 from ..core.importer import _text_to_tree
                 blocks = _text_to_tree(new_text).to_json()
@@ -434,7 +435,7 @@ def _correct_categories() -> list[str]:
     try:
         names |= {c for c, _n in dao.error_pair_categories()
                   if c and c not in ("未分类", "未标注")}
-    except Exception:      # noqa: BLE001  词库不可用时退回内置类别
+    except Exception:
         pass
     return sorted(names)
 
@@ -467,9 +468,14 @@ class _BatchScanWorker(QThread):
                 categories=self.categories,
                 progress_cb=lambda i, n: self.progress.emit(i, n))
             self.done.emit(res)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.failed.emit(str(exc))
+        finally:
+            # 本线程走了 dao（thread-local 连接）：不关会连同 -wal/-shm 句柄
+            # 随线程一起泄漏，反复"预览/纠错"在麒麟上触发 too many open files；
+            # 同时注销连接登记表里的本条记录，否则恢复备份会误报"数据库被占用"。
+            _close_thread_conn()
 
 
 class _BatchApplyWorker(QThread):
@@ -489,9 +495,11 @@ class _BatchApplyWorker(QThread):
                 apply=True, plans=self.plans,
                 progress_cb=lambda i, n: self.progress.emit(i, n))
             self.done.emit(res)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             traceback.print_exc()
             self.failed.emit(str(exc))
+        finally:
+            _close_thread_conn()
 
 
 class BatchCorrectDialog(ThreadSafeDialog, QDialog):
@@ -592,7 +600,7 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
         self._invalidate()
         try:
             total = dao.count_documents(scope)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"读取资料库失败：{exc}")
             return
         if not total:
@@ -1144,8 +1152,7 @@ class SecurityDialog(QDialog):
             ui["syncing"] = False
         ready = mod.available()
         ui["chk"].setEnabled(ready)
-        ui["chk"].setToolTip("" if ready else
-                             "尚未就绪：请先安装所需依赖并导入对应的增强包")
+        ui["chk"].setToolTip("" if ready else "尚未就绪：" + mod.status_text())
         ui["state"].setText("状态：" + mod.status_text())
         installed = enhance_pack.installed_pack(kind)
         ui["remove"].setEnabled(installed is not None)
@@ -1160,7 +1167,7 @@ class SecurityDialog(QDialog):
         try:
             mod.set_setting(bool(on))
             mod.reset()                 # 下次纠错时按需（重新）加载
-        except Exception as exc:        # noqa: BLE001
+        except Exception as exc:
             warn(self, f"保存设置失败：{exc}")
         self._refresh_pack_group(kind)
 
@@ -1183,16 +1190,42 @@ class SecurityDialog(QDialog):
         except enhance_pack.EnhancePackError as exc:
             warn(self, f"导入失败：{exc}")
             return
-        except Exception as exc:        # noqa: BLE001
+        except Exception as exc:
             warn(self, f"导入失败：{exc}")
             return
         mod.reset()
         try:
             mod.set_setting(True)      # 导入成功即默认开启，用户可随时关
-        except Exception:              # noqa: BLE001
+        except Exception:
             pass
         self._refresh_pack_group(kind)
-        info(self, f"已导入{label}增强包：\n{pack.summary()}\n\n已为你开启该层。")
+        info(self, f"已导入{label}增强包：\n{pack.summary()}\n\n"
+                   + self._pack_post_import_hint(mod))
+
+    @staticmethod
+    def _pack_post_import_hint(mod) -> str:
+        """导入成功后按**真实运行时能力**给提示，不再无条件说"已开启该层"。
+
+        老实现不管运行时就绪与否都回一句"已为你开启该层"：而同一对话框里的
+        复选框却是灰的、状态写着"未安装 onnxruntime"——在一个完全离线的产品里
+        这构成死循环（用户被告知已开启，却无法让开关变绿、也找不到出网安装的途径）。
+        这里以 `mod.available()`（运行时 + 包都就绪）为准，不就绪时明确说"尚未启用"
+        并给出可执行的下一步。
+        """
+        try:
+            ready = bool(mod.available())
+            status = mod.status_text()
+        except Exception:
+            return "增强包已安装。请在上方状态行确认本层是否已就绪后再使用。"
+        if ready:
+            return ("已为你开启该层：下次纠错时会作为补充层自动生效。"
+                    "（如需停用，取消上方勾选即可。）")
+        return (f"增强包已安装，但**当前尚未真正启用**。原因：{status}\n\n"
+                "下一步怎么做（任选其一即可）：\n"
+                "  1) 若本程序已随包附带所需运行时，重启一次本程序后本层即可勾选启用；\n"
+                "  2) 若确缺少运行库，请在一台有网机器上按 requirements-optional.txt "
+                "取得对应的离线安装包（wheel），拷到本机安装后再回到此界面；\n"
+                "  3) 运行时补齐后，重新勾选本组的启用开关即可生效。")
 
     def _remove_pack(self, kind: str = "csc"):
         from ..core import enhance_pack
@@ -1207,7 +1240,7 @@ class SecurityDialog(QDialog):
         mod.reset()
         try:
             mod.set_setting(False)
-        except Exception:              # noqa: BLE001
+        except Exception:
             pass
         self._refresh_pack_group(kind)
         info(self, f"已卸载{label}增强包。" if removed
@@ -1229,7 +1262,7 @@ class SecurityDialog(QDialog):
         from ..core import attachments
         try:
             n = attachments.sweep_orphans()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"清理失败：{exc}")
             return
         self.lbl_attach.setText(

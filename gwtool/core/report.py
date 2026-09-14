@@ -54,7 +54,7 @@ def build_report_tree(findings: list[Finding], source_name: str = "",
         Block(type=HEADING, level=1, text=title),
         Block(type=PARAGRAPH, text=f"体检对象：{source_name or '（未指定）'}"),
         Block(type=PARAGRAPH, text=f"体检时间：{stamp}"),
-        Block(type=PARAGRAPH, text=f"检查依据：GB/T 9704《党政机关公文格式》"),
+        Block(type=PARAGRAPH, text="检查依据：GB/T 9704《党政机关公文格式》"),
         Block(type=PARAGRAPH,
               text=f"体检结论：{verdict(findings)}"
                    f"（不合规范 {counts['error']} 项、建议修改 {counts['warn']} 项、"

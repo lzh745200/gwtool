@@ -112,7 +112,7 @@ class AttachmentDialog(ThreadSafeDialog, QDialog):
         try:
             self._rows = dao.list_attachments(self.doc_id) if self.doc_id else []
             storage = str(attachments.storage_dir())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"读取附件列表失败：{exc}")
             return
         self.lbl_dir.setText(f"附件保存在数据目录内（随备份与便携模式一起走）：{storage}")
@@ -243,7 +243,7 @@ class AttachmentDialog(ThreadSafeDialog, QDialog):
                     ok += 1
                 else:
                     stuck.append(att.file_name)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 stuck.append(f"{att.file_name}（{exc}）")
         self.reload()
         if stuck:
@@ -305,7 +305,7 @@ class RecycleBinDialog(QDialog):
             self._rows = dao.list_deleted_documents()
             counts = dao.attachment_counts([d.id for d in self._rows])
             cat_names = {c.id: c.name for c in dao.list_categories()}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"读取回收站失败：{exc}")
             return
         self.table.setRowCount(len(self._rows))
@@ -340,7 +340,7 @@ class RecycleBinDialog(QDialog):
             try:
                 if dao.restore_document(did):
                     done += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 warn(self, f"恢复失败：{exc}")
                 break
         self.reload()
@@ -360,7 +360,7 @@ class RecycleBinDialog(QDialog):
     def empty_bin(self) -> None:
         try:
             ids = dao.deleted_document_ids()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"读取回收站失败：{exc}")
             return
         if not ids:
@@ -374,7 +374,7 @@ class RecycleBinDialog(QDialog):
     def _purge(self, ids: list[int]) -> None:
         try:
             stuck = attachments.purge_documents(ids)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"彻底删除失败：{exc}")
             self.reload()
             return

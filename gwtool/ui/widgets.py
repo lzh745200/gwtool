@@ -138,7 +138,7 @@ class ThreadSafeDialog:
     对话框析构 → 子线程析构 → 进程消失，且没有任何可读的错误提示。
     """
 
-    def closeEvent(self, event):        # noqa: N802  Qt 命名
+    def closeEvent(self, event):
         stuck = wait_for_threads(self, timeout_ms=8000)
         if stuck:
             try:

@@ -129,7 +129,7 @@ class ReferencePanel(QWidget):
         # 就让整条链路静默死掉（用户看到"点了 F7 什么都没发生"）。
         try:
             self._fill_corr_list()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.lbl_count.setText(f"结果渲染失败：{type(exc).__name__}: {exc}")
         # 通知编辑器把结果画成波浪线。这里发的坐标是**全文坐标**
         # （_checked_text 取自编辑器全文），与编辑器文档坐标天然对齐，
@@ -187,7 +187,7 @@ class ReferencePanel(QWidget):
         """
         try:
             return self._editor_getter() != getattr(self, "_checked_text", "")
-        except Exception:  # noqa: BLE001  取不到文本时按"已改动"处理，宁可不替换
+        except Exception:
             return True
 
     def _apply_one(self, *_):

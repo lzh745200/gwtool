@@ -58,7 +58,7 @@ class _FakeDoc:
         self._owner = owner
         self._fail_save = fail_save
 
-    def SaveAs2(self, path, FileFormat=16):        # noqa: N803
+    def SaveAs2(self, path, FileFormat=16):
         if self._fail_save:
             raise RuntimeError("模拟 SaveAs 失败")
         Path(path).write_text("ok", encoding="utf-8")

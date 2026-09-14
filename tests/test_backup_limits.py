@@ -89,7 +89,7 @@ def test_attachments_within_limit_all_packed_and_restored(tmp_db, data_dir, doc,
     assert rrep.ok is True and rrep.legacy is False
     assert rrep.restored_files == 2
     assert rrep.missing == [], "上限内的备份恢复后不该报缺附件"
-    for att, p in made:
+    for att, _stored in made:
         back = attachments.resolve(dao.get_attachment(att.id))
         assert back.exists() and back.stat().st_size == MB
 

@@ -91,7 +91,9 @@ def main() -> int:
             proc.kill()
 
     if fresh:
-        import shutil
+        # shutil 已在模块顶部导入：函数内再 import 一次会让函数作用域里的
+        # 名字与全局同名，静态检查（F823）会认为前面那次使用"引用了尚未赋值的
+        # 局部变量"，也容易被后人误读为两套来源。
         shutil.rmtree(data_dir, ignore_errors=True)
 
     print(f"\n===== 安装验收：{len(failures)} 项失败 =====")

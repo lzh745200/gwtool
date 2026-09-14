@@ -157,7 +157,7 @@ class LibraryPanel(QWidget):
         self.doc_list.clear()
         try:
             att_counts = dao.attachment_counts([d.id for d in docs])
-        except Exception:  # noqa: BLE001  附件数只是装饰，取不到不影响列表
+        except Exception:
             att_counts = {}
         for d in docs:
             label = f"{d.title}    [{d.file_type or '文本'}] {d.word_count}字"
@@ -365,7 +365,7 @@ class LibraryPanel(QWidget):
         try:
             dlg = AttachmentDialog(did, self, doc_title=d.title if d else "")
             dlg.exec()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"打开附件管理失败：{exc}")
             return
         self._reload_docs()          # 列表上的「附件N」标记要跟着变
@@ -375,7 +375,7 @@ class LibraryPanel(QWidget):
         try:
             dlg = RecycleBinDialog(self)
             dlg.exec()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warn(self, f"打开回收站失败：{exc}")
             return
         self.reload()                # 可能恢复了材料，分类计数一并刷新
@@ -392,7 +392,7 @@ class LibraryPanel(QWidget):
         for item in items:
             try:
                 dao.delete_document(item.data(Qt.UserRole))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 failed.append(f"{item.text()}：{exc}")
         self._reload_docs()
         if failed:

@@ -26,10 +26,10 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QDialog, QMenu  # noqa: E402
+from PySide6.QtWidgets import QDialog
 
-from gwtool.core import corrector  # noqa: E402
-from gwtool.ui.widgets import wait_for_threads  # noqa: E402
+from gwtool.core import corrector
+from gwtool.ui.widgets import wait_for_threads
 
 
 # ============================================================ 1. F7 纠错面板

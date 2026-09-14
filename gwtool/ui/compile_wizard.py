@@ -15,7 +15,7 @@ from ..core.template import DocTemplate, default_template
 from ..db import dao
 from ..paths import export_dir
 from .widgets import ThreadSafeDialog, info
-from .workers import BookletWorker, CompileWorker, PdfRenderWorker
+from .workers import BookletWorker, CompileWorker, PdfRenderWorker, _close_thread_conn
 
 
 class CompileWizard(ThreadSafeDialog, QWizard):
@@ -245,8 +245,13 @@ class CompileWizard(ThreadSafeDialog, QWizard):
                         ids, tpl, str(outdir), cover=cover,
                         progress_cb=lambda i, n: self_inner.progress.emit(i, n))
                     self_inner.done.emit(paths, failures)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     self_inner.error.emit(str(exc))
+                finally:
+                    # 批量汇编里每份材料都走 dao（thread-local 连接）：线程结束
+                    # 不关连接，-wal/-shm 句柄与连接登记项都会残留——长会话下
+                    # 既可能 too many open files，也会让恢复备份误判"被占用"。
+                    _close_thread_conn()
 
         self._batch_worker = _BatchThread(self)
         self.progress.setVisible(True)

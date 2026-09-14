@@ -133,10 +133,10 @@ def load_cedict(cur: sqlite3.Cursor) -> int:
             text = data.decode("utf-8", errors="replace")
             n = 0
             for line in text.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
+                raw_line = line.strip()
+                if not raw_line or raw_line.startswith("#"):
                     continue
-                m = re.match(r"^(\S+)\s+(\S+)\s+\[(.+?)\]\s+/(.+)/$", line)
+                m = re.match(r"^(\S+)\s+(\S+)\s+\[(.+?)\]\s+/(.+)/$", raw_line)
                 if not m:
                     continue
                 trad, simp, pinyin, eng = m.groups()
@@ -153,7 +153,7 @@ def load_cedict(cur: sqlite3.Cursor) -> int:
                     print(f"[seed] cedict {n} ...")
             if n > 0:
                 return n
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[seed] 下载失败({e})，尝试下一个源")
     return 0
 

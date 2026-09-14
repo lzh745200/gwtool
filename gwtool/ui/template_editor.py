@@ -325,7 +325,7 @@ class TemplateEditor(QDialog):
             painter.end()
             self.preview_label.setPixmap(QPixmap.fromImage(img))
             self.preview_label.resize(img.size())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.preview_label.setText(f"预览失败：{exc}")
 
 

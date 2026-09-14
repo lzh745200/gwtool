@@ -64,7 +64,7 @@ def test_all_menu_and_toolbar_actions_triggerable(win, qapp):
         try:
             act.trigger()
             qapp.processEvents()
-        except Exception as exc:                    # noqa: BLE001  逐个记录后统一断言
+        except Exception as exc:
             failed.append(f"{label}: {type(exc).__name__}: {exc}")
     assert not failed, "以下动作触发即崩：\n" + "\n".join(failed)
 

@@ -65,8 +65,13 @@ class CompareDialog(ThreadSafeDialog, QDialog):
             combo.addItem(f"文件：{Path(path).name}", ("file", path))
             combo.setCurrentIndex(combo.count() - 1)
 
-    def _text_of(self, combo: QComboBox) -> tuple[str, str]:
-        data = combo.currentData()
+    @staticmethod
+    def _text_of_data(data) -> tuple[str, str]:
+        """把（已在前台取好的）下拉框数据解析成 (标题, 正文)。
+
+        纯数据入口，供后台线程调用；**绝不**在这里读 QComboBox 控件
+        （跨线程访问 QObject 在麒麟/Wayland 下可能读到脏值或崩溃）。
+        """
         if not data:
             return "", ""
         kind, val = data
@@ -81,26 +86,38 @@ class CompareDialog(ThreadSafeDialog, QDialog):
 
     def _run(self):
         from .workers import FnWorker
-        t1, txt1 = self._text_of(self.combo_a)
-        t2, txt2 = self._text_of(self.combo_b)
-        if not txt1 and not txt2:
+        # 前台先取控件值：worker 里只碰纯数据
+        data_a = self.combo_a.currentData()
+        data_b = self.combo_b.currentData()
+        if not data_a or not data_b:
             self.lbl_stat.setText("请先选择两个有效文档。")
             return
-        # 文本抽取已在主线程完成（本地文件解析较快），diff 与 HTML 生成放后台
+        worker = getattr(self, "_worker", None)
+        if worker is not None and worker.isRunning():
+            self.lbl_stat.setText("上一次对比仍在进行，请稍候。")
+            return
+        # 文件解析（PDF 扫描件会整本 OCR，分钟级）与 diff 全放后台，
+        # 老实现把 parse_any 放在 GUI 线程上，选一个大 PDF 就整个窗口冻结。
         self.btn_run.setEnabled(False)
-        self.lbl_stat.setText("正在对比…")
-        self._worker = FnWorker(differ.diff_to_html, txt1, txt2,
-                                t1 or "文档一", t2 or "文档二", parent=self)
+        self.lbl_stat.setText("正在读取并对比（大文件解析可能稍久）…")
 
-        def on_ok(html):
-            self.browser.setHtml(html)
-            self.lbl_stat.setText("红色=删除/原文，绿色=新增/修改后；双栏对应。")
+        def work():
+            t1, txt1 = self._text_of_data(data_a)
+            t2, txt2 = self._text_of_data(data_b)
+            if not txt1 and not txt2:
+                return None
+            return differ.diff_to_html(txt1, txt2, t1 or "文档一", t2 or "文档二")
 
-        def on_done():
-            self.btn_run.setEnabled(True)
-
-        self._worker.ok.connect(on_ok)
+        self._worker = FnWorker(work, parent=self)
+        self._worker.ok.connect(self._on_diff_ok)
         self._worker.failed.connect(
             lambda m: self.lbl_stat.setText(f"对比失败：{m}"))
-        self._worker.finished.connect(on_done)
+        self._worker.finished.connect(lambda: self.btn_run.setEnabled(True))
         self._worker.start()
+
+    def _on_diff_ok(self, html):
+        if html is None:
+            self.lbl_stat.setText("请先选择两个有效文档。")
+            return
+        self.browser.setHtml(html)
+        self.lbl_stat.setText("红色=删除/原文，绿色=新增/修改后；双栏对应。")

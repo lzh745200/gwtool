@@ -87,12 +87,16 @@ def invalidate_cache() -> None:
 
 # ---------------------------------------------------------------- 依赖与状态
 def runtime_available() -> bool:
-    """onnxruntime 可导入？（结论缓存，见 _RUNTIME_CACHE）"""
+    """onnxruntime 可导入？（结论缓存，见 _RUNTIME_CACHE）
+
+    用 ``find_spec`` 探测而不是 ``import onnxruntime``：这里只想知道"在不在"，
+    而真正 import 一个几十 MB 的原生扩展代价很高（且失败时会留下半初始化状态）。
+    """
     global _RUNTIME_CACHE
     if _RUNTIME_CACHE is None:
         try:
-            import onnxruntime  # noqa: F401
-            _RUNTIME_CACHE = True
+            import importlib.util
+            _RUNTIME_CACHE = importlib.util.find_spec("onnxruntime") is not None
         except Exception:
             _RUNTIME_CACHE = False
     return _RUNTIME_CACHE
@@ -131,10 +135,12 @@ def set_setting(on: bool) -> None:
 def status_text() -> str:
     """给设置界面用的一句话状态。"""
     if not runtime_available():
-        return "未安装 onnxruntime —— 需要它才能启用（见 requirements-optional.txt）"
+        return ("缺少推理运行时 onnxruntime —— 未就绪、无法启用。"
+                "可用随程序附带该运行时的发行版（重启后生效），"
+                "或按 requirements-optional.txt 在有网机器取离线轮子拷入本机安装。")
     info = enhance_pack.installed_pack(_KIND)
     if info is None:
-        return "未导入精度增强包"
+        return "未导入精度增强包（点下方「导入增强包…」选择离线取得的本层 .zip）"
     if not enhance_pack.verify_installed(_KIND):
         return "增强包不完整（缺少 model.onnx 或 vocab.txt），请重新导入"
     state = "已开启" if _setting_on() else "已关闭"

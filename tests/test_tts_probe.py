@@ -35,7 +35,7 @@ def _require_real_sapi() -> None:
             import win32com.client
             # 与产品一致：默认标志即同步朗读；不抛异常即代表链路可用
             win32com.client.Dispatch("SAPI.SpVoice").Speak("测")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _SAPI_READY = False
             _SAPI_SKIP_REASON = (
                 f"SAPI 朗读链路不可用（无语音引擎/音频设备），跳过朗读用例：{exc}")

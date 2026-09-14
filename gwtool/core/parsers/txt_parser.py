@@ -47,20 +47,20 @@ def parse_txt(path: str) -> DocTree:
     tree = DocTree()
     first = True
     for line in text.splitlines():
-        line = line.strip()
-        if not line:
+        raw_line = line.strip()
+        if not raw_line:
             continue
         if first:
-            tree.title = line
+            tree.title = raw_line
             first = False
             # 首行若是明显标题行，也作为标题块
-            if _HEADING_RE.match(line) or len(line) <= 30:
-                tree.blocks.append(Block(type=HEADING, level=1, text=line))
+            if _HEADING_RE.match(raw_line) or len(raw_line) <= 30:
+                tree.blocks.append(Block(type=HEADING, level=1, text=raw_line))
             else:
-                tree.blocks.append(Block(type=PARAGRAPH, text=line))
+                tree.blocks.append(Block(type=PARAGRAPH, text=raw_line))
             continue
-        if _HEADING_RE.match(line) and len(line) <= 40:
-            tree.blocks.append(Block(type=HEADING, level=2, text=line))
+        if _HEADING_RE.match(raw_line) and len(raw_line) <= 40:
+            tree.blocks.append(Block(type=HEADING, level=2, text=raw_line))
         else:
-            tree.blocks.append(Block(type=PARAGRAPH, text=line))
+            tree.blocks.append(Block(type=PARAGRAPH, text=raw_line))
     return tree
