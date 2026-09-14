@@ -29,7 +29,9 @@ jobs:
           # 语义会随版本变化 —— 同一份源码会出现"本地绿、CI 红"（本项目已反复
           # 踩过此坑）。本地 venv 实测为 0.16.5，CI 必须与本地同版。
           pip install ruff==0.16.5
-          ruff check gwtool/ scripts/ tests/
+          # 与本地门禁同口径：本地跑 `ruff check .`（含入口 main.py），
+          # 这里若漏掉 main.py 就会出现"本地红、CI 绿"的标准不一致。
+          ruff check gwtool/ scripts/ tests/ main.py
 
       - name: 构建脚本护栏（行尾 + 批处理语法）
         shell: pwsh
@@ -160,10 +162,10 @@ jobs:
       - name: 安装依赖
         run: |
           "$PYBIN" -m pip install --upgrade pip
-          "$PYBIN" -m pip install "PySide6==6.8.0.2" -r requirements.txt ruff
+          "$PYBIN" -m pip install "PySide6==6.8.0.2" -r requirements.txt ruff==0.16.5
 
       - name: 静态检查（ruff）
-        run: ruff check gwtool/ scripts/ tests/
+        run: ruff check gwtool/ scripts/ tests/ main.py
 
       - name: Shell 脚本护栏（语法 + 行尾）
         shell: bash

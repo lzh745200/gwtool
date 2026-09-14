@@ -18,7 +18,7 @@ from pathlib import Path
 # 确保源码目录可导入（打包后不需要）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gwtool import paths  # noqa: E402
+from gwtool import paths
 
 
 def _parse_args() -> argparse.Namespace:
@@ -76,7 +76,7 @@ _cm_rc = _handle_context_menu()
 if _cm_rc is not None:
     sys.exit(_cm_rc)
 
-from gwtool.app import run  # noqa: E402
+from gwtool.app import run
 
 if __name__ == "__main__":
     sys.exit(run(import_path=_args.import_path))
