@@ -2,7 +2,7 @@
 """主窗口：三栏布局（资料库 | 编辑器 | 纠错与参考）+ 全部功能入口。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, QTimer, Qt
+from PySide6.QtCore import QSize, QThread, QTimer, Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
                                QMainWindow, QSplitter, QStatusBar)
@@ -25,7 +25,41 @@ from .material_dialogs import RecycleBinDialog
 from .reference_panel import ReferencePanel
 from .registry_dialog import RegistryDialog
 from .template_editor import TemplateEditor
-from .widgets import ask, info, missing_official_fonts, warn
+from .widgets import (ask, info, missing_official_fonts, wait_for_threads, warn)
+
+
+def _wait_all_threads(win) -> list[str]:
+    """等 win（含其子对象）以及所有打开对话框里的 QThread 收工。
+
+    返回超时未退的线程名（供 UI 提示用户）。模块级函数而非实例方法，
+    这样 closeEvent 的关键逻辑才能被轻量替身驱动的测试覆盖到。
+    """
+    stuck = wait_for_threads(win)
+    app = QApplication.instance()
+    if app is None:
+        return stuck
+    # 对话框自己起的 worker 挂在对话框（而非主窗口）上，这里一并兜住：
+    # 用户可能把对话框开着就点了主窗口的关闭。
+    win_finder = getattr(win, "findChildren", None)
+    seen = {id(t) for t in win_finder(QThread)} if callable(win_finder) else set()
+    for w in app.findChildren(QDialog):
+        try:
+            children = w.findChildren(QThread)
+        except RuntimeError:
+            continue
+        for th in children:
+            if id(th) in seen:
+                continue
+            seen.add(id(th))
+            try:
+                if th.isRunning():
+                    if hasattr(th, "stop"):
+                        th.stop()
+                    if not th.wait(10000):
+                        stuck.append(type(th).__name__)
+            except RuntimeError:
+                continue
+    return stuck
 
 
 class MainWindow(QMainWindow):
@@ -541,11 +575,31 @@ class MainWindow(QMainWindow):
             f"输出目录：{export_dir()} | 数据目录：{db_path().parent}", 10000)
 
     # ------------------------------------------------ 关闭
+    def _wait_for_background_threads(self) -> list[str]:
+        """退出前等所有后台 QThread 收工；返回仍在跑的线程名（超时未退）。
+
+        实现放在模块级 ``_wait_all_threads(win)``：退出路径的关键逻辑不该是
+        实例方法——测试里用轻量替身驱动 closeEvent 时会因为替身没有这个方法
+        而直接 AttributeError，把"退出备份"这类关键行为挡在测试之外。
+
+        为什么必须等：本程序的后台 worker 大多以 self（或子控件）为 parent，
+        窗口关闭 → 解释器销毁 MainWindow → 子对象级联销毁 → 仍在运行的
+        QThread 被析构，Qt 直接 qFatal 强杀进程。实测退出码
+        -1073740791 (0xC0000409)，stderr 只有一句
+        "QThread: Destroyed while thread is still running"。
+        触发场景很日常：F7 纠错、相似查重、PDF 预览渲染还没跑完就关窗口。
+        老实现只对 TTS 一个 worker 做了 stop+wait。
+        """
+        return _wait_all_threads(self)
+
     def closeEvent(self, event):
         # 未保存修改三选：保存 / 放弃 / 取消退出
         if not self.editor.confirm_discard_changes():
             event.ignore()
             return
+        # 先停后台线程再备份：备份要独占数据库文件（Windows 上被占住就替换不了），
+        # 而且线程若在进程退出时还活着会直接崩掉退出流程。
+        stuck = _wait_all_threads(self)
         # 退出自动备份：走自动档（附件预算默认 8 MB，可在设置里改），
         # 退出路径的耗时因此不随附件增多而失控。
         # 这里刻意**同步**执行、不开后台线程：进程马上就要退出，线程若还在写 zip，
@@ -555,6 +609,19 @@ class MainWindow(QMainWindow):
         if dao.get_setting("auto_backup", "1") == "1":
             try:
                 create_backup_detailed(note="退出自动备份", mode=MODE_AUTO)
+            except Exception as exc:  # noqa: BLE001
+                # 不能静默：用户会以为数据已备份。落日志 + 最后再兜一次提示，
+                # 但绝不拦住退出（关不掉程序比备份失败更糟）。
+                try:
+                    from ..core.backup import _append_log
+                    _append_log([f"退出自动备份失败：{type(exc).__name__}: {exc}"])
+                except Exception:
+                    pass
+        if stuck:
+            try:
+                warn(self, "以下后台任务未能在 10 秒内结束，程序将退出：\n  "
+                           + "\n  ".join(stuck)
+                           + "\n\n如果刚在生成 PDF/汇编，请退出后检查输出目录是否完整。")
             except Exception:
                 pass
         if self._tts_worker is not None and self._tts_worker.isRunning():

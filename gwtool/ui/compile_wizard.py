@@ -14,11 +14,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout,
 from ..core.template import DocTemplate, default_template
 from ..db import dao
 from ..paths import export_dir
-from .widgets import info
+from .widgets import ThreadSafeDialog, info
 from .workers import BookletWorker, CompileWorker, PdfRenderWorker
 
 
-class CompileWizard(QWizard):
+class CompileWizard(ThreadSafeDialog, QWizard):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("一键汇编")
@@ -178,25 +178,35 @@ class CompileWizard(QWizard):
         if self.chk_booklet.isChecked() and not self.chk_pdf.isChecked():
             self.chk_pdf.setChecked(True)
         tpl = self.load_template()
-        base = export_dir() / (self.ed_title.text().strip() or "汇编成果")
-        base = Path(str(base))
-        base.parent.mkdir(parents=True, exist_ok=True)
+        # 用**字符串拼接**扩展名，绝不用 Path.with_suffix()：
+        # with_suffix 会把最后一个点之后的内容当扩展名替换掉，
+        # 标题里的小圆点（日期、版本号）会被整段吞掉 —— 实测
+        # 「关于2026.08重点工作的通知」→「关于2026.docx」、
+        # 「报告 v1.2 终稿」→「报告 v1.docx」，用户拿到一个名字莫名其妙
+        # 甚至互相覆盖的产物。
+        title = self.ed_title.text().strip() or "汇编成果"
+        out_base = export_dir() / title
+        out_base.parent.mkdir(parents=True, exist_ok=True)
+        stem = str(out_base)
         any_output = self.chk_docx.isChecked() or self.chk_pdf.isChecked()
         if not any_output:
             info(self, "请至少勾选一种输出。")
             return
         # 防静默覆盖：同名输出已存在时追加时间戳
-        base_name = base.name
-        if ((self.chk_docx.isChecked() and base.with_suffix(".docx").exists())
-                or (self.chk_pdf.isChecked() and base.with_suffix(".pdf").exists())):
+        if ((self.chk_docx.isChecked() and Path(stem + ".docx").exists())
+                or (self.chk_pdf.isChecked() and Path(stem + ".pdf").exists())):
             from datetime import datetime as _dt
-            base = Path(str(export_dir() / f"{base_name}_"
-                            f"{_dt.now().strftime('%Y%m%d_%H%M%S')}"))
+            stem = str(export_dir() / f"{title}_"
+                       f"{_dt.now().strftime('%Y%m%d_%H%M%S')}")
             info(self, "同名输出已存在，本次输出将追加时间戳。")
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)  # 忙碌指示
         self.btn_start.setEnabled(False)
         self.lbl_result.setText("正在生成…")
+        # 清掉上一轮的结果：否则只出 docx 时横幅仍会报告上一轮的 PDF 路径
+        self.last_docx = ""
+        self.last_pdf = ""
+        self.last_booklet = ""
 
         if self.chk_docx.isChecked():
             tpl2 = tpl
@@ -205,13 +215,13 @@ class CompileWizard(QWizard):
             tpl2.cover.org = self.ed_org.text().strip()
             tpl2.cover.date = self.ed_date.text().strip()
             tpl2.insert_material_titles = self.chk_titles.isChecked()
-            out_docx = str(base.with_suffix(".docx"))
+            out_docx = stem + ".docx"
             self._worker = CompileWorker(ids, [], tpl2, out_docx, parent=self)
             self._worker.done.connect(lambda p: self._after_docx(p, tpl, ids))
             self._worker.error.connect(self._fail)
             self._worker.start()
         elif self.chk_pdf.isChecked():
-            self._run_pdf(ids, tpl, base)
+            self._run_pdf(ids, tpl, stem)
 
     def _run_batch(self, ids: list[int]):
         """批量模式：后台线程逐份生成。"""
@@ -277,17 +287,20 @@ class CompileWizard(QWizard):
     def _after_docx(self, path: str, tpl: DocTemplate, ids):
         self.last_docx = path
         if self.chk_pdf.isChecked():
-            self._run_pdf(ids, tpl, Path(path).with_suffix(""))
+            # 去掉扩展名同样用字符串切片：with_suffix("") 会把标题里最后一个
+            # 点之后的内容当成扩展名删掉（"关于2026.08…" -> "关于2026"）。
+            stem = path[:-len(".docx")] if path.lower().endswith(".docx") else path
+            self._run_pdf(ids, tpl, stem)
         else:
             self._finish(path)
 
-    def _run_pdf(self, ids, tpl: DocTemplate, base: Path):
+    def _run_pdf(self, ids, tpl: DocTemplate, stem):
         tpl.cover.enabled = self.chk_cover.isChecked()
         tpl.cover.title = self.ed_title.text().strip()
         tpl.cover.org = self.ed_org.text().strip()
         tpl.cover.date = self.ed_date.text().strip()
         tpl.insert_material_titles = self.chk_titles.isChecked()
-        out_pdf = str(base.with_suffix(".pdf"))
+        out_pdf = f"{stem}.pdf" if not str(stem).lower().endswith(".pdf") else str(stem)
         self._pdf_worker = PdfRenderWorker(ids, [], tpl, out_pdf, parent=self)
         self._pdf_worker.done.connect(self._after_pdf)
         self._pdf_worker.error.connect(self._fail)
@@ -296,7 +309,8 @@ class CompileWizard(QWizard):
     def _after_pdf(self, path: str):
         self.last_pdf = path
         if self.chk_booklet.isChecked():
-            out_bk = str(Path(path).with_name(Path(path).stem + "_小册子A3.pdf"))
+            stem = path[:-len(".pdf")] if path.lower().endswith(".pdf") else path
+            out_bk = f"{stem}_小册子A3.pdf"
             self._booklet_worker = BookletWorker(path, out_bk, parent=self)
             self._booklet_worker.done.connect(lambda p: self._finish(path, p))
             self._booklet_worker.error.connect(self._fail)
@@ -310,7 +324,10 @@ class CompileWizard(QWizard):
         msg = []
         if docx_path:
             msg.append(f"Word 文档：{docx_path}")
-        if self.last_pdf:
+        # 只在**本轮**真的生成了 PDF 时才报告 PDF 路径。
+        # last_pdf 是跨轮次的字段，若不清空/不判断，用户第二次取消勾选 PDF
+        # 只出 docx，横幅仍会显示上一轮那份 PDF，让人以为文件也重新生成了。
+        if self.last_pdf and self.chk_pdf.isChecked():
             msg.append(f"A4 PDF：{self.last_pdf}")
         if booklet_path:
             msg.append(f"小册子：{booklet_path}")

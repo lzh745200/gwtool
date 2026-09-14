@@ -13,6 +13,35 @@ from gwtool.core import corrector  # noqa: E402
 from gwtool import paths  # noqa: E402
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_data_dir(tmp_path_factory):
+    """**整个测试会话**的数据目录都不许指向真实用户目录。
+
+    为什么必须是会话级 autouse：`tmp_db` 只隔离用到它的测试，而
+    `test_correct_dialog.py` 里有 4 个测试只用 `corrector`、没要 `tmp_db`，
+    于是它们读的是 `%APPDATA%/gwtool/gwtool.db` —— **开发者自己的真实库**。
+    后果分两层：
+
+      1. 测试结果取决于本机用户数据。本机把「精度增强包」的 L4/L5 打开过，
+         `corrector.check_text("项目布署情况")` 就多出一条 目→眈 的神经纠错，
+         4 个测试当场失败；换台没装增强包的机器又是全绿。
+      2. 测试还会往真实库里写设置/文档，污染用户数据。
+
+    CI 一直绿纯属 CI 没有那份用户数据 —— 这是最典型的环境依赖型假绿，
+    必须在最外层堵住，而不是逐个测试补 `tmp_db`。
+    """
+    data_dir = tmp_path_factory.mktemp("session_data") / "gwtool_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(paths, "_override", data_dir)
+    dbconn.configure(data_dir / "gwtool.db")
+    # 增强层默认关闭：它的开关存在数据库里，而"是否有增强包"取决于本机
+    # ~/…/gwtool/enhance 目录。测试必须与这两者都无关，否则同一份代码
+    # 在不同机器上给出不同结果。
+    yield
+    monkey.undo()
+
+
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
     """每个测试使用独立临时数据库与隔离的数据目录。

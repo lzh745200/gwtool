@@ -12,8 +12,33 @@ from .template import DocTemplate
 from ..db import dao
 
 
+# Windows 保留设备名：以此为主名的文件（含带扩展名的 CON.docx）根本落不到
+# 磁盘上——CON/NUL/COM1 会"写入成功"但内容进设备、文件不存在，
+# PRN/LPT1 直接抛 FileNotFoundError。批量汇编按标题命名文件，
+# 材料标题恰好是这类名字时用户会拿到"成功"却打不开的产物。
+_RESERVED_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
 def safe_filename(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|\n\r]', "_", name)[:80] or "未命名"
+    """把材料标题清洗成可安全落盘的单段文件名（跨平台一致）。
+
+    只替换非法字符是不够的：Windows 还有两类"看着合法但写不进去"的名字——
+    保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）和以空格或点结尾的名字。
+    两类都要处理，否则批量汇编会静默产出打不开的公文。
+    """
+    s = re.sub(r'[\\/:*?"<>|\n\r\t]', "_", str(name or ""))
+    # Windows 不允许文件名以空格或点结尾（资源管理器会悄悄截掉，导致
+    # 调用方记下的路径与实际文件不一致）
+    s = s.rstrip(" .").strip()[:80].strip()
+    if not s:
+        return "未命名"
+    if s.split(".")[0].upper() in _RESERVED_DEVICE_NAMES:
+        s = "_" + s
+    return s
 
 
 def batch_compile_each(doc_ids: list[int], template: DocTemplate, out_dir: str,
@@ -284,7 +309,8 @@ def _apply_hits(text: str, hits: list[CorrectHit]
 
 
 def _apply_to_blocks(blocks_json: str, old_text: str,
-                     confirmed: list[tuple[int, int, str, str]]) -> str:
+                     confirmed: list[tuple[int, int, str, str]],
+                     stats: dict | None = None) -> str:
     """把已确认的命中同步进结构化块，汇编出的公文才是改后的文本。
 
     dao.update_document_content(blocks_json=None) 会把块清成 '[]'，汇编随即退回
@@ -297,11 +323,16 @@ def _apply_to_blocks(blocks_json: str, old_text: str,
 
     此前只按 (错, 对) 词对过滤逐块重跑纠错，位置信息全丢：正文按位置只改了
     确认过的那一处，块却把全文同词全改，同一篇文档的正文与块出现两个版本，
-    汇编出的公文与资料库预览对不上。任何异常都退回原块，宁可不改也不把结构
-    写坏。
+    汇编出的公文与资料库预览对不上。
+
+    ``stats`` 是出参：块没同步（定位不到）或块结构本身异常时计数/记录原因，
+    由 _apply_plans 上抛给用户。老实现一律静默退回原块，于是"正文已改、
+    汇编出的公文仍是错字"这件事对用户完全不可见 —— 静默失败比报错更坏。
     """
     if not confirmed or not blocks_json or not old_text:
         return blocks_json or "[]"
+    if stats is None:
+        stats = {}
     try:
         import json
 
@@ -320,21 +351,34 @@ def _apply_to_blocks(blocks_json: str, old_text: str,
         cursor = 0
 
         def locate(text: str) -> int:
-            """返回 text 在正文中的起点（从当前游标起找）；找不到返回 -1。"""
+            """返回 text 在正文中的起点（从当前游标起找）；找不到返回 -1。
+
+            先精确匹配，再退一步用"去掉首尾空白"的变体匹配：块文本与正文
+            经常只差首尾空白（导入解析/富文本残留的 ``\\u3000``、行尾空格），
+            逐字相等就落空的情况下，老实现直接放弃同步 —— 结果正文改了、
+            结构化块没改，汇编出的公文里错字原封不动。空白差异不影响
+            块内字符偏移（首尾空白不参与替换坐标），所以这种回退是安全的。
+            """
             nonlocal cursor
-            idx = old_text.find(text, cursor)
-            if idx < 0:
-                idx = old_text.find(text)
-            if idx < 0:
-                return -1
-            cursor = idx + len(text)
-            return idx
+            for cand in (text, text.strip(), text.strip("\u3000 \t\r\n")):
+                if not cand:
+                    continue
+                idx = old_text.find(cand, cursor)
+                if idx < 0:
+                    idx = old_text.find(cand)
+                if idx >= 0:
+                    cursor = idx + len(cand)
+                    # 返回"块文本"在正文中的起点：上面命中的是去空白变体，
+                    # 它相对原块文本的偏移量需要补回来，否则替换坐标会整体偏移
+                    return idx - text.find(cand)
+            return -1
 
         def fix(text):
             if not isinstance(text, str) or not text:
                 return text
             base = locate(text)
             if base < 0:
+                stats["unsynced"] = stats.get("unsynced", 0) + 1
                 return text
             picked = [(c, by_span[(base + c.start, base + c.end)])
                       for c in check_text(text)
@@ -357,7 +401,9 @@ def _apply_to_blocks(blocks_json: str, old_text: str,
                 blk["rows"] = [[fix(cell) for cell in row] if isinstance(row, list)
                                else row for row in rows]
         return json.dumps(data, ensure_ascii=False)
-    except Exception:  # noqa: BLE001  块结构异常不影响正文已改的成果
+    except Exception as exc:  # noqa: BLE001  块结构异常不影响正文已改的成果
+        # 不能静默：块没同步 -> 汇编出的公文仍是改前的文字，用户必须知道
+        stats["error"] = f"{type(exc).__name__}: {exc}"
         return blocks_json
 
 
@@ -386,10 +432,24 @@ def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectRe
                 dao.add_snapshot(d.id, d.title, d.content_text, reason="批量纠错前")
             except Exception:  # noqa: BLE001
                 pass
-            blocks = _apply_to_blocks(d.blocks_json, old_text, confirmed)
+            blocks_stats: dict = {}
+            blocks = _apply_to_blocks(d.blocks_json, old_text, confirmed,
+                                      stats=blocks_stats)
             dao.update_document_content(d.id, d.title, new_text, blocks_json=blocks)
             result.applied.append(d.id)
             result.changes += applied
+            # 块未同步 = 汇编出的公文仍是改前的文字。正文已经改了，无法整体回滚
+            # （用户确认过的批改不该因为一块对不上就全丢弃），但必须让用户知道：
+            # 记进 failures，预览页会按"需人工处理"列出来。
+            if blocks_stats.get("unsynced"):
+                result.failures.append(
+                    (title, f"正文已修正，但有 {blocks_stats['unsynced']} 个结构化段落"
+                            "定位失败未能同步，汇编导出可能仍是改前文字；"
+                            "请打开该文档核对后再汇编"))
+            elif blocks_stats.get("error"):
+                result.failures.append(
+                    (title, "正文已修正，但结构化块同步失败（"
+                            f"{blocks_stats['error']}），汇编导出可能仍是改前文字"))
         except Exception as exc:  # noqa: BLE001  单篇失败不中断整批
             result.failures.append((title, str(exc)))
         finally:

@@ -283,9 +283,19 @@ def test_tts_availability_report():
 
 # ================================================================ F16 便携
 def test_portable_paths(tmp_path, monkeypatch):
+    """便携模式：数据目录 = 程序同级 Data/。
+
+    必须先把 conftest 的会话级数据目录覆盖清掉 —— 覆盖的优先级高于便携模式，
+    留着它测出来的是"覆盖目录"，不是便携目录。
+    """
     from gwtool import paths
     monkeypatch.setattr(paths, "_exe_base", lambda: tmp_path)
-    paths.set_portable(True)
-    d = paths.app_data_dir()
-    assert d == tmp_path / "Data"
-    paths.set_portable(False)
+    saved = paths._override
+    try:
+        paths.set_app_data_dir(None)
+        paths.set_portable(True)
+        d = paths.app_data_dir()
+        assert d == tmp_path / "Data"
+    finally:
+        paths.set_portable(False)
+        paths.set_app_data_dir(saved)

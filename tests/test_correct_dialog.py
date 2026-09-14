@@ -178,8 +178,16 @@ def test_dialog_file_mode_preserves_structure(tmp_db, qapp, monkeypatch):
         "gwtool.ui.correct_dialog.QFileDialog.getOpenFileName",
         staticmethod(lambda *a, **k: (str(src), "")))
     dlg.pick_file()
+    # 解析现在跑在后台线程里（单个 0.1MB docx 实测要 3.78s，放 GUI 线程会冻结
+    # 整个窗口）。ok 信号是跨线程排队投递的，必须等线程结束再抽一次事件队列，
+    # 否则 _on_file_parsed 还没跑，_blocks 仍是空表。
+    if dlg._worker is not None:
+        dlg._worker.wait(30000)
+    for _ in range(5):
+        qapp.processEvents()
     kinds = [b["kind"] for b in dlg._blocks]
-    assert "heading" in kinds and "table" in kinds
+    assert "heading" in kinds and "table" in kinds, \
+        f"文件解析结果应保留标题/表格结构，实得 {kinds}"
 
     _drain(dlg)
     dlg._on_checked(_scan_blocks(dlg._blocks))

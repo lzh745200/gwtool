@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sqlite3
 import sys
@@ -30,7 +31,15 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 
 
 def main() -> int:
+    if len(sys.argv) < 2:
+        print("用法：python scripts/acceptance_install.py <安装目录>\n"
+              "      例：python scripts/acceptance_install.py "
+              "\"%LOCALAPPDATA%\\Programs\\gwtool\"", file=sys.stderr)
+        return 2
     root = Path(sys.argv[1]).resolve()
+    if not root.is_dir():
+        print(f"错误：安装目录不存在：{root}", file=sys.stderr)
+        return 2
     print(f"== 安装验收：{root}")
     exe = root / "gwtool.exe"
     if not check("gwtool.exe 已安装", exe.is_file()):
@@ -46,8 +55,11 @@ def main() -> int:
 
     print("\n-- 启动实测 --")
     data_dir = root / "Data"
-    fresh = not data_dir.exists()
+    # 无条件清理：残留的便携数据库会让"首启动"变成读旧数据（假通过）
+    if data_dir.exists():
+        shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(exist_ok=True)
+    fresh = True
     started = time.time()
     proc = subprocess.Popen([str(exe), "--portable"], cwd=str(root),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

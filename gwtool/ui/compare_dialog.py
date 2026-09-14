@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
 from ..core import differ
 from ..core.importer import parse_any
 from ..db import dao
+from .widgets import ThreadSafeDialog
 
 
-class CompareDialog(QDialog):
+class CompareDialog(ThreadSafeDialog, QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("文档对比")

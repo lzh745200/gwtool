@@ -59,18 +59,28 @@ def compile_docx(req: CompileRequest) -> str:
 # ------------------------------------------------------------------ PDF 输出
 def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
     """docx -> PDF。离线策略：优先调用本机 Word/WPS COM（Windows），
-    其次 LibreOffice；都不可用则抛出提示（可用内置 PDF 渲染器替代）。"""
+    其次 LibreOffice；都不可用则抛出提示（可用内置 PDF 渲染器替代）。
+
+    两处收尾都不能省：
+      - LibreOffice 分支的临时目录必须 rmtree（老实现每次转 PDF 都在 %TEMP%
+        留一个 gwtool_pdf_* 目录，批量转 200 份就是 200 个残留目录）；
+      - COM 分支必须 finally 里 Quit + Close，否则 SaveAs2 抛异常时会留下
+        看不见的 WPS/Word 后台进程，反复导出后进程越堆越多。
+    """
     out_pdf = out_pdf or str(Path(docx_path).with_suffix(".pdf"))
     if shutil.which("soffice") or shutil.which("libreoffice"):
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         outdir = tempfile_dir()
-        subprocess.run([soffice, "--headless", "--convert-to", "pdf",
-                        "--outdir", outdir, docx_path],
-                       capture_output=True, timeout=180, check=False)
-        produced = Path(outdir) / (Path(docx_path).stem + ".pdf")
-        if produced.exists():
-            shutil.move(str(produced), out_pdf)
-            return out_pdf
+        try:
+            subprocess.run([soffice, "--headless", "--convert-to", "pdf",
+                            "--outdir", outdir, docx_path],
+                           capture_output=True, timeout=180, check=False)
+            produced = Path(outdir) / (Path(docx_path).stem + ".pdf")
+            if produced.exists():
+                shutil.move(str(produced), out_pdf)
+                return out_pdf
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
     if os.name == "nt":
         try:
             import win32com.client  # type: ignore
@@ -78,17 +88,29 @@ def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
             pass
         else:
             for progid in ("kwps.Application", "wps.Application", "Word.Application"):
+                app = None
+                doc = None
                 try:
                     app = win32com.client.Dispatch(progid)
                     app.Visible = False
                     doc = app.Documents.Open(str(Path(docx_path).resolve()), ReadOnly=True)
                     doc.SaveAs2(str(Path(out_pdf).resolve()), FileFormat=17)  # wdFormatPDF
-                    doc.Close(False)
-                    app.Quit()
                     if Path(out_pdf).exists():
                         return out_pdf
                 except Exception:
                     continue
+                finally:
+                    # 顺序与 COM 约定一致：先关文档再退应用；任一步失败都继续退应用
+                    if doc is not None:
+                        try:
+                            doc.Close(False)
+                        except Exception:
+                            pass
+                    if app is not None:
+                        try:
+                            app.Quit()
+                        except Exception:
+                            pass
     raise RuntimeError(
         "本机未找到可用的 docx->PDF 转换组件（WPS/Word/LibreOffice）。\n"
         "请使用程序内置的「PDF 预览/导出」功能（内置渲染器直接生成 PDF）。")

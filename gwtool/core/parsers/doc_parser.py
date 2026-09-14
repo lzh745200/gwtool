@@ -90,14 +90,24 @@ def _convert_via_com(path: str) -> str | None:
         return None
     for progid in ("kwps.Application", "wps.Application", "Word.Application"):
         app = doc = None
+        outdir = None
         try:
             app = win32com.client.Dispatch(progid)
             app.Visible = False
             doc = app.Documents.Open(str(Path(path).resolve()), ReadOnly=True)
-            out = Path(tempfile.gettempdir()) / (Path(path).stem + "_conv.docx")
+            # 独立临时目录：调用方读完就 rmtree（见 _extract_text）。
+            # 老实现直接写 %TEMP%\<stem>_conv.docx 且从不删除，导入多少 .doc
+            # 就在用户临时目录里留多少文件；同名 stem 之间还会互相覆盖，
+            # 并发导入两个同名文件时可能读到对方的内容。
+            outdir = tempfile.mkdtemp(prefix="gwtool_doccom_")
+            out = Path(outdir) / (Path(path).stem + "_conv.docx")
             doc.SaveAs2(str(out), FileFormat=16)  # 16 = wdFormatDocumentDefault(docx)
-            return str(out)
+            if out.exists():
+                return outdir          # 目录交给调用方清理
+            raise OSError("转换未产出文件")
         except Exception:
+            if outdir:
+                shutil.rmtree(outdir, ignore_errors=True)
             continue
         finally:
             # 顺序反过来关：先文档后应用；任何一步失败都不能挡住后续清理，
@@ -117,6 +127,7 @@ def _convert_via_com(path: str) -> str | None:
 
 
 def _convert_via_soffice(path: str) -> str | None:
+    """soffice 转 docx，返回**产物所在临时目录**（由调用方负责 rmtree）。"""
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         return None
@@ -126,30 +137,47 @@ def _convert_via_soffice(path: str) -> str | None:
             [soffice, "--headless", "--convert-to", "docx", "--outdir", outdir, path],
             capture_output=True, timeout=120, check=False)
         out = Path(outdir) / (Path(path).stem + ".docx")
-        return str(out) if out.exists() else None
+        if out.exists():
+            return outdir
+        shutil.rmtree(outdir, ignore_errors=True)
+        return None
     except Exception:
+        shutil.rmtree(outdir, ignore_errors=True)
         return None
 
 
 # ------------------------------------------------------------------ 纯Python解析
 def _extract_text(path: str) -> str:
-    # 1) COM 完美转换
-    conv = _convert_via_com(path)
-    if conv:
-        from .docx_parser import parse_docx
-        text = parse_docx(conv).plain_text()
-        if text.strip():
-            return text
-        # WPS 对 FIB 损坏的 doc 可能“成功打开”却产出空文档 —— 空结果不算
-        # 成功，继续降级（真实探测发现：此时纯 Python 路径本可救回全文）。
-        # 真为空文档时后面 raw_scan 也返回空，无额外代价。
+    # 1) COM 完美转换。转换产物落在独立临时目录里，读完即删——老实现把
+    #    <stem>_conv.docx 直接写进 %TEMP% 根目录且永不清理，批量导入 200 个
+    #    .doc 就在用户临时目录里留 200 个文件。
+    import shutil as _shutil
+    conv_dir = _convert_via_com(path)
+    if conv_dir:
+        try:
+            conv = str(Path(conv_dir) / (Path(path).stem + "_conv.docx"))
+            if Path(conv).exists():
+                from .docx_parser import parse_docx
+                text = parse_docx(conv).plain_text()
+                if text.strip():
+                    return text
+            # WPS 对 FIB 损坏的 doc 可能“成功打开”却产出空文档 —— 空结果不算
+            # 成功，继续降级（真实探测发现：此时纯 Python 路径本可救回全文）。
+            # 真为空文档时后面 raw_scan 也返回空，无额外代价。
+        finally:
+            _shutil.rmtree(conv_dir, ignore_errors=True)
     # 2) LibreOffice
-    conv = _convert_via_soffice(path)
-    if conv:
-        from .docx_parser import parse_docx
-        text = parse_docx(conv).plain_text()
-        if text.strip():
-            return text
+    conv_dir = _convert_via_soffice(path)
+    if conv_dir:
+        try:
+            conv = str(Path(conv_dir) / (Path(path).stem + ".docx"))
+            if Path(conv).exists():
+                from .docx_parser import parse_docx
+                text = parse_docx(conv).plain_text()
+                if text.strip():
+                    return text
+        finally:
+            _shutil.rmtree(conv_dir, ignore_errors=True)
     # 3) 纯 Python 分片表解析
     try:
         return _extract_text_olefile(path)
@@ -214,7 +242,12 @@ def _parse_clx(clx: bytes) -> list[tuple[int, int, int]]:
             lcb = struct.unpack_from("<I", clx, i + 1)[0]
             plc = clx[i + 5:i + 5 + lcb]
             count = (lcb - 4) // 12  # n+1 个 CP(4B) + n 个 PCD(8B)
-            cps = struct.unpack_from("<%dI" % (count + 1), plc, 0)
+            if count <= 0:
+                # 明确报错而不是 return []：返回空表会被上层当成
+                # "解析成功、只是没有内容"，把结构损坏伪装成空文档，
+                # 排查时完全看不到真实原因（老实现正是如此）。
+                raise ValueError(f"CLX 分片数异常（count={count}，lcb={lcb}）")
+            cps = struct.unpack_from(f"<{count + 1}I", plc, 0)
             out = []
             base = 4 * (count + 1)
             # PCD 布局（Word97）：2B 标志位 + 4B fc + 2B prm，共 8 字节。

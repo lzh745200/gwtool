@@ -2,6 +2,7 @@
 """WPS 格式（.wps）支持：内容嗅探路由、OOXML 形态、纯文本降级、注册与过滤。"""
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 
@@ -155,17 +156,55 @@ def test_doc_garbage_never_reaches_com(tmp_db, tmp_path):
 
 
 def test_doc_com_quits_word_on_success(tmp_db, monkeypatch):
-    """成功转换：只派发一个实例，且文档被 Close、应用被 Quit。"""
+    """成功转换：只派发一个实例，文档被 Close、应用被 Quit。
+
+    返回值契约：_convert_via_com 现在返回**产物所在临时目录**（而不是
+    直接落在 %TEMP% 根目录的文件路径），由调用方 _extract_text 读完即 rmtree ——
+    老实现每次转换都在用户临时目录留一个 <stem>_conv.docx 永不清理，
+    且同名 stem 并发导入时会互相覆盖。
+    """
     dp = _patch_com(monkeypatch, fail_save=False)
     out = dp._convert_via_com("示例.doc")
     try:
-        assert out and Path(out).exists()
+        assert out, "应返回临时目录"
+        outdir = Path(out)
+        assert outdir.is_dir()
+        assert outdir.name.startswith("gwtool_doccom_"), f"目录前缀不符：{outdir}"
+        assert (outdir / "示例_conv.docx").is_file(), "转换产物应落在该目录内"
         assert len(_FakeApp.instances) == 1, "成功路径不该反复派发"
         assert _FakeApp.instances[0].quit_called, "转换完没 Quit，漏了进程"
         assert _FakeApp.instances[0].doc_closed, "文档没 Close"
     finally:
-        if out and Path(out).exists():
-            Path(out).unlink()
+        if out:
+            shutil.rmtree(out, ignore_errors=True)
+
+
+def test_convert_via_com_output_cleaned_after_extract(tmp_db, monkeypatch):
+    """转换产物读完后必须被清掉：不返回裸文件路径让调用方自己猜。
+
+    `_convert_via_com` 现在返回**临时目录**，`_extract_text` 用 try/finally
+    在读完（或解析失败）后 rmtree。这里只验契约本身：目录存在且含产物，
+    清理责任明确落在调用方 —— 由 test_doc_com_quits_word_on_success 与
+    本测试共同覆盖。老实现把 <stem>_conv.docx 直接写进 %TEMP% 根目录且
+    永不删除，导入多少 .doc 就留多少文件。
+    """
+    import tempfile as _tempfile
+
+    dp = _patch_com(monkeypatch, fail_save=False)
+    before = {p.name for p in Path(_tempfile.gettempdir()).glob("gwtool_doccom_*")}
+    out = dp._convert_via_com("示例.doc")
+    try:
+        assert out is not None
+        assert Path(out).is_dir()
+        assert (Path(out) / "示例_conv.docx").is_file()
+        # 产物目录名唯一（mkdtemp），不会与并发导入的同名 stem 互相覆盖
+        now = {p.name for p in Path(_tempfile.gettempdir()).glob("gwtool_doccom_*")}
+        assert len(now - before) == 1, f"应恰好新增一个唯一目录：{sorted(now - before)}"
+    finally:
+        if out:
+            shutil.rmtree(out, ignore_errors=True)
+    after = {p.name for p in Path(_tempfile.gettempdir()).glob("gwtool_doccom_*")}
+    assert after <= before, f"清理后不应有残留：{sorted(after - before)}"
 
 
 def test_doc_com_quits_word_even_when_save_fails(tmp_db, monkeypatch):

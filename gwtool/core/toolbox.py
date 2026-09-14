@@ -9,7 +9,10 @@ import re
 
 _CN_DIGITS = "零壹贰叁肆伍陆柒捌玖"
 _CN_UNITS = ["", "拾", "佰", "仟"]
-_CN_BIG = ["", "万", "亿", "万亿"]
+# 四位段单位，按"本段右侧剩余段数"取模索引：
+#   剩余 1 段 -> 万，2 -> 亿，3 -> 万亿，4 -> 亿亿，5 -> 万亿 ...（3 为周期循环）
+# 对照：10^4=万、10^8=亿、10^12=万亿、10^16=亿亿、10^20=万亿亿…
+_CHUNK_SCALES = ["万", "亿", "万亿"]
 
 _HALF2FULL = None  # 兼容占位（转换见 half_to_full）
 
@@ -27,6 +30,8 @@ def amount_to_cn(value) -> str:
     """
     if isinstance(value, str):
         s = value.strip().replace(",", "").replace("，", "").replace("¥", "").replace("￥", "")
+        # 角分必须恰好 1~2 位：'1.999' 超过"分"的最小单位，宁可明确拒绝，
+        # 也不要静默截断成 1.99（金额少写一分是事故，不是四舍五入）
         if not re.fullmatch(r"\d+(\.\d{1,2})?", s):
             raise ValueError(f"无法识别的金额：{value!r}")
         yuan_str, _, fen_str = s.partition(".")
@@ -35,7 +40,11 @@ def amount_to_cn(value) -> str:
         fen = int(fen_str[1]) if len(fen_str) >= 2 else 0
     else:
         from decimal import Decimal
-        d = Decimal(str(value)).quantize(Decimal("0.01"))
+        try:
+            d = Decimal(str(value)).quantize(Decimal("0.01"))
+        except Exception:
+            raise ValueError(f"无法识别的金额：{value!r}") from None
+        d = abs(d)          # 冲销等负数金额按绝对值处理，票据不支持负号大写
         amount = int(d)
         cents = int((d - amount) * 100)
         jiao, fen = divmod(cents, 10)
@@ -44,45 +53,52 @@ def amount_to_cn(value) -> str:
         return "零元整"
 
     def group4(n: int) -> str:
-        """四位一组转大写，组内化简零。"""
-        digits = [int(c) for c in f"{n:04d}"]
-        out = []
-        zero_pending = False
-        for i, d in enumerate(digits):
-            unit = _CN_UNITS[3 - i]
+        """四位一组转大写：按位取单位（仟/佰/拾/个），零只写一个。
+
+        逐位取单位而不是"遇到非零位就补零"：后者在 1005 这类
+        "零后面还有有效位"的组里会把位数丢掉（读成 壹仟零伍拾）。
+        """
+        out: list[str] = []
+        zero_run = False
+        for i, ch in enumerate(f"{n:04d}"):
+            d = int(ch)
             if d == 0:
-                zero_pending = bool(out)
-            else:
-                if zero_pending:
-                    out.append("零")
-                    zero_pending = False
-                out.append(_CN_DIGITS[d] + unit)
+                zero_run = bool(out)        # 组首零不写（前导零）
+                continue
+            if zero_run:
+                out.append("零")
+                zero_run = False
+            out.append(_CN_DIGITS[d] + _CN_UNITS[3 - i])
         return "".join(out)
 
-    # 整数部分按 万/亿 分组
-    sections: list[tuple[int, str]] = []
-    scales = ["", "万", "亿"]
+    # 整数部分按 4 位一段切（**含高位空段**）。
+    # 段号是"第几段"的定位信息，不能随前导零一起丢掉：
+    # 1_0000_0000_0000_0000 的 1 必须知道自己排在"亿亿"段（10^16），
+    # 若只按有效数字切段会算成 10^12（=万亿），读出来少 4 个数量级。
+    groups = (len(str(amount)) + 3) // 4
+    chunks = [0] * groups
     n = amount
-    idx = 0
-    while n > 0:
-        sections.append((n % 10000, scales[idx]))
+    for i in range(groups - 1, -1, -1):
+        chunks[i] = n % 10000
         n //= 10000
-        idx += 1
+
     int_parts: list[str] = []
-    zero_pending = False
-    for pos in range(len(sections) - 1, -1, -1):
-        val, scale = (sections[pos][0], scales[pos])
+    prev_zero = False          # 上一段是否整段为零（需要在本段前补一个"零"）
+    for gi, val in enumerate(chunks):
+        last = gi == len(chunks) - 1
         if val == 0:
-            zero_pending = bool(int_parts)
+            if not last:
+                prev_zero = True            # 段名（万/亿）一律不写，只记待补零
             continue
-        if zero_pending and int_parts:
-            int_parts.append("零")
-            zero_pending = False
-        g = group4(val)
-        # 组内末尾是"零"如 0500 -> 零佰? group4 已处理前导；组值 <1000 且非首组需补零：
-        if val < 1000 and int_parts:
-            int_parts.append("零")
-        int_parts.append(g + scale)
+        if int_parts:
+            # 跨段补零只补"必需的那一个"（规范读法）：
+            #   - 本段不满四位：不补零会被并进上一段读错（100050000 = 壹亿零伍万）
+            #   - 中间有整段为零：必须补零（1000001000 = 壹拾亿零壹仟）
+            # 本段满四位并与上一段相邻时直接连读：50001000 = 伍仟万壹仟
+            if val < 1000 or prev_zero:
+                int_parts.append("零")
+        int_parts.append(group4(val) + _scale_suffix(len(chunks), gi))
+        prev_zero = False
     int_cn = "".join(int_parts)
 
     dec_cn = ""
@@ -103,6 +119,38 @@ def amount_to_cn(value) -> str:
     if amount == 0 and (jiao or fen):
         yuan_cn = ""
     return prefix + yuan_cn + dec_cn
+
+
+def _scale_suffix(group_count: int, gi: int) -> str:
+    """第 gi 段的单位后缀（group_count = 整数部分按 4 位切出的总段数）。
+
+    汉语数词是 **万 / 亿 / 万亿** 三级一循环，不是"每四位一个新单位"：
+
+        10^4  = 万        10^8  = 亿        10^12 = 万亿
+        10^16 = 亿亿      10^20 = 万亿亿     10^24 = 亿亿亿 …
+
+    换成"本段右侧还剩几段"（remaining）就是固定循环：
+
+        remaining = 1 -> 万      2 -> 亿      3 -> 万亿
+                    4 -> 亿亿    5 -> 万亿亿  6 -> 亿亿亿 …
+
+    老实现把单位写成 ["", "万", "亿"] 三档下标，13 位以上直接 IndexError 崩溃；
+    而 12 位的 ``1_2345_6789_0123``（1 万亿 2345 亿…）又要求最高段挂"万亿"，
+    只有按这个循环取才不会读错。
+    """
+    remaining = group_count - 1 - gi          # 本段右侧还有几段 = 本段的 10^(4r) 量级
+    if remaining == 0:
+        return ""
+    # 10^(4r) 的标准读法（r 与读数）：
+    #   1=万  2=亿  3=万亿  4=亿亿  5=万亿亿  6=亿亿亿  7=万亿亿亿 …
+    # r 是 3 的倍数时读"万亿…"，否则读"亿…"（叠 亿 的次数见下表）
+    _READINGS = {1: "万", 2: "亿", 3: "万亿", 4: "亿亿", 5: "万亿亿", 6: "亿亿亿",
+                 7: "万亿亿亿", 8: "亿亿亿亿"}
+    if remaining in _READINGS:
+        return _READINGS[remaining]
+    # 更高位继续按"三的倍数 -> 万亿…，否则 亿…"延伸（10^36 以上，实际用不到）
+    base = "万亿" if remaining % 3 == 0 else "亿"
+    return base + "亿" * (remaining // 3)
 
 
 def digits_to_cn_date(text: str) -> str:

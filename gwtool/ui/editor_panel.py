@@ -490,6 +490,8 @@ class EditorPanel(QWidget):
         menu.addSeparator()
         menu.addAction("一键排版微调（全文）", self.run_formatter)
         menu.exec(self.editor.viewport().mapToGlobal(pos))
+        # 不销毁就随每次右键累积（父对象是面板，Python 引用丢了对象仍在）
+        menu.deleteLater()
 
     def _apply_transform(self, fn):
         self.replace_document_text(fn(self.editor.toPlainText()))

@@ -46,39 +46,48 @@ def make_booklet(src_pdf: str, out_pdf: str, a3_landscape: bool = True) -> int:
 
     输出页 = 两页并排（纵向源页 x2 = A3 横向）。show_pdf_page 等比缩放，
     横向源页也能正确放入（按比例缩小居中）。
+
+    两个文档都用 try/finally 关闭：save/show_pdf_page 抛异常（磁盘满、
+    源页损坏、输出被占用）时若不关，PyMuPDF 文档与其底层句柄会一起泄漏，
+    长会话里反复导出会累积到句柄耗尽。
     """
     src = fitz.open(src_pdf)
-    n = src.page_count
-    if n == 0:
+    try:
+        n = src.page_count
+        if n == 0:
+            raise ValueError("源 PDF 为空")
+        order = booklet_order(n)
+        w, h = src[0].rect.width, src[0].rect.height
+        # 两页并排：宽 = 2*页宽，高 = 页高
+        out_w, out_h = w * 2, h
+        dst = fitz.open()
+        try:
+            for pair in order:
+                page = dst.new_page(width=out_w, height=out_h)
+                half = out_w / 2
+                for slot, pageno in enumerate(pair):
+                    if pageno < 1 or pageno > n:
+                        continue  # 空白
+                    sp = src[pageno - 1]
+                    clip = fitz.Rect(0, 0, sp.rect.width, sp.rect.height)
+                    target = fitz.Rect(slot * half, 0, (slot + 1) * half, out_h)
+                    page.show_pdf_page(target, src, pageno - 1, clip=clip,
+                                       keep_proportion=True)
+            dst.save(out_pdf, garbage=3, deflate=True)
+        finally:
+            dst.close()
+        return len(order)
+    finally:
         src.close()
-        raise ValueError("源 PDF 为空")
-    order = booklet_order(n)
-    w, h = src[0].rect.width, src[0].rect.height
-    # 两页并排：宽 = 2*页宽，高 = 页高
-    out_w, out_h = w * 2, h
-    dst = fitz.open()
-    for pair in order:
-        page = dst.new_page(width=out_w, height=out_h)
-        half = out_w / 2
-        for slot, pageno in enumerate(pair):
-            if pageno < 1 or pageno > n:
-                continue  # 空白
-            sp = src[pageno - 1]
-            clip = fitz.Rect(0, 0, sp.rect.width, sp.rect.height)
-            target = fitz.Rect(slot * half, 0, (slot + 1) * half, out_h)
-            page.show_pdf_page(target, src, pageno - 1, clip=clip,
-                               keep_proportion=True)
-    dst.save(out_pdf, garbage=3, deflate=True)
-    dst.close()
-    src.close()
-    return len(order)
 
 
 def export_a4_pdf(src_pdf: str, out_pdf: str) -> int:
     """原样另存（用于统一入口的 A4 输出）；同路径调用直接返回页数。"""
     src = fitz.open(src_pdf)
-    n = src.page_count
-    if str(Path(src_pdf).resolve()) != str(Path(out_pdf).resolve()):
-        src.save(out_pdf, garbage=3, deflate=True)
-    src.close()
-    return n
+    try:
+        n = src.page_count
+        if str(Path(src_pdf).resolve()) != str(Path(out_pdf).resolve()):
+            src.save(out_pdf, garbage=3, deflate=True)
+        return n
+    finally:
+        src.close()

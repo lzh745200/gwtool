@@ -15,6 +15,12 @@ hiddenimports = [
     # icons.py 用 QImage.fromData(..., "SVG") 画图标，需要 imageformats/qsvg 插件；
     # 代码未显式 import QtSvg，PyInstaller 不会自动收集该插件，打包后图标会全空白。
     'PySide6.QtSvg',
+    # L4 精度增强包（可选）：requirements-optional.txt 装了才真正生效。
+    # 未安装时 PyInstaller 只记为 missing（warning），不会让构建失败 ——
+    # 这正是我们要的语义："有模型依赖就把 L4 带上，没有就静默退化为三级流水线"。
+    # 注意它们都依赖 numpy，故下方 excludes 里绝不能再排除 numpy。
+    'onnxruntime',
+    'tokenizers',
 ]
 if sys.platform.startswith('win'):
     hiddenimports.append('win32timezone')   # pywin32 动态导入
@@ -26,7 +32,15 @@ excludes = [
     'PySide6.QtPositioning', 'PySide6.QtSensors', 'PySide6.QtSerialPort',
     'PySide6.QtTest', 'PySide6.QtDesigner', 'PySide6.Qt3DCore',
     'PySide6.QtDataVisualization',
-    'tkinter', 'matplotlib', 'numpy', 'pandas',
+    'tkinter', 'matplotlib', 'pandas',
+    # 不要在这里加 'numpy'：
+    #   core/csc_gec.py 与 core/csc_neural.py 都 `import numpy as np`，
+    #   onnxruntime 导入即依赖 numpy。老版本排除了 numpy，导致本机构建出的
+    #   产物"有 onnxruntime 却没有 numpy"——打包版 L4 增强包导入后静默无效
+    #   （被宽 except 兜住，不报任何错），而 CI 构建干脆不装 onnxruntime，
+    #   于是"同一份 spec、不同机器产出不同能力"。
+    # 若将来决定打包版不支持 L4，请反过来把 onnxruntime/tokenizers 显式写进
+    # 本列表，并同步修改 README 的功能表——两者必须一致。
 ]
 
 a = Analysis(

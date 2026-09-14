@@ -1,7 +1,7 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.5.2**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.5.4**。
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
@@ -50,8 +50,8 @@
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python main.py        # 启动
-.venv\Scripts\python -m pytest tests\ -q   # 运行测试（177 个用例）
-python scripts\e2e_check.py         # 端到端自检（14 步全流程 PASS/FAIL 清单）
+.venv\Scripts\python -m pytest tests\ -q   # 运行测试（707 个用例）
+python scripts\e2e_check.py         # 端到端自检（18 步全流程 PASS/FAIL 清单）
 python scripts\smoke_dist.py dist\gwtool   # 打包后校验产物（需先打包）
 ```
 
@@ -87,19 +87,26 @@ scripts\build_windows.bat
 
 CI（推 v* 标签）在 **Debian 11 容器（glibc 2.31）** 内打包，并锁定
 `PySide6==6.8.0.2`（Qt 6.8 LTS）。版本底线由此决定：**ARM64 包要求
-glibc ≥ 2.31**（麒麟桌面 V10 / Ubuntu 20.04 底层即可运行）；x86_64 包
-manylinux_2_28，**glibc ≥ 2.28 的麒麟桌面/服务器均可**。官方 PySide6 的
+glibc ≥ 2.31**（麒麟桌面 V10 / Ubuntu 20.04 底层即可运行）。官方 PySide6 的
 aarch64 wheel 自 6.8.1 起要求 glibc ≥ 2.39（麒麟全系不满足），故不追新。
-同时提供 **x86_64 与 ARM64 两种架构**。手动在麒麟机上打包：
+
+> CI 只交付 **ARM64 一种 Linux 安装包**（`gwtool_<版本>_linux_arm64.deb`），
+> 因为唯一的 Linux 目标是麒麟 V10 ARM64。需要 x86_64 的麒麟/Ubuntu 时，
+> 请按下面的手动流程自行打包（requirements 里 PyMuPDF 为 manylinux_2_28，
+> 即 **glibc ≥ 2.28** 即可）。
+
+手动在麒麟机上打包：
 
 **方式一（有网络）**：把整个项目拷到麒麟机器，执行：
 ```bash
 bash scripts/build_kylin_arm64.sh
 ```
 
-**方式二（完全离线）**：先在一台有网络的电脑上下载 ARM64 离线依赖：
+**方式二（完全离线）**：先在**一台有网络的 ARM64 Linux 机器**（或 arm64 容器）
+上下载离线依赖——注意不能在 Windows 或 x86_64 机器上交叉下载，
+requirements 里的环境标记按运行主机求值，会选错分档：
 ```bash
-bash scripts/kylin_offline_wheels.sh    # 生成 wheels_aarch64/
+bash scripts/kylin_offline_wheels.sh    # 生成 wheels_aarch64/（含前置环境校验）
 ```
 把项目（含 wheels_aarch64/）拷到麒麟机器，再执行：
 ```bash
@@ -164,7 +171,7 @@ CI 以 dpkg-deb 打成唯一安装包 `gwtool_<版本>_linux_arm64.deb`。
 | 文字提取>99% | 六格式解析器 + 兜底 | test_parsers |
 | 汇编 WPS 不跑版 | 标准 OOXML + 域代码 | test_compile_pdf |
 | 截止/截至等 100% 识别 | 三级纠错流水线 | test_corrector::test_jianku_100_curated_pairs |
-| 纠错库 ≥3 万条 | 精标 220 + 生成 40220 | test_corrector::test_seed_db_pair_count |
+| 纠错库 ≥3 万条 | 精标 220 + 生成 40000 | test_corrector::test_seed_db_pair_count |
 | 模板即时生效 | JSON 模板实时渲染 | UI 内置预览 |
 | A3 骑马钉页序正确 | PyMuPDF 重排 8,1\|2,7… | test_booklet_order_math |
 | 检索 1 秒内 | FTS5 + jieba 预分词 | test_fts_search_speed_and_snippet |
@@ -188,7 +195,7 @@ gwtool/
 │   ├── app.py                  # 启动装配：种子导入 → 口令锁 → 主窗口
 │   ├── paths.py                # 数据目录（%APPDATA% / ~/.local/share / 便携 Data/）
 │   ├── db/                     # 数据层
-│   │   ├── schema.py           #   9 张业务表 + 3 个 FTS5 虚表 + 版本迁移
+│   │   ├── schema.py           #   11 张业务表 + 3 个 FTS5 虚表 + 版本迁移
 │   │   ├── connection.py       #   线程本地连接、WAL、迁移前自动备份
 │   │   ├── dao.py              #   唯一数据访问入口（文档/词典/纠错对/模板/快照…）
 │   │   └── tokenize.py         #   jieba 分词（建索引 + 构造 MATCH 查询）
@@ -229,13 +236,13 @@ gwtool/
 │   │   ├── dict_manager.py     #   词典/纠错对/句式/忽略名单四页管理
 │   │   ├── compare_dialog.py   #   文档对比
 │   │   ├── feature_dialogs.py  #   骨架/体检/批量替换/快照/查重/安全/锁屏
-│   │   ├── workers.py          #   QThread 工作线程（FnWorker 等 7 类）
+│   │   ├── workers.py          #   QThread 工作线程（FnWorker 等 6 类）
 │   │   ├── icons.py            #   纯代码内嵌 SVG 图标（零图片资源）
 │   │   ├── widgets.py          #   公文字体常量与公共组件
 │   │   └── theme.py            #   语义色常量（深浅色兼容）
 │   └── resources/data/
 │       └── seed.db             # 种子库：词典 12.3 万 + 纠错对 4 万（15.7 MB）
-├── tests/                      # pytest 测试套件（87 个用例，含性能验收）
+├── tests/                      # pytest 测试套件（707 个用例，含性能验收）
 ├── scripts/                    # 构建与运维脚本
 │   ├── build_windows.bat       #   Windows x64 打包（PyInstaller + 便携 zip）
 │   ├── build_kylin_arm64.sh    #   麒麟 ARM64 打包（支持离线 wheels）

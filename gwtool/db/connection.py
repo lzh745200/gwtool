@@ -46,9 +46,17 @@ def get_conn() -> sqlite3.Connection:
 
 
 def _pre_migrate_backup() -> None:
-    """老库升级（schema 迁移）前自动做一次原始文件备份，作为安全网。
+    """老库升级（schema 迁移）前自动做一次备份，作为安全网。
 
-    直接打包 db/-wal 原始文件，不走 get_conn（避免在初始化中递归触发迁移）。
+    用 SQLite 在线备份 API 落一份**自洽**快照再打包，不走 get_conn
+    （避免在初始化中递归触发迁移）。
+
+    为什么不是"直接打包 db/-wal 原始文件"：老实现把 gwtool.db 与
+    gwtool.db-wal 各作为一个 zip 成员塞进去，看似保住了 WAL，实际产出的
+    是一个**解压后无法直接使用**的包——恢复端只会取包内的 gwtool.db
+    覆盖主库，而 -wal 要么被忽略、要么与主库版本错配，SQLite 打开时报
+    "database disk image is malformed"。在线备份 API 会把 WAL 中已提交的
+    事务重放进快照，产出的单个 .db 文件自己就是完整可用的。
     """
     from .schema import SCHEMA_VERSION
     if not _db_file or not _db_file.exists():
@@ -69,12 +77,25 @@ def _pre_migrate_backup() -> None:
         backups.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = backups / f"gwtool_backup_{stamp}_premigrate_v{ver}.zip"
-        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(_db_file, "gwtool.db")
-            wal = _db_file.with_name(_db_file.name + "-wal")
-            if wal.exists():
-                zf.write(wal, "gwtool.db-wal")
-    except OSError:
+        snap = _db_file.with_name(_db_file.name + ".premigrate-snap")
+        src = sqlite3.connect(f"file:{_db_file.as_posix()}?mode=ro", uri=True,
+                              timeout=30)
+        dst = sqlite3.connect(str(snap), timeout=30)
+        try:
+            src.backup(dst)          # 含 WAL 中已提交事务，产出单文件自洽快照
+            dst.commit()
+        finally:
+            dst.close()
+            src.close()
+        try:
+            with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(snap, "gwtool.db")
+        finally:
+            try:
+                snap.unlink()
+            except OSError:
+                pass
+    except (OSError, sqlite3.Error):
         pass
 
 

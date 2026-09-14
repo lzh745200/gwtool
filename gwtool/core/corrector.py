@@ -429,29 +429,41 @@ def correct_block(text: str, skip_categories: "set[str] | tuple" = ("数字用�
 
 
 def tree_to_blocks(tree) -> "list[dict]":
-    """DocTree -> 轻量块列表（kind: heading/para/table），供任意文档纠错逐块处理。"""
+    """DocTree -> 轻量块列表（kind: heading/para/table），供任意文档纠错逐块处理。
+
+    块里必须带上标题层级 ``level``：老实现只存 kind/text/rows，
+    blocks_to_tree 只能给所有标题填 level=1，用户把一篇三级标题的公文
+    纠错后导出，层级信息**不可逆丢失** —— docxgen 全部用 Heading 1，
+    目录（TOC \\o "1-3"）与页码定位随之全错。level 只对 heading 有意义，
+    para/table 存 0 即可（blocks_to_tree 只在 heading 分支读它）。
+    """
     from .model import HEADING, TABLE
     # 标题不折进块列表：blocks_to_tree 的 title 是独立入参，
     # 折叠会导致导出时标题渲染两遍（DocTree.title + 正文 Heading1）。
     blocks = []
     for b in tree.blocks:
         if b.type == TABLE and b.rows:
-            blocks.append({"kind": "table", "text": "", "rows": [list(r) for r in b.rows]})
+            blocks.append({"kind": "table", "text": "", "rows": [list(r) for r in b.rows],
+                           "level": 0})
         else:
             blocks.append({"kind": "heading" if b.type == HEADING else "para",
-                           "text": b.text or "", "rows": None})
+                           "text": b.text or "", "rows": None,
+                           "level": int(b.level or 0) if b.type == HEADING else 0})
     return blocks
 
 
 def blocks_to_tree(title: str, blocks) -> "object":
-    """块列表 -> DocTree（表格行转 TABLE 块；heading 用 1 级、para 用正文块）。"""
+    """块列表 -> DocTree（表格行转 TABLE 块；标题沿用块内记录的层级）。"""
     from .model import Block, DocTree, HEADING, PARAGRAPH, TABLE
     out: list[Block] = []
     for b in blocks:
         if b["kind"] == "table" and b.get("rows"):
             out.append(Block(type=TABLE, rows=[list(r) for r in b["rows"]]))
         elif b["kind"] == "heading" and (b.get("text") or "").strip():
-            out.append(Block(type=HEADING, level=1, text=b["text"]))
+            # 缺 level（旧快照/外部构造的块）时退回 1 级，不让导出直接失败；
+            # 上限 4 与 GB/T 9704 的标题层级一致，防止脏数据造出 Heading 7。
+            level = int(b.get("level") or 1)
+            out.append(Block(type=HEADING, level=max(1, min(level, 4)), text=b["text"]))
         elif (b.get("text") or "").strip():
             out.append(Block(type=PARAGRAPH, text=b["text"]))
     return DocTree(title=title or "", blocks=out)

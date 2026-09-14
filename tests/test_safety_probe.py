@@ -67,13 +67,22 @@ class TestSecurityProbe:
 
 # ---------------------------------------------------------------- paths
 class TestPathsProbe:
-    def test_override_clear_falls_back_to_platform(self, tmp_db):
-        """set_app_data_dir(None)：清除覆盖后回平台推导（目录末段 gwtool）。"""
+    def test_override_clear_falls_back_to_platform(self, tmp_path, monkeypatch):
+        """set_app_data_dir(None)：清除覆盖后回平台推导（目录末段 gwtool）。
+
+        必须把 APPDATA/XDG_DATA_HOME 指到临时目录再断言：不这么做就会真的
+        在开发者主目录里建 `%APPDATA%\\gwtool`（甚至在里面写库），
+        测试不该有这种副作用。conftest 的会话级 _override 也要临时清掉，
+        否则测的是"覆盖"，而不是"平台推导"。
+        """
         saved = paths._override
         try:
             paths.set_app_data_dir(None)
+            monkeypatch.setenv("APPDATA", str(tmp_path))
+            monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
             d = paths.app_data_dir()
             assert d.name == "gwtool"
+            assert d.parent == tmp_path, f"应落在伪造的平台目录下，实得 {d}"
             assert d.exists()
         finally:
             paths.set_app_data_dir(saved)
@@ -87,14 +96,25 @@ class TestPathsProbe:
         assert paths.enhance_dir().parent == root
         assert paths.db_path() == root / "gwtool.db"
 
-    def test_portable_mode_switch(self, tmp_db):
+    def test_override_takes_priority_over_portable(self, tmp_db, tmp_path,
+                                                   monkeypatch):
+        """覆盖优先于便携模式（见 set_app_data_dir 文档），且不在仓库里建 Data/。
+
+        必须同时把 _exe_base 指到临时目录：否则便携模式会把 `Data/` 建在
+        真实程序目录（开发机就是仓库根）里，测试反倒污染工作区。
+        """
+        monkeypatch.setattr(paths, "_exe_base", lambda: tmp_path / "fake_exe")
         saved_flag = paths.is_portable()
         saved = paths._override
         try:
             paths.set_portable(True)
-            paths.set_app_data_dir(None)  # 便携模式优先于覆盖
+            # 仍有覆盖：走覆盖
             d = paths.app_data_dir()
-            assert d.name == "Data"
+            assert d == saved, f"有覆盖时应走覆盖，实得 {d}"
+            # 清掉覆盖：回便携模式（程序同级 Data/）
+            paths.set_app_data_dir(None)
+            d2 = paths.app_data_dir()
+            assert d2 == tmp_path / "fake_exe" / "Data", f"便携模式应得 {d2}"
         finally:
             paths.set_portable(saved_flag)
             paths.set_app_data_dir(saved)
@@ -175,6 +195,9 @@ class TestBackupCreateProbe:
 
     def test_stale_part_files_cleaned(self, tmp_db):
         """超过 1 小时的 .part 半成品被清掉；新鲜的（1 小时内）保留。"""
+        # 先真正建库：备份现在会先做一份在线快照，库不存在就明确报错，
+        # 不再像老实现那样"checkpoint 顺手建了个空库"把问题掩盖过去。
+        dao.add_document(dao.Document(title="半成品探测", content_text="内容甲"))
         bdir = paths.backup_dir()
         stale = bdir / "gwtool_backup_20200101_000000_000.zip.part"
         fresh = bdir / "gwtool_backup_20990101_000000_000.zip.part"
@@ -186,6 +209,17 @@ class TestBackupCreateProbe:
         backup.create_backup(note="半成品清理探测")
         assert not stale.exists()
         assert fresh.exists()
+
+    def test_backup_without_database_raises_clearly(self, tmp_db):
+        """库文件不存在时明确报错，而不是"成功"产出一个空库备份。"""
+        dbf = dbconn.current_db_file()
+        dbconn.close_current_thread()
+        if dbf.exists():
+            dbf.unlink()
+        with pytest.raises(FileNotFoundError):
+            backup.create_backup(note="空库探测")
+        assert list(paths.backup_dir().glob("gwtool_backup_*.zip")) == []
+        assert list(paths.backup_dir().glob("*.backup-snap")) == []
 
     def test_failed_backup_leaves_no_part_nor_package(self, tmp_db):
         """写包中途失败（数据库文件被替换成目录，库连接与模板导出必炸）：

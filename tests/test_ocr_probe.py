@@ -12,6 +12,7 @@ tesseract.exe 与 chi_sim.traineddata 组成捆绑目录树，测试后彻底清
 """
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -227,11 +228,28 @@ def test_has_chi_sim_empty_path_returns_false(no_tess_env):
     assert ocr.has_chi_sim() is False
 
 
-def test_has_chi_sim_sets_tessdata_prefix(bundled_tree):
-    """捆绑 tessdata 存在时：设置注入 exe → TESSDATA_PREFIX 指向捆绑目录。"""
+def test_has_chi_sim_passes_tessdata_prefix_to_subprocess(bundled_tree, monkeypatch):
+    """捆绑 tessdata 存在时：TESSDATA_PREFIX 随 env 传给子进程，**不改**进程全局。
+
+    为什么不能写 os.environ：OCR 会在后台线程里跑（批量导入扫描件），
+    那是进程级全局状态，两条调用路径并发时会互相覆盖、也会覆盖用户手工设置。
+    现在改为 subprocess 的 env 参数，这里守住这个契约。
+    """
     dao.set_setting("tesseract_path", str(bundled_tree["exe"]))
+    monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
+
+    seen: dict = {}
+    real_run = subprocess.run
+
+    def spy_run(cmd, *a, **kw):
+        seen["env"] = kw.get("env")
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(ocr.subprocess, "run", spy_run)
     assert ocr.has_chi_sim() is True
-    assert os.environ.get("TESSDATA_PREFIX") == str(bundled_tree["tessdata"])
+    assert seen.get("env") is not None, "必须显式传 env 给子进程"
+    assert seen["env"].get("TESSDATA_PREFIX") == str(bundled_tree["tessdata"])
+    assert "TESSDATA_PREFIX" not in os.environ, "不得写入进程全局环境"
 
 
 # ---------------------------------------------------------- 单图识别

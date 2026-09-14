@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QSplitter, QVBoxLayout,
@@ -123,7 +124,13 @@ class ReferencePanel(QWidget):
     def _on_check_done(self, corrections):
         self._corrections = corrections
         self.btn_check.setEnabled(True)
-        self._fill_corr_list()
+        # 渲染失败不能连累波浪线：列表填充与"通知编辑器"是两件事，
+        # 老实现把 _fill_corr_list() 放在 emit 之前且不设防，一处渲染异常
+        # 就让整条链路静默死掉（用户看到"点了 F7 什么都没发生"）。
+        try:
+            self._fill_corr_list()
+        except Exception as exc:  # noqa: BLE001
+            self.lbl_count.setText(f"结果渲染失败：{type(exc).__name__}: {exc}")
         # 通知编辑器把结果画成波浪线。这里发的坐标是**全文坐标**
         # （_checked_text 取自编辑器全文），与编辑器文档坐标天然对齐，
         # 无需任何换算。
@@ -151,8 +158,13 @@ class ReferencePanel(QWidget):
             tier = "确认错误" if c.confidence >= 0.8 else "疑似错误"
             item = QListWidgetItem(f"[{c.category}] {c.wrong} → {c.suggestion}\n"
                                    f"    上下文：{ctx}…  ({c.confidence:.2f}，{tier})")
-            item.setForeground(theme.severity_color(
-                "error" if c.confidence >= 0.8 else "warn"))
+            # severity_color() 返回的是 "#b00020" 这样的**字符串**，
+            # 而 QListWidgetItem.setForeground 只接受 QBrush/QColor：
+            # 少这层 QColor 包装会抛 TypeError，异常从 _on_check_done 冒出去，
+            # 结果是"建议列表 0 条 + 计数停在检查中… + 波浪线也不画"——
+            # F7 文字纠错整条功能静默失效（打包版 stderr 不可见，用户只看到没反应）。
+            item.setForeground(QColor(theme.severity_color(
+                "error" if c.confidence >= 0.8 else "warn")))
             item.setData(Qt.UserRole, i)
             item.setToolTip(c.reason)
             self.corr_list.addItem(item)
@@ -163,15 +175,41 @@ class ReferencePanel(QWidget):
         idxs = [item.data(Qt.UserRole) for item in self.corr_list.selectedItems()]
         return [self._corrections[i] for i in idxs if i < len(self._corrections)]
 
+    def _text_changed_since_check(self) -> bool:
+        """检查之后用户又改过正文吗？
+
+        `_corrections` 里的 start/end 是相对 `_checked_text` 的**偏移量**，
+        只在 run_check() 时算一次。用户随后在正文里增删字符，这些偏移就整体
+        错位，而主窗口的替换是按 (start,end) 直接定位 + insertText 的，
+        于是"全部替换"会把不相干的文字改成建议词（实测：
+        '这是布署。' 检查后在前面敲一个「前」，全部替换得到 '前这部署署。'，
+        正文被静默改坏）。改过就必须重算，不能拿旧偏移去改新文本。
+        """
+        try:
+            return self._editor_getter() != getattr(self, "_checked_text", "")
+        except Exception:  # noqa: BLE001  取不到文本时按"已改动"处理，宁可不替换
+            return True
+
     def _apply_one(self, *_):
+        if self._text_changed_since_check():
+            self.run_check()
+            from .widgets import info
+            info(self, "正文已改动，纠错结果已重新计算，请确认后再替换。")
+            return
         for c in reversed(self._selected_corrections()):
             self.apply_edit.emit(c.start, c.end, c.suggestion)
         self.run_check()
 
     def _apply_all(self):
+        if self._text_changed_since_check():
+            self.run_check()
+            from .widgets import info
+            info(self, "正文已改动，纠错结果已重新计算，请确认后再替换。")
+            return
         min_conf = self.chk_min_conf.value()
         to_apply = [c for c in self._corrections
                     if c.confidence >= min_conf and c.category not in ("数字用法",)]
+        # 从后往前替换：前面的偏移不受影响（同一批内的坐标是自洽的）
         for c in sorted(to_apply, key=lambda x: x.start, reverse=True):
             self.apply_edit.emit(c.start, c.end, c.suggestion)
         self.run_check()

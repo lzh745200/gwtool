@@ -9,23 +9,29 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 
 SCHEMA_VERSION = 3
 
-# 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级；
-# 语句要求幂等容错（新库建表已含新列时 ALTER 会重复报错，由调用方忽略）。
+# 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级。
+#
+# 只放"补列/改结构"的 ALTER——**不要把 CREATE INDEX 写在这里**：
+# 全部二级索引由 init_schema 在迁移之后统一跑一遍 INDEXES（见该列表的注释），
+# 迁移里再写一遍就是同一索引定义两处维护，改动时极易漏掉一处。
+# （历史遗留：MIGRATIONS[2]/[3] 曾各自重复定义了一次
+#  idx_documents_simhash / idx_documents_deleted，已于 2026-09 清理。）
+#
+# 语句要求幂等容错：新库建表已含新列时 ALTER 会报 duplicate column，
+# 由调用方（init_schema）忽略。
 MIGRATIONS = {
     2: [
         "ALTER TABLE documents ADD COLUMN simhash INTEGER",
-        "CREATE INDEX IF NOT EXISTS idx_documents_simhash ON documents(simhash)",
     ],
     # v3：回收站（软删除）。新列两处都要写 —— TABLES 的 CREATE TABLE 供全新库，
-    # 这里供老库升级；而依赖新列的索引只能放这里（本循环对 OperationalError 容错，
-    # 新库重复 ALTER 报 duplicate column 属预期；TABLES 循环不容错，老库会当场崩）。
+    # 这里供老库升级（TABLES 循环不容错，老库缺列会当场崩启动）。
     3: [
         "ALTER TABLE documents ADD COLUMN deleted_time TEXT NOT NULL DEFAULT ''",
-        "CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted_time)",
     ],
 }
 
@@ -55,10 +61,10 @@ TABLES = [
         simhash INTEGER,
         deleted_time TEXT NOT NULL DEFAULT ''
     )""",
-    # 注意：全部二级索引都在 INDEXES 里（依赖 text_hash/category_id 等列）。
-    # 深探确认（2026-09-13）：TABLES 在迁移之前执行且不容错，老库此时还没有
-    # 新列，在这里建索引会抛 "no such column: deleted_time"，
-    # 用户升级即启动崩溃。现已把全部二级索引统一挪到 INDEXES、在迁移之后执行。
+    # 注意：二级索引一律放 INDEXES（依赖 text_hash/category_id/deleted_time 等列）。
+    # 深探确认（2026-09-13）：TABLES 在迁移之前执行且**不容错**，老库此时还没有
+    # 新列，在这里建索引会抛 "no such column: deleted_time"，用户升级即启动崩溃。
+    # 全部二级索引已统一挪到 INDEXES、在迁移之后执行——本列表只留 CREATE TABLE。
     # 词典（词条、拼音、释义、例句）
     """CREATE TABLE IF NOT EXISTS dictionary(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +74,6 @@ TABLES = [
         example TEXT DEFAULT '',
         source TEXT DEFAULT 'builtin'
     )""",
-    """CREATE INDEX IF NOT EXISTS idx_dictionary_word ON dictionary(word)""",
     # 错别字/纠错对
     """CREATE TABLE IF NOT EXISTS error_pairs(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +84,6 @@ TABLES = [
         enabled INTEGER NOT NULL DEFAULT 1,
         source TEXT DEFAULT 'builtin'
     )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_error_pairs_key ON error_pairs(wrong, correct)""",
     # 用户句式/常用语/范文片段
     """CREATE TABLE IF NOT EXISTS user_phrases(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +114,6 @@ TABLES = [
         reason TEXT DEFAULT 'auto',
         created_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )""",
-    """CREATE INDEX IF NOT EXISTS idx_snapshots_doc ON snapshots(doc_id, id DESC)""",
     # 纠错持久忽略名单
     """CREATE TABLE IF NOT EXISTS ignore_words(
         word TEXT PRIMARY KEY,
@@ -140,9 +143,6 @@ TABLES = [
         created_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )""",
-    """CREATE INDEX IF NOT EXISTS idx_dispatch_no ON dispatch_register(doc_no)""",
-    """CREATE INDEX IF NOT EXISTS idx_dispatch_sign_date ON dispatch_register(sign_date)""",
-    """CREATE INDEX IF NOT EXISTS idx_dispatch_org ON dispatch_register(org)""",
     # 文档附件：文件本体复制进数据目录 attachments/ 子目录，库里只存相对路径
     # （便携模式与备份恢复后仍能按数据目录重新定位，不依赖用户原始绝对路径）
     """CREATE TABLE IF NOT EXISTS attachments(
@@ -181,6 +181,22 @@ FTS_TABLES = [
     """CREATE VIRTUAL TABLE IF NOT EXISTS phrases_fts USING fts5(
         phrase, tokenized, ref_id UNINDEXED)""",
 ]
+
+# 必需业务表清单：从 TABLES 的 DDL 里解析，避免与建表语句两处维护、日久漂移。
+# 备份恢复校验按它判断"包里的库是不是本程序的库"（见 core/backup._validate_restored_db）。
+_TABLE_NAME_RE = re.compile(
+    r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE)
+
+
+def required_table_names() -> set[str]:
+    """本程序必需的业务表名集合（由 TABLES 声明推导）。"""
+    names: set[str] = set()
+    for ddl in TABLES:
+        m = _TABLE_NAME_RE.search(ddl)
+        if m:
+            names.add(m.group(1))
+    return names
 
 
 def init_schema(conn: sqlite3.Connection) -> None:

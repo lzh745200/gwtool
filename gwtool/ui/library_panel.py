@@ -198,6 +198,9 @@ class LibraryPanel(QWidget):
             menu.addAction("删除分类", self._delete_category)
         menu.addAction("导入材料到该分类", self._import)
         menu.exec(self.cat_tree.mapToGlobal(pos))
+        # QMenu(self) 的父对象是面板，不显式销毁就会一直挂在父对象下：
+        # 实测每次右键 +1 个存活 QMenu（50 次右键 50 个全在），长会话会持续涨内存。
+        menu.deleteLater()
 
     def _add_category(self):
         parent_item = self.cat_tree.currentItem()
@@ -242,6 +245,7 @@ class LibraryPanel(QWidget):
         menu.addAction("回收站…", self.open_recycle_bin)
         menu.addAction("删除（移入回收站）", self._delete_selected)
         menu.exec(self.doc_list.mapToGlobal(pos))
+        menu.deleteLater()      # 同上：不销毁会随每次右键累积
 
     def _bulk_add_tags(self):
         ids = self.selected_doc_ids()

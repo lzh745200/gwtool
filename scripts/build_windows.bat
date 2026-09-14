@@ -1,10 +1,18 @@
 @echo off
 REM ============================================================
 REM  公文汇编助手 —— Windows x64 打包脚本
-REM  产物：dist\gwtool\ 目录版（启动快）+ dist\gwtool_便携版.zip
+REM  产物：dist\gwtool\ 目录版（启动快）+ dist\gwtool_portable.zip
 REM  打包后会自动跑产物冒烟校验，未通过则不生成 zip。
+REM
+REM  行尾必须是 CRLF（见仓库根 .gitattributes）：
+REM  cmd.exe 在 CP936 控制台下按字节解码 UTF-8 中文会错位，
+REM  LF 行尾的 .bat 会被整段拆错行，脚本根本跑不起来。
 REM ============================================================
 setlocal
+REM 切换到 UTF-8 代码页：本文件含中文，且下面要传中文参数给 Python。
+REM 不加这一行，CP936 控制台会把 UTF-8 参数解成乱码（曾导致
+REM "gwtool_便携版" 这个文件名变成非法路径而 make_archive 直接抛错）。
+chcp 65001 >nul
 cd /d "%~dp0.."
 
 echo [1/5] 清理旧构建...
@@ -54,11 +62,17 @@ if errorlevel 1 (
 )
 
 echo [5/5] 生成便携版 zip...
-"%PY%" -c "import shutil; shutil.make_archive('dist/gwtool_便携版','zip','.','dist/gwtool')"
+REM 文件名用 ASCII：中文名依赖控制台代码页，是"换个机器就失败"的隐患。
+REM 同时检查 errorlevel —— 老版本没有检查，zip 生成失败仍打印"完成！"并返回 0。
+"%PY%" -c "import shutil; shutil.make_archive('dist/gwtool_portable','zip','.','dist/gwtool')"
+if errorlevel 1 (
+    echo [错误] 便携版 zip 生成失败。
+    exit /b 1
+)
 
 echo.
 echo 完成！
 echo   目录版：dist\gwtool\gwtool.exe
-echo   便携版：dist\gwtool_便携版.zip
+echo   便携版：dist\gwtool_portable.zip
 echo 如需安装包，请用 Inno Setup 编译 scripts\setup_windows.iss
 endlocal

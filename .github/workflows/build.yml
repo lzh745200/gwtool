@@ -28,6 +28,21 @@ jobs:
           pip install ruff
           ruff check gwtool/ scripts/ tests/
 
+      - name: 构建脚本护栏（行尾 + 批处理语法）
+        shell: pwsh
+        run: |
+          # .bat 必须是 CRLF：cmd.exe 在 CP936 下按字节解码 UTF-8 中文会错位，
+          # LF 的 .bat 会被整段拆错行（scripts\build_windows.bat 曾因此完全不可用）。
+          $bad = @()
+          Get-ChildItem scripts -Filter *.bat | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            $lf = ($bytes | Where-Object { $_ -eq 10 }).Count
+            $cr = ($bytes | Where-Object { $_ -eq 13 }).Count
+            if ($lf -ne $cr) { $bad += "$($_.Name) 不是 CRLF（CR=$cr LF=$lf）" }
+          }
+          if ($bad) { $bad | ForEach-Object { Write-Error $_ }; exit 1 }
+          Write-Output "批处理脚本行尾检查通过（CRLF）"
+
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen
@@ -128,6 +143,22 @@ jobs:
 
       - name: 静态检查（ruff）
         run: ruff check gwtool/ scripts/ tests/
+
+      - name: Shell 脚本护栏（语法 + 行尾）
+        run: |
+          # .sh 必须是 LF：CRLF 会让 shebang 变成 `#!/usr/bin/env bash\r`，
+          # 直接执行报 "env: 'bash\r': No such file or directory"；
+          # scripts/gwtool.sh 是 deb 的桌面入口（Exec=/opt/gwtool/gwtool.sh），
+          # CRLF 会让安装后"双击没反应"，而下面的自检只跑 gwtool 本体、
+          # 从不执行它 —— 所以必须在这里显式守住。
+          for f in scripts/*.sh; do
+            if grep -q $'\r' "$f"; then
+              echo "错误：$f 含 CR 字符（CRLF 行尾），Linux 下无法执行"
+              exit 1
+            fi
+            bash -n "$f" || { echo "错误：$f 语法检查未通过"; exit 1; }
+          done
+          echo "Shell 脚本检查通过（LF + 语法正确）"
 
       - name: 运行测试
         env:
@@ -249,6 +280,19 @@ jobs:
           EOF
           dpkg-deb --build --root-owner-group pkg "gwtool_${VERSION}_linux_arm64.deb"
           dpkg-deb -I "gwtool_${VERSION}_linux_arm64.deb" | head -12
+          # 内容断言：控制信息对不代表文件真的进包了。少任何一项，
+          # 用户装完就是"点了没反应"或"没有 OCR"。
+          LIST="$(dpkg-deb -c "gwtool_${VERSION}_linux_arm64.deb")"
+          for need in 'opt/gwtool/gwtool$' 'opt/gwtool/gwtool.sh$' \
+                      'opt/gwtool/ocr/bin/tesseract$' \
+                      'opt/gwtool/ocr/tessdata/chi_sim.traineddata$' \
+                      'usr/share/applications/gwtool.desktop$'; do
+            if ! echo "$LIST" | grep -qE "$need"; then
+              echo "错误：deb 内缺少 $need"
+              exit 1
+            fi
+          done
+          echo "deb 内容断言通过"
 
       - name: 上传安装包（唯一 Linux 产物）
         uses: actions/upload-artifact@v4
@@ -272,9 +316,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "公文汇编助手 $GITHUB_REF_NAME" \
-            --generate-notes \
-            artifacts/gwtool-windows-installer/* \
-            artifacts/gwtool-linux-installer/*
+          # 幂等：同一 tag 重跑（或 Release 已手工建过）时 upload --clobber，
+          # 而不是让 gh release create 因 "already exists" 整条失败。
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release 已存在，改为覆盖上传产物"
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --clobber \
+              artifacts/gwtool-windows-installer/* \
+              artifacts/gwtool-linux-installer/*
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "公文汇编助手 $GITHUB_REF_NAME" \
+              --generate-notes \
+              artifacts/gwtool-windows-installer/* \
+              artifacts/gwtool-linux-installer/*
+          fi

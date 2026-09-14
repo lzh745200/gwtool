@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -36,6 +37,14 @@ from pathlib import Path
 
 from .. import paths
 from ..db import connection as dbconn
+
+# 恢复时把 .restore.tmp 顶上 gwtool.db 的重试策略。
+# Windows 上 os.replace 覆盖目标文件要求**没有任何进程持有它的句柄**；
+# 本程序是长驻多线程应用（主线程 + 各 QThread 各持一个 sqlite 连接），
+# 只要有一个后台线程正在读库，替换就抛 WinError 5「拒绝访问」。
+# 实测：并发读库时 20/20 次恢复全部失败——必须重试而不是一次失败就放弃。
+_REPLACE_RETRIES = 20
+_REPLACE_DELAY = 0.15
 
 # ------------------------------------------------------------------ 策略常量
 MODE_MANUAL = "manual"      # 用户主动点「备份…」：目标是可换机迁移的完整包
@@ -58,6 +67,8 @@ MANIFEST_NAME = "manifest.json"
 # 纯 ASCII 文件名：第三方解压器/老系统都能正常显示，内容仍是 UTF-8 中文
 EXCLUDED_LIST_NAME = "excluded_attachments.txt"
 PART_SUFFIX = ".part"
+# 备份用的自洽快照后缀（在线备份 API 落盘，打包完即删；不是可恢复的备份）
+SNAP_SUFFIX = ".backup-snap"
 LOG_NAME = "backup.log"
 LOG_MAX_BYTES = 512 * 1024
 LOG_KEEP_LINES = 200
@@ -144,23 +155,52 @@ def create_backup(note: str = "", password: str = "", mode: str = MODE_MANUAL) -
     """备份当前数据库到 backups 目录，返回备份文件路径（兼容旧调用）。
 
     password 非空时使用 AES 加密（pyzipper）；未安装 pyzipper 时报错提示。
-    备份前先做 WAL checkpoint，确保后台线程连接中未落盘的事务进入备份包。
     mode=MODE_AUTO 时按自动备份的（更小的）附件预算打包，见模块文档。
     """
     return create_backup_detailed(note=note, password=password, mode=mode).path
 
 
+def _snapshot_db(src: Path) -> Path:
+    """做一份自洽的数据库快照，供备份包使用（**不**动调用方的连接）。
+
+    为什么不能直接 ``zf.write(src, "gwtool.db")``
+    --------------------------------------------
+    库跑在 WAL 模式：已提交的事务可能还留在 ``-wal`` 里没回写到主文件。
+    老实现靠"先 ``PRAGMA wal_checkpoint(TRUNCATE)`` 再打包主文件"，
+    但 checkpoint 只对**当前连接**尽力而为，其它线程（GUI 里各 QThread 的
+    批量导入/纠错/查重连接）持有的 WAL 帧不保证落盘 —— 只要还有第二条连接，
+    包里就是**残缺的旧库**。实测 6 种时序里 5 种丢数据（10 条已提交记录只备份到
+    1~2 条）。备份存在的唯一理由就是灾难恢复，这种"看着成功、其实是旧数据"
+    比备份失败严重得多。
+
+    改用 SQLite 官方在线备份 API（``Connection.backup``）：它按页读取源库并
+    在目标库里重放，**天然包含 WAL 中所有已提交事务**，且不需要独占库、
+    不影响正在运行的其它连接。快照写到同目录的临时文件，调用方用完即删。
+    """
+    import sqlite3
+    snap = src.with_name(src.name + SNAP_SUFFIX)
+    _unlink_quietly(snap)
+    # mode=ro 只读打开：我们不写源库，避免与其它连接争写锁
+    src_conn = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True, timeout=30)
+    dst_conn = sqlite3.connect(str(snap), timeout=30)
+    try:
+        src_conn.backup(dst_conn)
+        dst_conn.commit()
+    finally:
+        dst_conn.close()
+        src_conn.close()
+    return snap
+
+
 def create_backup_detailed(note: str = "", password: str = "",
                            mode: str = MODE_MANUAL) -> BackupReport:
     """创建备份并返回明细（含被排除的附件清单），供 UI 提示与日志使用。"""
-    try:
-        dbconn.get_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except Exception:
-        pass
-    dbconn.close_current_thread()  # 确保落盘（WAL checkpoint 在连接关闭时完成）
     src = dbconn.current_db_file()
     if not src.exists():
         raise FileNotFoundError("数据库不存在，无可备份内容")
+    # 快照放在打包之前：先把数据取成自洽副本，再慢慢压缩，
+    # 期间用户继续操作也不会影响包里内容的一致性。
+    snapshot = _snapshot_db(src)
     # 文件名含微秒，避免同一秒内多次备份互相覆盖
     now = datetime.now()
     stamp = now.strftime("%Y%m%d_%H%M%S") + f"_{now.microsecond // 1000:03d}"
@@ -188,7 +228,7 @@ def create_backup_detailed(note: str = "", password: str = "",
             with pyzipper.AESZipFile(tmp, "w", compression=pyzipper.ZIP_DEFLATED,
                                      encryption=pyzipper.WZ_AES) as zf:
                 zf.setpassword(password.encode("utf-8"))
-                zf.write(src, "gwtool.db")
+                zf.write(snapshot, "gwtool.db")
                 _write_templates(zf)
                 _write_attachments(zf, included, excluded)
                 zf.writestr(MANIFEST_NAME, _manifest_json(encrypted=True, **manifest_kwargs))
@@ -200,7 +240,7 @@ def create_backup_detailed(note: str = "", password: str = "",
             level = 1 if mode == MODE_AUTO else None
             with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED,
                                  compresslevel=level) as zf:
-                zf.write(src, "gwtool.db")
+                zf.write(snapshot, "gwtool.db")
                 _write_templates(zf)
                 _write_attachments(zf, included, excluded)
                 zf.writestr(MANIFEST_NAME, _manifest_json(encrypted=False,
@@ -209,11 +249,9 @@ def create_backup_detailed(note: str = "", password: str = "",
         os.replace(tmp, out)                # 落名：这一步之后包才算存在
         renamed = True
     finally:
+        _unlink_quietly(snapshot)
         if not renamed:                     # 任何异常（磁盘满、口令错、被中断）
-            try:                            # 都不该把半成品留在备份目录里
-                tmp.unlink()
-            except OSError:
-                pass
+            _unlink_quietly(tmp)            # 都不该把半成品留在备份目录里
 
     rotate_backups()
     report = BackupReport(path=str(out), mode=mode, limit_bytes=limit,
@@ -510,14 +548,16 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
         dbconn.close_current_thread()
         target = dbconn.current_db_file()
         tmp = target.with_suffix(".restore.tmp")
-        with zf.open("gwtool.db") as fsrc, open(tmp, "wb") as fdst:
-            shutil.copyfileobj(fsrc, fdst)
-        # 校验可打开
-        import sqlite3
-        conn = sqlite3.connect(str(tmp))
-        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        conn.close()
-        tmp.replace(target)
+        try:
+            with zf.open("gwtool.db") as fsrc, open(tmp, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst)
+            # 校验必须在换掉真库之前：坏包一旦顶上，用户数据就没了
+            _validate_restored_db(tmp)
+            _replace_with_retry(tmp, target)
+        except BaseException:
+            # 校验失败/替换失败都不能把半成品留在数据目录里
+            _unlink_quietly(tmp)
+            raise
         # 模板迁移包回写（旧版只写不读）
         if "templates.json" in names:
             try:
@@ -533,6 +573,105 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
     return RestoreReport(ok=True, legacy=legacy, restored_files=restored,
                          missing=_missing_attachments(recorded),
                          attachments_dir=str(paths.attachments_dir()))
+
+
+def _unlink_quietly(p: Path) -> None:
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """把 src 顶上 dst；被并发句柄拦住时重试，仍失败则给出可操作的诊断。
+
+    为什么必须重试：Windows 上 os.replace 覆盖目标文件要求**没有任何进程持有
+    它的句柄**。本程序是长驻多线程应用（主线程 + 各 QThread 各持一个 sqlite 连接），
+    只要有一个后台线程正在读库，替换就抛 WinError 5「拒绝访问」。
+    实测边读库边恢复时 20/20 全部失败——一次失败就放弃等于"有后台任务时无法恢复"。
+
+    每次重试前再关一遍本线程连接（句柄也可能是本线程先前打开的）。
+    重试仍失败时**绝不退化成原地覆盖**：那会让并发读者看到写了一半的库，
+    宁可直接报错，也不制造"看着恢复成功、库其实损坏"的后果。
+    """
+    last: OSError | None = None
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            last = exc
+            # 仅对"被占用/拒绝访问"重试；磁盘满、路径不存在等立刻抛出
+            if not _is_busy_error(exc):
+                raise
+            dbconn.close_current_thread()
+            if attempt == _REPLACE_RETRIES - 1:
+                break
+            time.sleep(_REPLACE_DELAY)
+    raise RuntimeError(
+        "数据库文件被占用，恢复未能完成（已重试 "
+        f"{_REPLACE_RETRIES} 次，共约 {_REPLACE_RETRIES * _REPLACE_DELAY:.0f} 秒）。"
+        "通常是后台任务（导入/汇编/查重等）仍在读库，请等它结束后重试，"
+        "或关闭程序重新打开后再恢复。当前数据未被改动。"
+        "原始错误：" + str(last)) from last
+
+
+def _is_busy_error(exc: OSError) -> bool:
+    """是否是"文件被占用"类错误（值得重试）。
+
+    Windows: 5=拒绝访问 32=正被另一进程使用 33=文件被锁定；
+    POSIX:   EACCES / EBUSY / ETXTBSY。
+    """
+    if getattr(exc, "winerror", None) in (5, 32, 33):
+        return True
+    return exc.errno in (errno.EACCES, errno.EBUSY, errno.EPERM)
+
+
+def _validate_restored_db(tmp: Path) -> None:
+    """换库前验证备份包里的数据库**确实是一个可用的本程序数据库**。
+
+    为什么不能只跑一句 SELECT：实测把库文件截断成一半、截成 100 字节、
+    甚至换成空文件时，``SELECT count(*) FROM sqlite_master`` 要么返回 0 行、
+    要么不报错 —— 老实现据此判定"校验通过"，把空库顶上真库，
+    **用户全部数据被静默清空且界面提示"恢复成功"**。那是灾难恢复场景下最坏的失败方式。
+
+    校验三层：文件头 → PRAGMA integrity_check → 业务表是否齐全（由 schema 声明驱动，
+    新增表自动纳入，不会随版本漂移）。
+    """
+    size = tmp.stat().st_size
+    if size < 512:
+        raise ValueError(f"备份包内的数据库不完整（仅 {size} 字节），已中止恢复")
+    with open(tmp, "rb") as f:
+        if f.read(16) != b"SQLite format 3\x00":
+            raise ValueError("备份包内的 gwtool.db 不是有效的 SQLite 文件，已中止恢复")
+
+    import sqlite3
+
+    from ..db.schema import required_table_names
+
+    conn = sqlite3.connect(str(tmp))
+    try:
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        if not row or str(row[0]).lower() != "ok":
+            raise ValueError(
+                f"备份包内的数据库校验未通过（integrity_check：{row[0] if row else '无返回'}），"
+                "已中止恢复，当前数据未被改动")
+        present = {str(r[0]) for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"备份包内的数据库损坏，无法读取：{exc}") from exc
+    finally:
+        conn.close()
+
+    required = required_table_names()
+    missing = sorted(required - present)
+    if len(missing) == len(required):
+        raise ValueError("备份包内的数据库没有任何业务表（疑似空库或非本程序的库），"
+                         "已中止恢复，当前数据未被改动")
+    if missing:
+        raise ValueError("备份包内的数据库缺少必需的表 " + "、".join(missing[:5])
+                         + ("…" if len(missing) > 5 else "")
+                         + "（备份包与本程序版本不匹配），已中止恢复")
 
 
 def _missing_attachments(recorded: list[dict]) -> list[dict]:
@@ -576,8 +715,15 @@ def _restore_attachments(zf) -> int:
     备份包可能来自别的机器（甚至被人手工改过），不能相信里面的相对路径。
     同名文件以包内版本为准（恢复语义）；包里**没有**的文件一律不删 ——
     所以超限被排除的附件在同机恢复时其实一点没丢，文件还原样躺在附件目录里。
+
+    条目的 basename 还必须过 ``attachments.safe_stored_name``：备份包是
+    **外部输入**，而 Windows 上 ``Name:stream`` 是 NTFS 备用数据流语法。
+    实测 ``attachments/report.txt:evil.txt`` 会以普通 open() 在附件目录里
+    写出一个目录列表看不见、杀软也常扫不到的隐藏流（可作为载荷夹带），
+    裸 ``Path(name).name`` 拦不住它。统一清洗后只留安全单段名。
     """
     from .. import paths
+    from .attachments import safe_stored_name
     dest_dir = paths.attachments_dir().resolve()
     n = 0
     for name in zf.namelist():
@@ -587,9 +733,11 @@ def _restore_attachments(zf) -> int:
         # 会在附件目录里落一个与目录同名的垃圾文件。点条目只能在**原始相对段**
         # 上识别（规范化后已失真），"."/".." 一律拒绝
         rel = name[len("attachments/"):]
-        file_name = Path(name).name
-        if (not file_name or file_name in (".", "..")
-                or rel in (".", "..")):
+        if rel in (".", ".."):
+            continue
+        # 清洗：去分隔符/盘符/冒号(ADS)/控制字符，剥前导点，截断长度
+        file_name = safe_stored_name(rel)
+        if file_name in (".", "..") or not file_name:
             continue
         target = (dest_dir / file_name).resolve()
         if dest_dir != target and dest_dir not in target.parents:

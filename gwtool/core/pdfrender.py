@@ -285,9 +285,10 @@ def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
 
 def _page_count(pdf_path: str) -> int:
     d = fitz.open(pdf_path)
-    n = d.page_count
-    d.close()
-    return n
+    try:
+        return d.page_count
+    finally:
+        d.close()
 
 
 def _locate_headings(pdf_path: str, headings: list[str], start_page: int = 0) -> list[int]:
@@ -297,23 +298,25 @@ def _locate_headings(pdf_path: str, headings: list[str], start_page: int = 0) ->
     匹配先全标题、再 12 字前缀，重名标题靠单调游标按顺序消歧。
     """
     d = fitz.open(pdf_path)
-    pages = []
-    cursor = start_page
-    for h in headings:
-        found = 0
-        needle = h.strip()
-        for pno in range(cursor, d.page_count):
-            page = d[pno]
-            hits = page.search_for(needle)
-            if not hits and len(needle) > 12:
-                hits = page.search_for(needle[:12])
-            if hits:
-                found = pno + 1
-                cursor = pno  # 标题单调不回退
-                break
-        pages.append(found)
-    d.close()
-    return pages
+    try:
+        pages = []
+        cursor = start_page
+        for h in headings:
+            found = 0
+            needle = h.strip()
+            for pno in range(cursor, d.page_count):
+                page = d[pno]
+                hits = page.search_for(needle)
+                if not hits and len(needle) > 12:
+                    hits = page.search_for(needle[:12])
+                if hits:
+                    found = pno + 1
+                    cursor = pno  # 标题单调不回退
+                    break
+            pages.append(found)
+        return pages
+    finally:
+        d.close()
 
 
 def collect_headings(trees: list[DocTree], tpl: DocTemplate) -> list[tuple[str, int]]:
@@ -367,31 +370,45 @@ def render_compiled_pdf(trees: list[DocTree], tpl: DocTemplate, out_pdf: str) ->
 
 
 def stamp_page_numbers(pdf_path: str, tpl: DocTemplate, skip_pages: int = 0) -> None:
-    """奇数页右下角、偶数页左下角盖页码 “— N —”（从 1 起）。"""
+    """奇数页右下角、偶数页左下角盖页码 “— N —”（从 1 起）。
+
+    写临时文件再 os.replace：save 中途失败（磁盘满、文件被占用）时原 PDF
+    保持完整，不会留下半截文件；文档对象用 try/finally 关闭，避免句柄泄漏。
+    """
     d = fitz.open(pdf_path)
-    fmt = tpl.page_number_format or "— {page} —"
-    font = _cjk_font()
-    size = tpl.page_number_size_pt
-    gray = 0.25
-    for pno in range(d.page_count):
-        page = d[pno]
-        label = fmt.replace("{page}", str(pno + 1))
-        rect = page.rect
-        bottom = rect.height - max(12, tpl.margin_bottom_mm * _MM * 0.45)
+    try:
+        fmt = tpl.page_number_format or "— {page} —"
+        font = _cjk_font()
+        size = tpl.page_number_size_pt
+        gray = 0.25
+        for pno in range(d.page_count):
+            page = d[pno]
+            label = fmt.replace("{page}", str(pno + 1))
+            rect = page.rect
+            bottom = rect.height - max(12, tpl.margin_bottom_mm * _MM * 0.45)
+            try:
+                tw = fitz.get_text_length(label, fontname=font, fontsize=size)
+            except Exception:
+                tw = len(label) * size * 0.85  # 宽度估算兜底
+            margin = tpl.margin_left_mm * _MM
+            if (pno + 1) % 2 == 1:  # 奇数页：右侧
+                x = rect.width - margin - tw
+            else:                   # 偶数页：左侧
+                x = margin
+            page.insert_text((x, bottom), label, fontname=font, fontsize=size,
+                             color=(gray, gray, gray))
+        tmp = pdf_path + ".tmp"
         try:
-            tw = fitz.get_text_length(label, fontname=font, fontsize=size)
-        except Exception:
-            tw = len(label) * size * 0.85  # 宽度估算兜底
-        margin = tpl.margin_left_mm * _MM
-        if (pno + 1) % 2 == 1:  # 奇数页：右侧
-            x = rect.width - margin - tw
-        else:                   # 偶数页：左侧
-            x = margin
-        page.insert_text((x, bottom), label, fontname=font, fontsize=size,
-                         color=(gray, gray, gray))
-    tmp = pdf_path + ".tmp"
-    d.save(tmp, garbage=3, deflate=True)
-    d.close()
+            d.save(tmp, garbage=3, deflate=True)
+        except BaseException:
+            import os
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    finally:
+        d.close()
     import os
     os.replace(tmp, pdf_path)
 

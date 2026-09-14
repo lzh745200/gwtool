@@ -81,10 +81,20 @@ def main() -> int:
     check("opencc 简繁转换词典", find_one(dist, "TSCharacters", "STCharacters",
                                           "opencc") is not None)
     check("jieba 分词词典", find_one(dist, "dict.txt") is not None)
-    # OCR 内置（v1.5.0）：Tesseract 二进制与中文包随包分发
-    tess = find_one(dist, "tesseract.exe", "tesseract")
-    check("内置 Tesseract 可执行文件", tess is not None,
-          str(tess.relative_to(dist)) if tess else "缺失则 OCR 不可用")
+    # OCR 内置（v1.5.0）：Tesseract 二进制与中文包随包分发。
+    # 必须按**确切路径**判定，不能用 find_one 的子串匹配：产物里本来就有
+    # tesseract\libtesseract-5.dll 与 ocr/lib/libtesseract.so.*，
+    # needle 给 "tesseract" 时它们同样命中 —— 于是 tesseract.exe 真的缺失
+    # 也会判 PASS，CI 的 OCR 交付门形同虚设（实测已踩中）。
+    tess_exe = None
+    for cand in (dist / "tesseract" / "tesseract.exe",   # Windows onedir/Inno
+                 dist / "ocr" / "bin" / "tesseract"):    # Linux deb/便携
+        if cand.is_file():
+            tess_exe = cand
+            break
+    check("内置 Tesseract 可执行文件", tess_exe is not None,
+          str(tess_exe.relative_to(dist)) if tess_exe
+          else "缺失则 OCR 不可用（注意：libtesseract 动态库不算）")
     chi = find_one(dist, "chi_sim.traineddata")
     check("内置中文 OCR 包 chi_sim", chi is not None,
           str(chi.relative_to(dist)) if chi else "缺失则中文 OCR 不可用")
@@ -93,9 +103,13 @@ def main() -> int:
     print("\n-- 启动实测 --")
     # 便携模式：程序同级存在 Data/ 即把数据写在那里，不碰真实用户数据，
     # 同时正好验证"全新电脑首启动"这条路径。
+    # 无条件清掉既有 Data/：上一次便携运行残留的库会让"首启动种子导入"
+    # 变成读旧数据（假通过），而且残留库会被 Inno 一起打进安装包。
     data_dir = dist / "Data"
-    fresh = not data_dir.exists()
+    if data_dir.exists():
+        shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(exist_ok=True)
+    fresh = True
 
     env = dict(os.environ)
     if not IS_WIN:

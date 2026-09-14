@@ -23,23 +23,12 @@ fi
 echo "[3/6] 运行测试确认环境正常..."
 python -m pytest tests/ -q
 
-echo "[4/6] PyInstaller 打包（onedir）..."
-pyinstaller --noconfirm --clean \
-  --name gwtool \
-  --windowed \
-  --add-data "gwtool/resources/data/seed.db:gwtool/resources/data" \
-  --collect-data opencc \
-  --exclude-module PySide6.QtWebEngineCore \
-  --exclude-module PySide6.QtWebEngineWidgets \
-  --exclude-module PySide6.QtWebChannel \
-  --exclude-module PySide6.QtQuick3D \
-  --exclude-module PySide6.QtQuick \
-  --exclude-module PySide6.QtQml \
-  --exclude-module PySide6.QtCharts \
-  --exclude-module PySide6.QtMultimedia \
-  --exclude-module PySide6.QtSql \
-  --exclude-module tkinter \
-  main.py
+echo "[4/6] PyInstaller 打包（参数唯一来源：gwtool.spec，双平台共用）..."
+# 不要再把 --exclude-module/--add-data 抄一遍：本脚本曾手写一整套参数，
+# 与 gwtool.spec 漂移后漏掉了 --hidden-import PySide6.QtSvg，打包版的
+# 工具栏图标会全部空白（icons.py 用 QImage.fromData(..., "SVG") 画图标）。
+# 统一入口后，spec 里的 hiddenimports/datas/excludes 只有一处维护。
+pyinstaller --noconfirm --clean gwtool.spec
 
 echo "[4.5/6] 集成 Tesseract OCR（已安装时）..."
 if command -v tesseract >/dev/null 2>&1; then

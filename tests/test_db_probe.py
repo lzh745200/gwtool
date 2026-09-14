@@ -256,7 +256,7 @@ class TestPreMigrateBackup:
         conn.close()
 
     def test_backup_zip_contains_wal(self, tmp_path):
-        """迁移前备份：zip 必须同时打包主库与 -wal 文件（第 76-78 行从未执行过）。"""
+        """迁移前备份必须包含 WAL 中已提交的数据（自洽单库快照）。"""
         db_file = tmp_path / "old" / "gwtool.db"
         db_file.parent.mkdir(parents=True)
         self._make_v1_db(db_file)
@@ -286,7 +286,27 @@ class TestPreMigrateBackup:
         with zipfile.ZipFile(zips[0]) as zf:
             names = zf.namelist()
         assert "gwtool.db" in names
-        assert "gwtool.db-wal" in names, "-wal 也必须进备份包"
+        # 迁移前备份必须是**单个自洽**的库文件，而不是"主库 + 一个游离的 -wal"：
+        # 老实现把 db 与 -wal 各当一个 zip 成员，恢复端只会取包内 gwtool.db，
+        # -wal 要么被忽略、要么与主库版本错配，SQLite 打开直接报
+        # "database disk image is malformed" —— 那种包根本不能用来救灾。
+        # 现在改用 SQLite 在线备份 API，WAL 里已提交的事务会被重放进快照。
+        assert "gwtool.db-wal" not in names, "不应再单独附带 -wal（快照已自洽）"
+        assert not [n for n in names if n.endswith(("-wal", "-shm"))], \
+            f"备份包内不应有游离的 WAL 文件：{names}"
+        # 真正要验的是"WAL 里那条已提交数据进包了"
+        snap_dir = tmp_path / "snapcheck"
+        snap_dir.mkdir()
+        with zipfile.ZipFile(zips[0]) as zf:
+            zf.extract("gwtool.db", snap_dir)
+        sc = sqlite3.connect(str(snap_dir / "gwtool.db"))
+        try:
+            rows = {r[0] for r in sc.execute(
+                "SELECT title FROM documents").fetchall()}
+        finally:
+            sc.close()
+        assert rows == {"老文档", "wal内"}, \
+            f"WAL 中已提交的数据必须进备份包，实际只有 {rows}"
 
     def test_oserror_swallows_silently(self, tmp_path):
         """备份目录被同名文件占位时：迁移照常完成，只静默跳过备份（不崩启动）。"""

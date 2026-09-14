@@ -61,16 +61,29 @@ def available() -> bool:
     return bool(tesseract_path())
 
 
+def _tess_env(tess: str) -> dict:
+    """构造子进程环境：TESSDATA_PREFIX 只传给 tesseract，不改进程全局。
+
+    为什么不写 os.environ：那是**进程级**全局状态，而 OCR 会在后台线程里跑
+    （ImportWorker / FnWorker 批量导入扫描件），用户同时可能点"检测中文包"。
+    两条路径并发写同一个键时，subprocess 读到的可能是对方刚写进去的值，
+    还会覆盖用户手工设置。改成随 env 传参后，各次调用互不影响。
+    """
+    env = dict(os.environ)
+    td = _bundled_tessdata()
+    if td:
+        env["TESSDATA_PREFIX"] = td
+    return env
+
+
 def has_chi_sim(tess: str = "") -> bool:
     tess = tess or tesseract_path()
     if not tess:
         return False
-    td = _bundled_tessdata()
-    if td:
-        os.environ["TESSDATA_PREFIX"] = td
     try:
         out = subprocess.run([tess, "--list-langs"], capture_output=True,
-                             timeout=30, text=True, check=False)
+                             timeout=30, text=True, check=False,
+                             env=_tess_env(tess))
         langs = (out.stdout or "") + (out.stderr or "")
         return "chi_sim" in langs
     except Exception:
@@ -81,12 +94,9 @@ def ocr_image(image_path: str, tess: str = "") -> str:
     tess = tess or tesseract_path()
     if not tess:
         raise RuntimeError("未找到 tesseract，请先安装并在设置中指定路径")
-    td = _bundled_tessdata()
-    if td:
-        os.environ["TESSDATA_PREFIX"] = td
     r = subprocess.run(
         [tess, image_path, "stdout", "-l", "chi_sim", "--psm", "6"],
-        capture_output=True, timeout=300, check=False)
+        capture_output=True, timeout=300, check=False, env=_tess_env(tess))
     return (r.stdout or b"").decode("utf-8", errors="replace").strip()
 
 

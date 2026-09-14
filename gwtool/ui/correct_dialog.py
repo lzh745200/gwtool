@@ -24,13 +24,14 @@ from PySide6.QtWidgets import (
 from ..core import corrector, importer
 from ..db import dao
 from .theme import MUTED, severity_color
+from .widgets import ThreadSafeDialog
 from .workers import FnWorker
 
 # 逐处确认、不参与"全部应用"的类别（与纠错面板口径一致）
 _APPLY_SKIP = ("数字用法",)
 
 
-class AnyDocCorrectDialog(QDialog):
+class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
     """任意文档纠错（带标记视图）。"""
 
     def __init__(self, parent=None):
@@ -42,6 +43,7 @@ class AnyDocCorrectDialog(QDialog):
         self._corrs: list[list] = []
         self._hits: list[dict] = []
         self._source = ""
+        self._loading_source = ""       # 后台解析中暂存的文件名（回调里落 _source）
         self._loading = False           # 程序性写输入框时抑制 textChanged 重建
         self._worker: FnWorker | None = None
         self._build_ui()
@@ -127,15 +129,31 @@ class AnyDocCorrectDialog(QDialog):
             "可导入文档 (*.docx *.doc *.txt *.rtf *.pdf *.md *.markdown *.html *.htm);;所有文件 (*)")
         if not path:
             return
-        r = importer.parse_any(path)
+        # 解析放后台线程：单个 0.1 MB 的 docx 实测要 3.78 秒（6000 段），
+        # 扫描件走 OCR 更是分钟级。放在 GUI 线程上就是整个窗口冻结，
+        # 用户会以为程序卡死。ImportWorker 走的是同一条 parse_any，
+        # 这里口径保持一致。
+        if self._worker is not None and self._worker.isRunning():
+            self.lbl_stat.setText("上一次任务仍在进行，请稍候")
+            return
+        self._set_busy(True)
+        self.lbl_stat.setText(f"正在解析 {Path(path).name}…")
+        self._loading_source = Path(path).name
+        self._worker = FnWorker(importer.parse_any, path, parent=self)
+        self._worker.ok.connect(self._on_file_parsed)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_file_parsed(self, r) -> None:
+        self._set_busy(False)
         if not r.ok or r.tree is None:
-            self.lbl_stat.setText(f"解析失败：{r.error[:120]}")
+            self.lbl_stat.setText(f"解析失败：{(r.error or '未知原因')[:120]}")
             return
         self._loading = True
         try:
             self._title = r.tree.title
             self._blocks = corrector.tree_to_blocks(r.tree)
-            self._source = Path(path).name
+            self._source = self._loading_source
             self.lbl_source.setText(f"{self._source}（{len(self._blocks)} 块）")
             self.input_box.setPlainText(
                 "\n".join(b["text"] for b in self._blocks if b["kind"] != "table"))
@@ -167,6 +185,13 @@ class AnyDocCorrectDialog(QDialog):
         """用户手改文本：按行重建为普通段落块（表格/标题结构让位于最新文本）。
 
         程序性写输入框（载入文件/同步修正结果）经由 _loading 抑制，不会走到这里。
+
+        必须同时清掉 `_title`：标题命中也参与纠错（_render 里对 _title 单独
+        check_text 一次），而 `_title` 只代表"载入时那份文档"。用户把输入框
+        清空后 _blocks 变空，_title 却还留着旧文件名 —— 下一次纠错回调里
+        `_hit_text(-1, ...)` 去取 `_blocks[-1]`，空列表直接 IndexError，
+        异常从 _on_checked 冒出去，结果是**纠错跑完了却什么都不显示**
+        （列表空、状态停在"纠错中…"）。
         """
         if self._loading:
             return
@@ -174,6 +199,8 @@ class AnyDocCorrectDialog(QDialog):
         self._blocks = [{"kind": "para", "text": seg, "rows": None}
                         for seg in text.splitlines()]
         self._source = self._source or "粘贴"
+        self._title = ""
+        self._hits = []
 
     # ------------------------------------------------------------ 纠错
     def start_check(self) -> None:
@@ -188,7 +215,12 @@ class AnyDocCorrectDialog(QDialog):
         self._set_busy(True)
         self.lbl_stat.setText("纠错中…")
         blocks_snapshot = [dict(b) for b in self._blocks]
-        self._worker = FnWorker(_scan_blocks, blocks_snapshot)
+        # parent=self：不设 parent 的 QThread 只被 self._worker 强引用，
+        # 对话框一旦先于线程销毁（用户 Esc 关窗），唯一引用被释放会让仍在运行的
+        # 线程被 GC 析构 → Qt qFatal 强杀进程（0xC0000409）。挂上父对象后
+        # 线程生命周期跟随对话框，主窗口 closeEvent 的 findChildren(QThread)
+        # 也能找到并等待它。
+        self._worker = FnWorker(_scan_blocks, blocks_snapshot, parent=self)
         self._worker.ok.connect(self._on_checked)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
@@ -269,13 +301,24 @@ class AnyDocCorrectDialog(QDialog):
                                "text": self._hit_text(bi, ri, ci)})
 
     def _hit_text(self, bi, ri, ci) -> str:
+        """命中所在的原文片段。
+
+        bi == -1 表示"命中的是标题"（不在 _blocks 里）：必须返回 self._title。
+        老实现不管 bi 直接 `self._blocks[bi]` —— 取到的是**最后一个块**，
+        于是标题命中的"第N段"算错；输入框被清空后 _blocks 为空，
+        直接 IndexError 把整次纠错结果丢掉（列表空、状态永远停在"纠错中…"）。
+        """
+        if bi < 0:
+            return self._title or ""
+        if not (0 <= bi < len(self._blocks)):
+            return ""
         b = self._blocks[bi]
-        if b["kind"] == "table" and ri is not None:
+        if b.get("kind") == "table" and ri is not None:
             try:
                 return b["rows"][ri][ci]
-            except (IndexError, TypeError):
+            except (IndexError, TypeError, KeyError):
                 return ""
-        return b["text"]
+        return b.get("text", "") or ""
 
     def _goto_hit(self, row: int) -> None:
         if 0 <= row < len(self._hits):

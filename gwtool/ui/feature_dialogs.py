@@ -21,7 +21,7 @@ from ..core import backup as backup_core
 from ..core.security import clear_password, has_password, set_password
 from ..db import dao
 from . import theme
-from .widgets import ask, info, warn
+from .widgets import ThreadSafeDialog, ask, info, warn
 
 # ================================================================ 骨架向导
 class SkeletonDialog(QDialog):
@@ -111,7 +111,7 @@ class SkeletonDialog(QDialog):
 
 
 # ================================================================ 格式体检
-class InspectorDialog(QDialog):
+class InspectorDialog(ThreadSafeDialog, QDialog):
     """GB/T 9704 公文格式体检：当前文档 或 本地 docx 文件。"""
 
     def __init__(self, editor_text_getter, parent=None):
@@ -208,13 +208,31 @@ class InspectorDialog(QDialog):
 class _BulkReplaceWorker(QThread):
     progress = Signal(int, int)
     done = Signal(list)
+    failed = Signal(str)
 
-    def __init__(self, doc_ids, find, repl, use_regex):
-        super().__init__()
+    def __init__(self, doc_ids, find, repl, use_regex, parent=None):
+        super().__init__(parent)
         self.doc_ids, self.find, self.repl, self.use_regex = \
             doc_ids, find, repl, use_regex
 
     def run(self):
+        # 整段包 try：老实现没有异常通路，任何一次 dao 调用抛错
+        # （库被占用、磁盘满、sqlite 异常）都会让 run() 直接结束而不发任何信号，
+        # 对话框的「执行替换」按钮与进度条永远停在忙碌态，只能关窗口。
+        try:
+            self._run()
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            try:
+                from ..db import connection as _dbconn
+                _dbconn.close_current_thread()
+            except Exception:
+                pass
+
+    def _run(self):
         import re as _re
         results = []
         for i, did in enumerate(self.doc_ids):
@@ -250,7 +268,7 @@ class _BulkReplaceWorker(QThread):
         self.done.emit(results)
 
 
-class BulkReplaceDialog(QDialog):
+class BulkReplaceDialog(ThreadSafeDialog, QDialog):
     """跨文档批量查找替换（带预览）。"""
 
     def __init__(self, category_id: int | None, parent=None):
@@ -379,12 +397,21 @@ class BulkReplaceDialog(QDialog):
         self.progress.setVisible(True)
         self.progress.setRange(0, len(ids))
         self.btn_apply.setEnabled(False)
+        # parent=self：无父 QThread 只被 self._worker 强引用，对话框先销毁时
+        # 唯一引用被释放会让运行中的线程被 GC 析构 → Qt qFatal 强杀进程。
         self._worker = _BulkReplaceWorker(ids, self.ed_find.text(),
                                           self.ed_repl.text(),
-                                          self.chk_regex.isChecked())
+                                          self.chk_regex.isChecked(), parent=self)
         self._worker.progress.connect(self.progress.setValue)
         self._worker.done.connect(self._done)
+        self._worker.failed.connect(self._failed)
         self._worker.start()
+
+    def _failed(self, msg: str):
+        """替换失败：必须复位按钮/进度条，否则对话框永久卡在忙碌态。"""
+        self.progress.setVisible(False)
+        self.btn_apply.setEnabled(True)
+        warn(self, f"批量替换未完成：{msg}\n\n已替换的部分不受影响，可修正后重试。")
 
     def _done(self, results):
         self.progress.setVisible(False)
@@ -467,7 +494,7 @@ class _BatchApplyWorker(QThread):
             self.failed.emit(str(exc))
 
 
-class BatchCorrectDialog(QDialog):
+class BatchCorrectDialog(ThreadSafeDialog, QDialog):
     """按分类批量纠错：先预览命中（哪篇、每处 错→对、位置），确认后才写回。
 
     交互范式沿用 BulkReplaceDialog（预览 -> 确认 -> 后台执行 -> 汇总）。
@@ -679,7 +706,7 @@ class BatchCorrectDialog(QDialog):
 
 
 # ================================================================ 历史快照
-class SnapshotsDialog(QDialog):
+class SnapshotsDialog(ThreadSafeDialog, QDialog):
     """历史版本：列表 + 差异预览 + 回滚。"""
 
     def __init__(self, doc_id: int | None, current_text: str, parent=None,
@@ -754,7 +781,7 @@ class SnapshotsDialog(QDialog):
 
 
 # ================================================================ 相似查重
-class SimilarityDialog(QDialog):
+class SimilarityDialog(ThreadSafeDialog, QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("相似文档查重（SimHash）")

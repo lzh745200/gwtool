@@ -1,0 +1,44 @@
+# 行尾符强制规范（跨平台构建链的正确性依赖，不是风格偏好）
+#
+# 为什么必须有这个文件：
+#   仓库同时含 Windows 批处理与 Linux shell 脚本，而两者对行尾的要求**相反**。
+#   没有本文件时，行尾由各人各机的 core.autocrlf 决定，实际已酿成两类线上缺陷：
+#
+#   1) *.bat 被存成 LF：cmd.exe 在 CP936 控制台下按字节解码 UTF-8 中文时会错位，
+#      整段脚本被拆错行（`cd /d "%~dp0.."` 引号被吃掉、报"此时不应有 do"），
+#      scripts\build_windows.bat 自 v1.5.0 起实际无法运行，且 exit code 255。
+#   2) *.sh 被存成 CRLF：Linux 上 shebang 变成 `#!/usr/bin/env bash\r`，
+#      直接执行报 "env: 'bash\r': No such file or directory"；
+#      用 `bash 文件` 调用则 `case ... in\r` 语法错误。
+#      scripts/gwtool.sh 是麒麟 deb 的桌面入口（Exec=/opt/gwtool/gwtool.sh），
+#      CRLF 会让安装后"双击没反应"，而 CI 的自检从不执行它，所以一直没被发现。
+#
+# 改这里之前请先读上面两段：这不是编码洁癖，是"产物能不能跑"的问题。
+
+# 默认：文本文件一律 LF 入库（git 会按平台自动适配工作区）
+* text=auto eol=lf
+
+# Windows 批处理 / Inno Setup 脚本必须是 CRLF，否则 cmd.exe 解析错乱
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.iss text eol=crlf
+
+# Linux shell 脚本必须是 LF，否则 shebang 与语法全部失效
+*.sh text eol=lf
+
+# 二进制：禁止任何换行转换，避免损坏产物
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.doc binary
+*.pptx binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.db binary
+*.onnx binary
+*.traineddata binary

@@ -11,35 +11,53 @@ except ImportError:  # pragma: no cover
 def stamp_watermark_pdf(pdf_path: str, text: str, out_path: str = "",
                         opacity: float = 0.12, angle: float = 45.0,
                         fontsize: float = 42.0, tile: bool = True) -> str:
-    """在每页盖文字水印（斜向平铺）。默认覆盖原文件。"""
+    """在每页盖文字水印（斜向平铺）。默认覆盖原文件。
+
+    用 try/finally 关闭文档：insert_text/save 抛异常（字体缺失、磁盘满、
+    输出被占用）时若不关，文档句柄会泄漏。覆盖原文件走「另存 .tmp 再
+    os.replace」：中途失败时原文件仍是完整的，不会留下半截 PDF。
+    """
     out = out_path or pdf_path
     import math
+    import os
     src = fitz.open(pdf_path)
-    font = "china-s"
-    mat = fitz.Matrix(math.cos(math.radians(angle)), math.sin(math.radians(angle)),
-                      -math.sin(math.radians(angle)), math.cos(math.radians(angle)),
-                      0, 0)
-    for page in src:
-        w, h = page.rect.width, page.rect.height
-        tw = fitz.get_text_length(text, fontname=font, fontsize=fontsize)
-        if tile:
-            positions = [(w * f, h * f) for f in (0.25, 0.55, 0.8)]
-            positions += [(w * f, h * (f + 0.45)) for f in (0.15, 0.45, 0.75)]
+    try:
+        font = "china-s"
+        mat = fitz.Matrix(math.cos(math.radians(angle)), math.sin(math.radians(angle)),
+                          -math.sin(math.radians(angle)), math.cos(math.radians(angle)),
+                          0, 0)
+        for page in src:
+            w, h = page.rect.width, page.rect.height
+            tw = fitz.get_text_length(text, fontname=font, fontsize=fontsize)
+            if tile:
+                positions = [(w * f, h * f) for f in (0.25, 0.55, 0.8)]
+                positions += [(w * f, h * (f + 0.45)) for f in (0.15, 0.45, 0.75)]
+            else:
+                positions = [(w / 2 - tw / 2, h / 2)]
+            for (px, py) in positions:
+                page.insert_text(
+                    (px, py), text, fontname=font, fontsize=fontsize,
+                    fill_opacity=opacity, stroke_opacity=opacity,
+                    color=(0.5, 0.5, 0.5), morph=(fitz.Point(px, py), mat))
+        if out == pdf_path:
+            # 覆盖原文件：必须先 save 到 .tmp（此时源文档还开着，无法 replace），
+            # 再关闭文档，最后才 os.replace —— Windows 上对仍被自己打开的文件
+            # 调 os.replace 必定 WinError 5「拒绝访问」。
+            tmp = pdf_path + ".wm.tmp"
+            try:
+                src.save(tmp, garbage=3, deflate=True)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         else:
-            positions = [(w / 2 - tw / 2, h / 2)]
-        for (px, py) in positions:
-            page.insert_text(
-                (px, py), text, fontname=font, fontsize=fontsize,
-                fill_opacity=opacity, stroke_opacity=opacity,
-                color=(0.5, 0.5, 0.5), morph=(fitz.Point(px, py), mat))
-    if out != pdf_path:
-        src.save(out, garbage=3, deflate=True)
+            tmp = ""
+            src.save(out, garbage=3, deflate=True)
+    finally:
         src.close()
-    else:
-        tmp = pdf_path + ".wm.tmp"
-        src.save(tmp, garbage=3, deflate=True)
-        src.close()
-        import os
+    if tmp:
         os.replace(tmp, pdf_path)
     return out
 

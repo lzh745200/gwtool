@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
 
 from ..core.importer import IMAGE_EXTS, SUPPORTED_EXTS
 from ..db import dao
-from .widgets import info
+from .widgets import ThreadSafeDialog, info
 from .workers import ImportWorker
 
 FILE_FILTER = ("支持的文件 (*.docx *.doc *.wps *.txt *.rtf *.pdf *.md *.markdown *.html *.htm"
@@ -55,7 +55,7 @@ class _DropListWidget(QListWidget):
             super().dropEvent(e)
 
 
-class ImportDialog(QDialog):
+class ImportDialog(ThreadSafeDialog, QDialog):
     def __init__(self, category_id: int = 0, parent=None):
         super().__init__(parent)
         self.setWindowTitle("导入材料")

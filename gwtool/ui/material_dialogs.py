@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog,
 
 from ..core import attachments
 from ..db import dao
-from .widgets import ask, info, warn
+from .widgets import ThreadSafeDialog, ask, info, warn
 
 # 附件表格列（右对齐与否在 _set_cell 调用处指定）
 ATT_COLUMNS = ("文件名", "大小", "添加时间", "状态")
@@ -54,7 +54,7 @@ def _set_cell(table: QTableWidget, row: int, col: int, text: str,
 
 
 # ================================================================ 附件管理
-class AttachmentDialog(QDialog):
+class AttachmentDialog(ThreadSafeDialog, QDialog):
     """某篇材料的附件：列出、添加、打开、另存为、删除。
 
     添加即复制进数据目录 attachments/（重名自动加序号，绝不覆盖），
