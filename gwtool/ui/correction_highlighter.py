@@ -25,8 +25,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat)
+from PySide6.QtGui import (QColor, QSyntaxHighlighter, QTextCharFormat)
 
 from ..core import corrector
 

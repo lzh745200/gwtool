@@ -158,7 +158,7 @@ def test_backup_wal_checkpoint(tmp_db):
 
     appmod.ensure_database_seeded()
     dao.add_document(dao.Document(title="wal", content_text="写入内容"))
-    path = backup.create_backup(note="wal")
+    backup.create_backup(note="wal")
     wal = dbconn.current_db_file().with_name("gwtool.db-wal")
     if wal.exists():
         assert wal.stat().st_size == 0, "checkpoint(TRUNCATE) 后 WAL 应为空"

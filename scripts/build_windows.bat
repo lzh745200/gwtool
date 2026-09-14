@@ -35,12 +35,12 @@ if errorlevel 1 (
 echo [3.5/5] 集成 Tesseract OCR（本机已安装时；CI 由 choco 提供）...
 set "TS_DIR="
 for /d %%D in ("%ProgramFiles%\Tesseract-OCR") do set "TS_DIR=%%D"
-if exist "%TS_DIR%	esseract.exe" (
-    mkdir dist\gwtool	esseract	essdata 2>nul
-    copy /y "%TS_DIR%	esseract.exe" dist\gwtool	esseract\ >nul
-    copy /y "%TS_DIR%\*.dll" dist\gwtool	esseract\ >nul
-    copy /y "%TS_DIR%	essdata\eng.traineddata" dist\gwtool	esseract	essdata\ >nul
-    if exist "%TS_DIR%	essdata\chi_sim.traineddata" copy /y "%TS_DIR%	essdata\chi_sim.traineddata" dist\gwtool	esseract	essdata\ >nul
+if exist "%TS_DIR%\tesseract.exe" (
+    mkdir dist\gwtool\tesseract\tessdata 2>nul
+    copy /y "%TS_DIR%\tesseract.exe" dist\gwtool\tesseract\ >nul
+    copy /y "%TS_DIR%\*.dll" dist\gwtool\tesseract\ >nul
+    copy /y "%TS_DIR%\tessdata\eng.traineddata" dist\gwtool\tesseract\tessdata\ >nul
+    if exist "%TS_DIR%\tessdata\chi_sim.traineddata" copy /y "%TS_DIR%\tessdata\chi_sim.traineddata" dist\gwtool\tesseract\tessdata\ >nul
     echo       已集成 Tesseract。
 ) else (
     echo       未检测到本机 Tesseract，跳过集成（OCR 仍可通过设置指定路径）。

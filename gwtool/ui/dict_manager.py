@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QMessageBox, QPushButton, QTabWidget,
+                               QPushButton, QTabWidget,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ..core import ruleset

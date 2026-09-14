@@ -13,7 +13,7 @@ import json
 import pytest
 
 from gwtool.core.importer import parse_any
-from gwtool.core.model import PARAGRAPH, TABLE
+from gwtool.core.model import TABLE
 from gwtool.db import dao
 
 

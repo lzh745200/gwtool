@@ -8,7 +8,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QFont, QImage, QPixmap, QShortcut, QKeySequence, \
     QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu,
-                               QPushButton, QScrollArea, QSplitter, QTabWidget,
+                               QPushButton, QScrollArea, QTabWidget,
                                QTextBrowser, QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -421,7 +421,6 @@ class EditorPanel(QWidget):
         """按标题正则把纯文本重建为块结构（编辑器是纯文本形态，表格无法从
         文本恢复——但标题层级不应随一次保存而丢失）。"""
         import json as _json
-        from ..core.model import Block, HEADING, PARAGRAPH
         blocks = []
         for line in text.splitlines():
             s = line.strip()

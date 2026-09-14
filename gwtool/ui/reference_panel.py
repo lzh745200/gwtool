@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QSplitter, QTextEdit, QVBoxLayout,
+                               QPushButton, QSplitter, QVBoxLayout,
                                QWidget)
 
 from ..core import corrector, reference

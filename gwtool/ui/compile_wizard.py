@@ -2,16 +2,14 @@
 """一键汇编向导：三步 —— 选材料 -> 选模板+封面信息 -> 生成输出。"""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QProgressBar, QPushButton, QRadioButton,
-                               QWizard, QWizardPage, QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QWizard, QWizardPage, QVBoxLayout)
 
 from ..core.template import DocTemplate, default_template
 from ..db import dao

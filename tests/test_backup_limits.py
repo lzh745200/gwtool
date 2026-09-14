@@ -457,7 +457,6 @@ def test_backup_failure_warns_and_restores_cursor(ui, monkeypatch):
 
 def test_restore_ui_reports_missing_attachments(ui, doc, tmp_path, monkeypatch):
     """恢复时要明确告知哪些附件不在此备份中、从哪里补（不能只说"恢复成功"）。"""
-    import gwtool.ui.main_window as mw
     from PySide6.QtWidgets import QFileDialog
 
     win, shown = ui

@@ -11,7 +11,6 @@ from ..core import compiler, importer
 from ..core.booklet import make_booklet
 from ..db import connection as dbconn
 from ..db import dao
-from ..core.model import Block
 
 
 def _close_thread_conn() -> None:

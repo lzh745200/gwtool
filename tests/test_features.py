@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """扩展功能测试：工具箱/骨架/快照/体检/查重/水印/忽略名单/加密备份/批量汇编。"""
-import os
 from pathlib import Path
 
 import pytest

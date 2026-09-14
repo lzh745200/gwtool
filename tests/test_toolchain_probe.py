@@ -146,7 +146,7 @@ class TestReferenceProbe:
         assert reference.lookup("   ") == []
 
     def test_three_source_merge(self, tmp_db):
-        did = dao.add_document(dao.Document(
+        dao.add_document(dao.Document(
             title="乡村振兴实施方案", content_text="乡村振兴战略实施方案正文",
             blocks_json="[]"))
         dao.add_dictionary_entry("乡村振兴", pinyin="xiang1cun1", definition="三农战略")

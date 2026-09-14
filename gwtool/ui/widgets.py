@@ -2,9 +2,8 @@
 """UI 公共组件与工具函数。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QDoubleSpinBox, QMessageBox, QPushButton, QWidget)
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QDoubleSpinBox, QMessageBox, QPushButton, QWidget)
 
 from ..core.template import FONT_BODY, FONT_HEI, FONT_KAI, FONT_SONG, FONT_XBS
 

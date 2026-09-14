@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..db import dao, tokenize as tok
+from ..db import dao
 
 
 @dataclass

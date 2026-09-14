@@ -193,7 +193,7 @@ class TestEnhancePackProbe:
     def test_empty_zip_rejected(self, tmp_path):
         """彻底空的 zip：read_manifest 报缺少清单。"""
         p = tmp_path / "empty.zip"
-        with zipfile.ZipFile(p, "w") as zf:
+        with zipfile.ZipFile(p, "w"):
             pass  # 一个成员都没有
         with pytest.raises(enhance_pack.EnhancePackError, match="缺少 manifest"):
             enhance_pack.read_manifest(p)

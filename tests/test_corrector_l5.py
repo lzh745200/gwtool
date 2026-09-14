@@ -14,7 +14,6 @@
 # 求值而炸收集。future 导入让全部注解延迟为字符串，3.9/3.13 通吃。
 from __future__ import annotations
 
-import pytest
 
 from gwtool.core import corrector, csc_gec, enhance_pack
 

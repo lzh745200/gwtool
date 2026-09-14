@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -101,7 +100,7 @@ def export_onnx(torch, wrapper, onnx_path: Path) -> None:
     ids, am = enc["input_ids"][:, :32], enc["attention_mask"][:, :32]
     # 按引擎契约：喂「裸字 id、不含 [CLS]/[SEP]」
     ids = ids - 0  # no-op，保持形状语义清晰
-    raw = [tok.convert_ids_to_tokens(int(i)) for i in ids[0]]
+    [tok.convert_ids_to_tokens(int(i)) for i in ids[0]]
     # 用词表逐字重编（与引擎 token_to_id.get(ch, 1) 同构）
     vocab = (SRC / "vocab.txt").read_text(encoding="utf-8").splitlines()
     v2i = {t: i for i, t in enumerate(vocab)}
@@ -163,7 +162,7 @@ def verify(torch, wrapper, model_path: Path) -> None:
     with torch.no_grad():
         t_det, t_cor = wrapper(torch.tensor(ids), torch.tensor(am))
     t_pred = [int(x) for x in t_cor[0].argmax(dim=-1).tolist()]
-    t_det_pred = [int(np.argmax(t_det[0, i].numpy())) for i in range(len(text))]
+    [int(np.argmax(t_det[0, i].numpy())) for i in range(len(text))]
 
     sess = ort.InferenceSession(str(model_path),
                                 providers=["CPUExecutionProvider"])

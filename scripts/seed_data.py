@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import io
 import re
 import sqlite3
 import sys

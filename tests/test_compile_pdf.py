@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """汇编生成 + 小册子 + PDF 渲染测试。"""
-from pathlib import Path
 
-import pytest
 
 from gwtool.core.model import Block, DocTree
 from gwtool.core.template import default_template
@@ -33,7 +31,6 @@ def test_generate_docx_structure(tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
     from docx import Document
-    from docx.oxml.ns import qn
     doc = Document(str(out))
     texts = [p.text for p in doc.paragraphs]
     # 目录域存在

@@ -82,7 +82,7 @@ def test_number_usage_hints_are_never_applied(tmp_db):
 
     res = batch.batch_correct(min_confidence=0.0)
     assert all(h.category != "数字用法" for p in res.plans for h in p.hits)
-    applied = batch.batch_correct(apply=True, plans=res.plans)
+    batch.batch_correct(apply=True, plans=res.plans)
     new_text = dao.get_document(did).content_text
     assert "二〇二六年" in new_text, "年份被替换成了提示标签"
     assert "部署" in new_text

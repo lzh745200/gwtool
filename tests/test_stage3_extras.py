@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """阶段3：体检报告导出、智能分类建议、批量打标签。"""
-import pytest
 
 from gwtool.core import classify, report
 from gwtool.core.inspector import Finding

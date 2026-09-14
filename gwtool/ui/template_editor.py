@@ -2,22 +2,20 @@
 """模板编辑器：可视化设置全部排版参数，右侧实时预览（首页 PDF 渲染）。"""
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap, QPainter
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPushButton, QScrollArea,
-                               QSpinBox, QTabWidget, QTextEdit, QVBoxLayout,
+                               QTabWidget, QTextEdit, QVBoxLayout,
                                QWidget)
 
 from ..core.model import Block, DocTree
 from ..core.template import DocTemplate, default_template
 from ..db import dao
-from .widgets import (ask, font_families_official_first, info,
-                      make_font_combo, missing_official_fonts)
+from .widgets import (ask, info,
+                      make_font_combo)
 
 
 class TemplateEditor(QDialog):
@@ -313,12 +311,11 @@ class TemplateEditor(QDialog):
             html = trees_to_html([tree], demo, toc_pages=[])
             # 用 QTextDocument 离屏渲染为图片
             from PySide6.QtGui import QTextDocument
-            from PySide6.QtCore import QSizeF, QSize
             doc = QTextDocument()
             doc.setHtml(html)
             doc.setTextWidth(460)
             size = doc.size().toSize()
-            from PySide6.QtGui import QPainter, QColor
+            from PySide6.QtGui import QPainter
             img = QImage(max(size.width(), 100) + 20, max(size.height(), 100) + 20,
                          QImage.Format_RGB888)
             img.fill(0xffffff)

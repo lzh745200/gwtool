@@ -11,7 +11,6 @@
 """
 from __future__ import annotations
 
-import re
 
 try:
     import pymupdf as fitz
@@ -19,8 +18,7 @@ except ImportError:  # pragma: no cover
     import fitz  # type: ignore
 
 from PySide6.QtCore import QMarginsF, QByteArray, QSizeF
-from PySide6.QtGui import QColor, QFont, QPainter, QPageLayout, QPageSize, QPdfWriter, QTextDocument
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QPainter, QPageLayout, QPageSize, QPdfWriter, QTextDocument
 
 from .model import DocTree, HEADING, LIST_ITEM, TABLE
 from .template import DocTemplate, material_label

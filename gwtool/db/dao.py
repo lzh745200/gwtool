@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from . import connection as dbconn
 from .tokenize import build_match_query, tokenize

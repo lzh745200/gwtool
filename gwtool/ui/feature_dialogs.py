@@ -9,18 +9,15 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                               QFileDialog, QHBoxLayout, QHeaderView,
-                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QPlainTextEdit, QProgressBar,
                                QPushButton, QRadioButton, QSpinBox, QSplitter,
-                               QTabWidget, QTableWidget, QTableWidgetItem,
                                QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
-from ..core import inspector, simhash, toolbox
+from ..core import inspector, simhash
 from ..core import skeletons as skeleton
 from ..core import backup as backup_core
-from ..core.backup import create_backup, restore_backup
 from ..core.security import clear_password, has_password, set_password
 from ..db import dao
 from . import theme

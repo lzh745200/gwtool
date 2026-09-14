@@ -53,7 +53,7 @@ def test_dirty_blocks_json_falls_back(tmp_db):
 
 def test_lock_recovered_writes(tmp_db):
     """外部 EXCLUSIVE 锁：写入超时抛干净错误；锁释放后恢复（WAL 读取不受影响）。"""
-    conn = dbconn.get_conn()
+    dbconn.get_conn()
     dao.add_document(dao.Document(title="锁前文档", content_text="锁前内容"))
     lock = sqlite3.connect(str(tmp_db))
     lock.execute("BEGIN EXCLUSIVE")

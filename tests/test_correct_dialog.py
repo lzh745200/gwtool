@@ -2,7 +2,6 @@
 """任意文档纠错增强：标记渲染、按块纠错、对话框交互回归。"""
 from __future__ import annotations
 
-import pytest
 
 from gwtool.core import corrector
 from gwtool.core.model import Block, DocTree, HEADING, PARAGRAPH, TABLE
@@ -162,7 +161,6 @@ def test_dialog_file_mode_preserves_structure(tmp_db, qapp, monkeypatch):
     import tempfile
     from pathlib import Path
     from docx import Document as DX
-    from docx.shared import Pt
     src = Path(tempfile.mkdtemp()) / "样例.docx"
     d = DX()
     d.add_heading("布署方案", level=1)

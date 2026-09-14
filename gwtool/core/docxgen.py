@@ -13,13 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
-from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Mm, Pt, RGBColor
 
-from .model import DocTree, HEADING, LIST_ITEM, PARAGRAPH, TABLE
+from .model import DocTree, HEADING, LIST_ITEM, TABLE
 from .template import DocTemplate, HeadingStyle, material_label
 
 _ALIGN = {

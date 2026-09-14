@@ -2,10 +2,8 @@
 """WPS 格式（.wps）支持：内容嗅探路由、OOXML 形态、纯文本降级、注册与过滤。"""
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
-import pytest
 
 from gwtool.core.importer import SUPPORTED_EXTS, parse_any
 from gwtool.db import dao

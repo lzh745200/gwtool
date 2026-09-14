@@ -2,7 +2,6 @@
 """PDF 解析（文字版）：PyMuPDF 逐页提取，按行合并段落。"""
 from __future__ import annotations
 
-import re
 
 from ..model import Block, DocTree, HEADING, PARAGRAPH
 

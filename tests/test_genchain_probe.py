@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,7 @@ from gwtool.core import report
 from gwtool.core import skeletons
 from gwtool.core import template as tplmod
 from gwtool.core import watermark
-from gwtool.core.model import Block, DocTree, HEADING, PARAGRAPH
+from gwtool.core.model import Block, DocTree, PARAGRAPH
 from gwtool.core.template import CoverInfo, DocTemplate
 from gwtool.db import dao
 

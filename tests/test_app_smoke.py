@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """离屏冒烟测试：主窗口可构建、种子导入可执行。"""
-import os
 
 
 def test_first_run_seeding(tmp_db, monkeypatch):

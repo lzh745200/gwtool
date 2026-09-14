@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
 from .. import APP_NAME, __version__
 from ..core.backup import (MODE_AUTO, MODE_MANUAL, create_backup_detailed,
                            list_backups, restore_backup_detailed)
-from ..core.template import default_template
 from ..db import dao
 from ..paths import db_path, export_dir
 from .compile_wizard import CompileWizard
@@ -156,7 +155,6 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         # 常驻信息（不会被瞬态 showMessage 覆盖）
-        from PySide6.QtWidgets import QLabel
         self._perm_label = QLabel()
         self.status.addPermanentWidget(self._perm_label)
 

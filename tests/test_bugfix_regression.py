@@ -14,11 +14,9 @@
 from __future__ import annotations
 
 import re
-import tempfile
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 
 # ------------------------------------------------------------------ 3. 纠错门控
