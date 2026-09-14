@@ -45,15 +45,41 @@ def win(tmp_db, qapp, monkeypatch):
 
     w = mw.MainWindow()
     yield w
+    # 收尾顺序很重要：先抽干延迟删除队列，再关窗口。
+    # 否则 closeEvent（现在会等所有子线程收工）可能与 Qt 的 DeferredDelete
+    # 撞在一起 —— 事件循环正在删对象、同时又有槽在跑，无头/离屏平台上容易崩。
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for _ in range(3):
+        qapp.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     w.close()
+    for _ in range(3):
+        qapp.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
-def test_all_menu_and_toolbar_actions_triggerable(win, qapp):
+def test_all_menu_and_toolbar_actions_triggerable(win, qapp, monkeypatch):
     """遍历触发全部 QAction：任何一个动作抛异常都视为"点开就崩"缺陷。
 
     回归覆盖：新建公文（曾 AttributeError: 'SkeletonDialog' has no 'Accepted'）、
     朗读校对（曾 AttributeError: Qt.KeepAnchor）等。
+
+    本用例把 QThread.start 换成 no-op：它要验证的是"动作接线是否完好"，
+    而部分动作（PDF 预览渲染、朗读、相似查重）会真的起后台线程。起线程后
+    本用例会在循环里 processEvents()，此时线程可能正好结束并销毁其
+    thread-local sqlite 连接，主线程同时抽事件 —— 这个竞争在
+    Linux + PySide6 6.8 + Python 3.9 上实测直接段错误
+    （CI 报 Fatal Python error: Segmentation fault，本地 Windows 不复现）。
+    线程真正跑起来的行为由各自的专项用例覆盖（test_genchain_probe、
+    test_batch_correct、test_corrector_* 等），这里不必重复。
     """
+    from PySide6.QtCore import QThread
+
+    def _no_start(self):
+        return None
+
+    monkeypatch.setattr(QThread, "start", _no_start)
+
     actions = [a for a in win.findChildren(QAction)
                if (a.text() or "").replace("&", "").strip() and a.isEnabled()]
     assert len(actions) >= 20, f"动作数量异常偏少：{len(actions)}"
