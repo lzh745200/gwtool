@@ -153,12 +153,19 @@ def _aabb_or_abab(text: str, i: int) -> bool:
 
     仅在连首或连尾对齐的两个窗口上检查。ABAB 分支带"两字不同"守卫，
     故对同字连恒不成立（同字连纳入 ABAB 只会得到 c^4，属真重复）。
+
+    **汉字守卫**：合法的 AABB/ABAB 全部由汉字构成，故四个字必须都是汉字；
+    否则窗内混入排版符号时会被误判放行——例如 ``工作作**``（窗 ``作作**``，
+    ``*==*`` 误判 AABB）、``工作作。。``、``重要要，，`` 会被 ① 短路，
+    让后面的 ⑤b 无从判起，造成**可避免的漏检**。加守卫为纯收益。
     """
     n = len(text)
     for s in (i, i - 2):
         if s < 0 or s + 4 > n:
             continue
         w0, w1, w2, w3 = text[s], text[s + 1], text[s + 2], text[s + 3]
+        if not (_is_cjk(w0) and _is_cjk(w1) and _is_cjk(w2) and _is_cjk(w3)):
+            continue                       # 窗口含非汉字 → 不构成 AABB/ABAB
         if w0 == w1 and w2 == w3 and w0 != w2:      # AABB
             return True
         if w0 + w1 == w2 + w3 and w0 != w1:          # ABAB（两字不同）

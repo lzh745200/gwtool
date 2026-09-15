@@ -114,6 +114,20 @@ def test_positive_public_doc_high_frequency_forms():
         assert pairs(s + "。"), f"{s!r} 应被 ⑤b 命中"
 
 
+def test_rule1_aabb_requires_han_guard():
+    """① 的 AABB/ABAB 必须限定汉字：重复字后紧跟排版符号时不得被误放行（漏检回归）。
+
+    QA 反例：``工作作**`` / ``工作作。。`` / ``重要要，，``——窗内 ``w2==w3``
+    （``*==*``、``。==。``、``，==，``）曾令规则 ① 误判 AABB 而**短路放行**，
+    使 ⑤b 无从判起。加汉字守卫后应回落 ⑤b（0.85）正常报出。
+    """
+    for s in ["工作作**", "工作作。。", "重要要，，"]:
+        r = rep(s)
+        assert len(r) == 1, f"{s!r} 应报出 1 处（曾因 ① 缺汉字守卫漏检）：{r}"
+        assert r[0].wrong in ("作作", "要要")
+        assert r[0].confidence == 0.85, f"{s!r} 应回落 ⑤b 0.85：{r}"
+
+
 # ============================================================ 2) 负样本（13 类）
 _NEG_CLASSES = {
     "称谓": ["爸爸", "妈妈", "爷爷", "奶奶", "哥哥", "姐姐", "妹妹", "叔叔", "伯伯", "舅舅"],
@@ -156,18 +170,43 @@ def test_full_dictionary_zero_false_positive():
 
 
 # ============================================================ 4) 真实语料回归
-def _corpus_lines():
-    """仓库根的**产品文档**中抽取的"自然散文"行。
+def _corpus_files():
+    """语料文档 = **git 跟踪** 的仓库根 markdown（保证他人 clone 后结果一致）。
 
-    两道过滤，只为剔除**合成样例**而非天然文本（与架构师的实测口径一致：
-    "部署署/甲甲乙丙丙 是测试数据不是自然文本"）：
-
-      - 跳过围栏代码块；
-      - 跳过含前后对照箭头 ``→`` 或行内代码 `` ` `` 的行——那类是
-        "错→对"示例清单（如 ``情况→史史``），本就不是散文；
-      - 排除 ``.workbuddy``：IDE/agent 笔记，别的门禁扫描同样跳过。
+    刻意**不用** ``ROOT.glob("*.md")``：仓库长期有并行会话，glob 会扫到未提交的
+    临时文档，使语料不可由提交复现、且随并行改动漂移。这里只认 ``git ls-files``
+    的受控集合；git 不可用时回退到核心固定文档。
     """
-    files = sorted(ROOT.glob("*.md"))
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "-c", "core.quotepath=false",
+             "ls-files", "*.md"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            check=True).stdout
+        names = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        files = [ROOT / n for n in names if (ROOT / n).is_file()]
+        if files:
+            return files, names
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # 回退：核心产品文档（均为 git 跟踪文件）
+    fallback = ["README.md", "纠错系统落地方案.md",
+                "项目文件结构说明.md", "纠错引擎增强方案.md"]
+    files = [ROOT / n for n in fallback if (ROOT / n).is_file()]
+    return files, [f.name for f in files]
+
+
+def _corpus_lines():
+    """从 git 跟踪的产品文档中抽取"自然散文"行。
+
+    过滤只为剔除**合成样例**而非天然文本（与架构师的实测口径一致：
+    "部署署/甲甲乙丙丙 是测试数据不是自然文本"）：跳过围栏代码块；
+    跳过含前后对照箭头 ``→`` 的行（"错→对"示例清单）；行内代码片段
+    `` `…` `` 就地剥除后保留其余散文，仅当整行皆为代码时才舍弃。
+    """
+    import re
+    files, names = _corpus_files()
     lines = []
     for f in files:
         try:
@@ -182,19 +221,21 @@ def _corpus_lines():
                 continue
             if not s or in_fence:
                 continue
-            if "\u2192" in s or "`" in s:      # → 或 行内代码：合成样例行
+            if "\u2192" in s:                 # → 前后对照：合成样例行
                 continue
-            lines.append(s)
-    return lines, [f.name for f in files]
+            s = re.sub(r"`[^`]*`", "", s).strip()   # 剥除行内代码，留散文
+            if len(s) >= 8:                   # 太短的行（纯符号/编号）无暇接意义
+                lines.append(s)
+    return lines, names
 
 
 def test_real_corpus_zero_false_positive():
-    """仓库中文散文类文本（产品 markdown 文档）零命中。"""
+    """仓库中文散文类文本（git 跟踪的产品 markdown 文档）零命中。"""
     lines, names = _corpus_lines()
     total = sum(len(ln) for ln in lines)
-    assert len(lines) > 300 and total > 20000, \
-        f"语料过小（{len(lines)} 行 / {total} 字），验收入口失效"
-    bad = [(ln.strip()[:60], pairs(ln)) for ln in lines if rep(ln)]
+    assert len(lines) > 300 and total > 10000, \
+        f"语料过小（{len(lines)} 行 / {total} 字，文件 {names}），验收入口失效"
+    bad = [(ln[:60], pairs(ln)) for ln in lines if rep(ln)]
     assert not bad, (
         f"自然语料误报 {len(bad)} 处/{len(lines)} 行（文件 {names}）：\n"
         + "\n".join(f"{ln} -> {p}" for ln, p in bad[:30]))
