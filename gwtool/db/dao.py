@@ -501,6 +501,17 @@ def lookup_dictionary(word: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def all_dictionary_words() -> list[str]:
+    """词典全部唯一词条（供重复字检测运行期派生词集合与叠字白名单）。
+
+    只读查询；词典为空（如未导入种子的临时库）时返回空列表，
+    调用方据此退化为"不报"（宁少报不误报）。
+    """
+    rows = dbconn.get_conn().execute(
+        "SELECT DISTINCT word FROM dictionary").fetchall()
+    return [r["word"] for r in rows if r["word"]]
+
+
 # ---------------------------------------------------------------- error pairs
 def add_error_pair(wrong: str, correct: str, category: str = "用户添加",
                    confidence: float = 0.99, source: str = "user",

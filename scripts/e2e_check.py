@@ -171,6 +171,18 @@ def main() -> int:
     step("体检：多处日期全部报出",
          "2026年08月30日" in _dates and "2026年09月01日" in _dates)
 
+    # 8c) 重复字：词典全量零误报 + 公文范文零误报
+    from gwtool.core import repeat_rules
+    _words = dao.all_dictionary_words()
+    _fp = [w for w in _words if repeat_rules.check_repeat(w)]
+    step("重复字：词典全量零误报", len(_fp) == 0,
+         f"{len(_words)} 词 / {len(_fp)} 误报")
+    _essay = ("各单位要高度重视，扎实推进各项工作部署。针对当前存在的问题，"
+              "必须认真研究，逐一加以解决。各部门之间要加强协调配合，"
+              "形成工作合力，确保任务圆满完成。")
+    _rh = repeat_rules.check_repeat(_essay)
+    step("重复字：公文范文零误报", len(_rh) == 0, f"{len(_rh)} 命中")
+
     # 9) 备份
     from gwtool.core.backup import create_backup
     bz = create_backup(note="E2E自检")

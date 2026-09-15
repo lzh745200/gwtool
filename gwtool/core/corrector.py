@@ -89,6 +89,11 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
 def invalidate_cache() -> None:
     """用户增删词库后调用，使缓存失效。"""
     _RULES_CACHE.clear()
+    try:                       # 顺带失效重复字层的词典派生缓存
+        from . import repeat_rules
+        repeat_rules.invalidate_cache()
+    except Exception:
+        pass
     try:                       # 顺带失效神经层的开关缓存（默认关闭时零成本）
         from . import csc_gec, csc_neural
         csc_neural.invalidate_cache()
@@ -106,8 +111,18 @@ def check_text(text: str) -> list[Correction]:
     found.extend(_check_regex_group(text, CONTEXT_RULES, "易混词"))
     found.extend(_check_regex_group(text, PUNCT_RULES, "标点"))
     found.extend(_check_regex_group(text, NUMBER_RULES, "数字用法"))
+    found.extend(_check_repeat(text))                     # L3 重复字（同字连）
     found = _apply_neural_layer(text, _dedupe(found))     # L4 单字替换精排
     return _apply_gec_layer(text, found)                  # L5 语法纠错
+
+
+def _check_repeat(text: str) -> list[Correction]:
+    """L3 重复字检测：延迟导入，模块级零成本，异常一律咽掉不拖垮主流程。"""
+    try:
+        from .repeat_rules import check_repeat
+        return check_repeat(text)
+    except Exception:
+        return []
 
 
 def _apply_neural_layer(text: str,
@@ -368,6 +383,7 @@ _MARK_STYLE = {
     "易混词": ("#fff3e0", "#8a5300"),
     "标点": ("#e8eaf6", "#283593"),
     "数字用法": ("#e0f2f1", "#004d40"),
+    "重复字": ("#fce4ec", "#880e4f"),     # L3 同字连（重复字）
     "用户词库": ("#fdecea", "#8c1d18"),
     "神经纠错": ("#ede7f6", "#4527a0"),   # L4 神经精排（可选增强包）
     "语法纠错": ("#e3f2fd", "#0d47a1"),   # L5 Seq2Seq 语法纠错（可选增强包）
