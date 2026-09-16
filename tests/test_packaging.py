@@ -392,6 +392,11 @@ def test_linux_toolchain_uses_http_sources_only():
         "缺少 snapshot 的 security 快照源")
     assert "Check-Valid-Until" in body, (
         "archive/snapshot 的 Release 已过期，必须关闭有效期检查")
-    # 一次装完即可，不该再有"先装证书再切源"的两阶段写法
-    assert "apt-get install -y --no-install-recommends ca-certificates" not in body
+    # ca-certificates 必须**出现在安装列表里**：apt 源用 HTTP 不需要它，
+    # 但随后的 pip 要访问 https 的 PyPI —— 缺了它 pip 直接连不上，
+    # 表现为"推理栈装不上"（实测：自检里 tokenizers/numpy 就绪而 onnxruntime 缺失）。
+    assert "ca-certificates" in body, (
+        "必须装 ca-certificates，否则 pip 无法访问 https 源")
+    # 不该再有"先单独装证书、再切源"的两阶段写法
+    assert "apt-get install -y --no-install-recommends ca-certificates\n" not in body
 

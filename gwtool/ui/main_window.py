@@ -79,7 +79,11 @@ class MainWindow(QMainWindow):
         self._setup_backup_timer()
         self._update_status()
         self.refresh_reminders()
-        self._maybe_db_health_check()
+        # 数据库自检**不在这里**启动：它要开后台线程，而本方法在构造期执行，
+        # 会与"构造完就高频操作界面"的调用方（如遍历触发全部动作的测试）竞争 ——
+        # CI 上实测为 `Windows fatal exception: access violation`（后台线程在
+        # dbhealth.run_scheduled_check 里访问数据库，主线程同时在跑事件循环）。
+        # 改由 showEvent 触发：语义上也更合理（窗口真的显示出来再做后台检查）。
 
     def _setup_backup_timer(self):
         """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。
@@ -826,6 +830,26 @@ class MainWindow(QMainWindow):
             f"输出目录：{export_dir()} | 数据目录：{db_path().parent}", 10000)
 
     # ------------------------------------------------ 关闭
+    def showEvent(self, event):
+        """窗口显示后才启动后台数据库自检。
+
+        为什么不在 __init__ 里启动：那会在构造期就开后台线程，与"构造完立即
+        高频操作界面"的调用方（遍历触发全部动作的测试）竞争，CI 上实测为
+        `Windows fatal exception: access violation`。放到 showEvent 后，
+        测试只构造不显示窗口即不会启动线程；真实使用中窗口一定会显示，
+        功能不受影响。
+
+        只启动一次：最小化后恢复、切页等都会再次触发 showEvent。
+        """
+        super().showEvent(event)
+        if getattr(self, "_db_check_started", False):
+            return
+        self._db_check_started = True
+        try:
+            self._maybe_db_health_check()
+        except Exception:
+            pass
+
     def _wait_for_background_threads(self) -> list[str]:
         """退出前等所有后台 QThread 收工；返回仍在跑的线程名（超时未退）。
 

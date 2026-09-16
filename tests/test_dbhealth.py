@@ -178,6 +178,28 @@ class TestWiring:
         assert "FnWorker" in block, "自检未放后台线程"
         assert "worker.start()" in block
 
+    def test_health_check_not_started_in_constructor(self):
+        """自检**不得**在 __init__ 里启动。
+
+        构造期就开后台线程，会与"构造完立即高频操作界面"的调用方竞争 ——
+        CI 上实测为 `Windows fatal exception: access violation`
+        （后台线程在 dbhealth.run_scheduled_check 里访问数据库，主线程
+        同时在跑事件循环）。必须延后到 showEvent：测试只构造不显示窗口，
+        线程就不会启动；真实使用中窗口一定显示，功能不受影响。
+        """
+        src = (ROOT / "gwtool" / "ui" / "main_window.py").read_text(
+            encoding="utf-8")
+        init_block = src[src.index("    def __init__(self):"):
+                         src.index("    def _setup_backup_timer")]
+        assert "_maybe_db_health_check()" not in init_block, (
+            "自检被改回构造期启动了 —— 会与界面操作竞争并崩溃")
+        assert "def showEvent" in src, "缺少 showEvent 触发点"
+        show_block = src[src.index("    def showEvent"):]
+        assert "_maybe_db_health_check()" in show_block[:900], (
+            "showEvent 里没有启动自检")
+        assert "_db_check_started" in show_block[:900], (
+            "showEvent 可能被多次触发（最小化恢复等），必须只启动一次")
+
     def test_maintenance_cursor_always_restored(self):
         """等待光标必须放在 try/finally 里复位，否则异常后界面永远转圈。"""
         src = (ROOT / "gwtool" / "ui" / "main_window.py").read_text(
