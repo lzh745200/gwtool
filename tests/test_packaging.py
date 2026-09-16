@@ -358,3 +358,32 @@ def test_launcher_does_not_rely_on_echo_interpreting_newlines():
                      if ln.strip().startswith("say()")), "")
     assert "printf" in say_line, (
         f"say() 未使用 printf，带 \\n 的提示会原样打出反斜杠+n：{say_line.strip()}")
+
+
+def test_linux_toolchain_orders_archive_before_https_snapshot():
+    """顺序护栏：必须**先**用 HTTP 归档源装 ca-certificates，**再**切 HTTPS 快照源。
+
+    背景（2026-09-16 的真实 CI 失败，exit 100）：
+      · Debian 11 已 EOL，bullseye-security 池中的 .deb 被上游撤下（openssl /
+        ca-certificates 等随机 404）；
+      · `debian:11` 官方镜像**不含 ca-certificates**，而 snapshot.debian.org
+        是 HTTPS —— 若一上来就切过去，会卡在"要证书才能连源、要连源才能装证书"
+        的鸡生蛋问题，整个 build-linux job 在第一步就失败。
+    正确顺序：先用 archive.debian.org（HTTP、无需证书）装上 ca-certificates，
+    再切 snapshot（固定时间点，保证可复现）。调换顺序会让麒麟包彻底打不出来。
+    """
+    src = (ROOT / ".github" / "workflows" / "build.yml").read_text(
+        encoding="utf-8")
+    # 只看**实际命令行**：注释里同样会提到这两个域名，若一并参与 index 比较，
+    # 结果会被注释的先后位置带偏（本测试首版即因此误报）。
+    body = "\n".join(ln for ln in src.splitlines()
+                     if not ln.strip().startswith("#"))
+    assert "archive.debian.org" in body, "缺少 HTTP 归档源兜底"
+    assert "snapshot.debian.org" in body, "缺少可复现的时间戳快照源"
+    assert body.index("archive.debian.org") < body.index("snapshot.debian.org"), (
+        "archive 源必须出现在 snapshot 源之前 —— 顺序颠倒会使第一次 "
+        "apt-get install ca-certificates 走在线源并 404")
+    # 装证书那一句不能落在切到 HTTPS 源之后
+    i_ca = body.index("--no-install-recommends ca-certificates")
+    assert i_ca < body.index("snapshot.debian.org"), (
+        "ca-certificates 必须在切到 HTTPS 快照源之前装好")
