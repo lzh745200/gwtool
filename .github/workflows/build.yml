@@ -134,24 +134,21 @@ jobs:
     steps:
       - name: 安装构建工具链（Python 3.9 + Qt 运行库 + Tesseract OCR）
         run: |
-          # Debian 11 已 EOL：bullseye-security 池中的 .deb 被上游逐步撤下
-          # （openssl / ca-certificates 等随机 404，实测 exit 100）。
-          # 而 debian:11 官方镜像**不含 ca-certificates**，若一上来就访问 HTTPS
-          # 源会卡在"要证书才能连源、要连源才能装证书"的鸡生蛋问题上。
+          # Debian 11 已 EOL，两个坑叠在一起（2026-09-16 实测，连续两次 CI 失败）：
+          #   ① bullseye-security 池中的 .deb 被上游撤下 → 在线源随机 404；
+          #   ② debian:11 官方镜像**不含 ca-certificates**，而 https 源需要它 →
+          #      若先切 https 源再装证书，会卡在"要证书才能连源、要连源才能装证书"
+          #      的鸡生蛋问题上。
           #
-          # 故分两步（顺序不可调换）：
-          #   ① 先用 archive.debian.org（HTTP，无需证书）装上 ca-certificates；
-          #   ② 再切到 snapshot.debian.org 时间戳快照装其余包 —— 快照按时间点
-          #      固定内容，保证构建可复现（archive 的池内容仍会缓慢变化）。
-          #   注意 ① 必须在 ② 之前：早期版本此处顺序颠倒，导致这一步直接失败。
-          echo 'deb http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
-          echo 'deb http://archive.debian.org/debian-security bullseye-security main' >> /etc/apt/sources.list
+          # 解法：两个源**都用 HTTP**（实测 archive 与 snapshot 均支持 HTTP，
+          # 配合 [trusted=yes] 跳过 GPG），于是完全不需要证书，一次装完即可。
+          # 另注意：archive.debian.org **没有** debian-security 路径（实测 404），
+          # 所以 bullseye-security 走 snapshot 的时间戳快照（固定内容、可复现），
+          # 主包走 archive（bullseye 已 EOL，内容冻结）。
+          echo 'deb [trusted=yes] http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
+          echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian-security/20260601T000000Z/ bullseye-security main' >> /etc/apt/sources.list
           echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/81-no-valid-until
           echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates openssl
-          echo 'deb [trusted=yes] https://snapshot.debian.org/archive/debian/20260601T000000Z/ bullseye main' > /etc/apt/sources.list
-          echo 'deb [trusted=yes] https://snapshot.debian.org/archive/debian-security/20260601T000000Z/ bullseye-security main' >> /etc/apt/sources.list
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip git file binutils libpython3.9 \
             libgl1 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \

@@ -360,30 +360,38 @@ def test_launcher_does_not_rely_on_echo_interpreting_newlines():
         f"say() 未使用 printf，带 \\n 的提示会原样打出反斜杠+n：{say_line.strip()}")
 
 
-def test_linux_toolchain_orders_archive_before_https_snapshot():
-    """顺序护栏：必须**先**用 HTTP 归档源装 ca-certificates，**再**切 HTTPS 快照源。
+def test_linux_toolchain_uses_http_sources_only():
+    """护栏：Linux 工具链的两个 apt 源都必须走 **HTTP**。
 
-    背景（2026-09-16 的真实 CI 失败，exit 100）：
-      · Debian 11 已 EOL，bullseye-security 池中的 .deb 被上游撤下（openssl /
-        ca-certificates 等随机 404）；
-      · `debian:11` 官方镜像**不含 ca-certificates**，而 snapshot.debian.org
-        是 HTTPS —— 若一上来就切过去，会卡在"要证书才能连源、要连源才能装证书"
-        的鸡生蛋问题，整个 build-linux job 在第一步就失败。
-    正确顺序：先用 archive.debian.org（HTTP、无需证书）装上 ca-certificates，
-    再切 snapshot（固定时间点，保证可复现）。调换顺序会让麒麟包彻底打不出来。
+    背景（2026-09-16 连续两次 CI 失败，均为 build-linux 第一步 exit 100）：
+      · Debian 11 已 EOL，bullseye-security 池中的 .deb 被上游撤下 → 在线源 404；
+      · `debian:11` 官方镜像**不含 ca-certificates**，而 https 源需要它 ——
+        形成"要证书才能连源、要连源才能装证书"的鸡生蛋问题。
+    实测 archive 与 snapshot 两个站**都支持 HTTP**，配合 `[trusted=yes]` 跳过
+    GPG 后完全不需要证书，可一次装完。
+
+    另一个实测结论：`archive.debian.org/debian-security` **不存在**（404），
+    所以 bullseye-security 必须指向 snapshot.debian.org 的时间戳快照。
+    这两条任一被改回，build-linux 就会在第一步直接失败。
     """
     src = (ROOT / ".github" / "workflows" / "build.yml").read_text(
         encoding="utf-8")
-    # 只看**实际命令行**：注释里同样会提到这两个域名，若一并参与 index 比较，
-    # 结果会被注释的先后位置带偏（本测试首版即因此误报）。
+    # 只看实际命令行：注释里也会提到这些域名，混在一起会带偏判断
     body = "\n".join(ln for ln in src.splitlines()
                      if not ln.strip().startswith("#"))
-    assert "archive.debian.org" in body, "缺少 HTTP 归档源兜底"
-    assert "snapshot.debian.org" in body, "缺少可复现的时间戳快照源"
-    assert body.index("archive.debian.org") < body.index("snapshot.debian.org"), (
-        "archive 源必须出现在 snapshot 源之前 —— 顺序颠倒会使第一次 "
-        "apt-get install ca-certificates 走在线源并 404")
-    # 装证书那一句不能落在切到 HTTPS 源之后
-    i_ca = body.index("--no-install-recommends ca-certificates")
-    assert i_ca < body.index("snapshot.debian.org"), (
-        "ca-certificates 必须在切到 HTTPS 快照源之前装好")
+    assert "https://snapshot.debian.org" not in body, (
+        "snapshot 源必须用 HTTP —— https 需要 ca-certificates，"
+        "而镜像里此刻还没有")
+    assert "https://archive.debian.org" not in body, "archive 源同样必须用 HTTP"
+    assert "archive.debian.org/debian-security" not in body, (
+        "archive.debian.org 没有 debian-security 路径（实测 404），"
+        "bullseye-security 必须走 snapshot")
+    assert "http://archive.debian.org/debian bullseye main" in body, (
+        "缺少 archive 的主源（提供 python3 / Qt 库 / tesseract）")
+    assert "http://snapshot.debian.org/archive/debian-security/" in body, (
+        "缺少 snapshot 的 security 快照源")
+    assert "Check-Valid-Until" in body, (
+        "archive/snapshot 的 Release 已过期，必须关闭有效期检查")
+    # 一次装完即可，不该再有"先装证书再切源"的两阶段写法
+    assert "apt-get install -y --no-install-recommends ca-certificates" not in body
+
