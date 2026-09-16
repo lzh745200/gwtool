@@ -400,3 +400,21 @@ def test_linux_toolchain_uses_http_sources_only():
     # 不该再有"先单独装证书、再切源"的两阶段写法
     assert "apt-get install -y --no-install-recommends ca-certificates\n" not in body
 
+
+def test_optional_stack_pins_numpy_below_2_for_py39():
+    """py<3.11 档必须显式钉 numpy<2。
+
+    onnxruntime 1.17.3 是用 NumPy 1.x 编译的，ABI 与之绑定：装到 numpy 2.x
+    后导入即报 AttributeError: _ARRAY_API not found，L4 直接不可用。
+
+    关键：numpy 2.0.2 **是有 cp39 轮子的**，所以旧注释里
+    "py39 会自然被解析到 1.x" 的说法是错的 —— 2026-09-16 的 CI 正是装上了
+    2.0.2 才失败（自检显示 tokenizers/numpy 就绪、onnxruntime 导入异常）。
+    必须像这里一样显式加上界，不能依赖"自然会解析对"。
+    """
+    src = (ROOT / "requirements-optional.txt").read_text(encoding="utf-8")
+    effective = [ln.strip() for ln in src.splitlines()
+                 if ln.strip() and not ln.strip().startswith("#")]
+    assert "numpy<2 ; python_version < '3.11'" in effective, (
+        "缺少 numpy<2 上界约束 —— onnxruntime 1.17.3 在 numpy 2.x 下无法导入")
+    assert any(ln.startswith("onnxruntime==1.17.3") for ln in effective)
