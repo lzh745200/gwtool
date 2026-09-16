@@ -29,6 +29,59 @@ _CHAIN = [  # 层级顺序
 
 _CN_ORD = "一二三四五六七八九十"
 
+# ---- 引文规范（引用**其他**公文时的写法）----
+# 注意与既有的「发文字号」检查区分：那一条查的是**本文自己**的字号用不用
+# 六角括号；本条查的是**引用他人公文**时的写法。两者规则对象不同，不可混淆。
+_CITE_RE = re.compile(r"《([^《》]{0,100})》")
+_CITED_DOC_NO_RE = re.compile(
+    r"[（(][^）)]{0,40}〔\s*\d{4}\s*〕[^）)]{0,16}号\s*[）)]")
+# 法定公文文种：书名号内以这些词结尾的，判为"公文标题"，引用时须带发文字号
+_CITE_KIND_TAIL = ("决议", "决定", "命令", "公报", "公告", "通告", "意见",
+                   "通知", "通报", "报告", "请示", "批复", "议案", "函", "纪要")
+# 法规/规章/制度类：引用惯例**不带**发文字号（如《XX条例》《XX办法》）。
+# 必须先排除，否则「凡书名号都要求带字号」会造成大面积误报，反而让用户
+# 关掉整个检查——低误报率是这类提示能活下去的前提。
+_CITE_LAW_TAIL = ("法", "条例", "办法", "规定", "细则", "准则", "标准",
+                  "规范", "章程", "公约", "纲要", "计划", "方案")
+
+# ---- 数字用法（全文一致性）----
+# 只收**明确计数量的量词**，刻意排除"年/月/日"等时间单位：
+# 「一年来」与「1年」并存属正常修辞，纳入统计只会制造噪音。
+_NUM_CLASSIFIERS = ("个", "人", "次", "条", "件", "项", "家", "种", "名",
+                    "位", "份", "页", "台", "辆", "处", "起", "套", "批",
+                    "期", "届", "户", "所", "座")
+# 含汉字数字的固定术语：不得参与"写法统一"统计（详见 _mask_cn_terms）
+_CN_TERM_EXCLUDE = ("三个代表", "三严三实", "四个全面", "五位一体", "两个维护",
+                    "四个意识", "四个自信", "四个服从", "两学一做", "三重一大",
+                    "一国两制", "两个务必", "六稳六保", "两不愁三保障",
+                    "三会一课", "四个铁一般", "五个文明", "十四五", "十五五")
+
+# ---- 文内一致性（单位名称的简称/全称并存）----
+# 只认带机构后缀的短语：不这样做就得靠"N-gram + 频率"猜专名，
+# 误报会多到不可用。长后缀写在前面只是可读性考虑——正则是在"剩余串的开头"
+# 尝试交替项，因此顺序不影响结果。
+_ENTITY_RE = re.compile(
+    r"([\u4e00-\u9fff]{2,10}?"
+    r"(?:管理委员会|管理局|办公室|委员会|服务中心|研究院|"
+    r"分局|支队|大队|集团|公司|中心|医院|学校|学院|银行|"
+    r"局|委|办|厅|部|处|科|院|所|站|队))")
+# 实体数超过该值就不做两两比较：O(n²) 在长文上会拖慢体检
+_MAX_ENTITIES = 200
+# 最多报几组疑似变体，避免长文刷屏
+_MAX_ENTITY_VARIANTS = 8
+
+# ---- 公文用语与文风 ----
+# 只收**几乎不可能出现在规范公文里**的口语词。像"搞""特别"这类看似口语的
+# 词在公文中有大量规范用法（"搞好""特别重要"），收进来只会制造误报——
+# 文风建议一旦不可信，用户会连同整个体检一起忽略。
+_SPOKEN_WORDS = ("咱们", "咱", "啥", "咋", "挺好的", "搞定", "弄好",
+                 "什么的", "之类的", "差不多", "恨不得", "压根",
+                 "老鼻子", "贼好", "挺不错")
+# 单句字数上限：公文长句宜拆。80 字是按"一屏能读完一段"的经验值定的。
+_MAX_SENTENCE_CHARS = 80
+# 文风类提示最多报几条，避免长文刷屏
+_MAX_STYLE_FINDINGS = 6
+
 
 @dataclass
 class Finding:
@@ -177,6 +230,10 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
 
     out.extend(_check_classification(lines))
     out.extend(_check_attachments(lines))
+    out.extend(_check_citations(lines))
+    out.extend(_check_number_usage(lines))
+    out.extend(_check_consistency(lines))
+    out.extend(_check_style(lines))
     return out
 
 
@@ -209,6 +266,281 @@ def _check_attachments(lines: list[str]) -> list[Finding]:
             f"第{colon_lines[0] + 1}行：多个附件说明应使用阿拉伯数字编号"
             "（附件：1. ×××）"))
     return out
+
+
+def _looks_like_cited_doc(title: str) -> bool:
+    """书名号内是否为**公文**标题（引用时按惯例应带发文字号）。
+
+    区分"公文"与"法规规章"是这条检查低误报的关键：
+    《中华人民共和国宪法》《XX省节约用水条例》引用时从不带字号，若一并要求，
+    用户会被淹在误报里。
+    """
+    t = title.strip()
+    if not t or t.startswith("中华人民共和国"):
+        return False
+    if t.endswith(_CITE_LAW_TAIL):
+        return False
+    if "关于" in t:
+        return True
+    return t.endswith(_CITE_KIND_TAIL)
+
+
+def _line_of(text: str, pos: int) -> int:
+    """字符偏移 -> 行号（inspect_text 的 lines 由 text.split("\\n") 得来，编号一致）。"""
+    return text.count("\n", 0, pos) + 1
+
+
+def _check_citations(lines: list[str]) -> list[Finding]:
+    """引文规范：引用其他公文时的写法要求。
+
+    「引用公文」在公文写作中出现频率极高、出错率也高，规则明确且可机器校验，
+    却是体检此前**唯一没有覆盖的大类**。当前实现六条规则：
+
+      C1 书名号不配对（硬错）
+      C2 空书名号（硬错）
+      C3 书名号内嵌套书名号
+      C4 公文标题**首次**引用未标注发文字号（法规规章不适用）
+      C5 书名号后的字号用了半角括号（应为全角）
+      C6 相邻两处「根据」之间无句读分隔，建议合并为一次引导
+
+    刻意**不做**「引用已废止机构」检查：那已由纠错层的机构沿革对照覆盖，
+    在这里重复实现只会让用户在纠错与体检两处看到同一条问题。
+    """
+    text = "\n".join(lines)
+    out: list[Finding] = []
+    if not text:
+        return out
+
+    # C1 书名号配对
+    n_open, n_close = text.count("《"), text.count("》")
+    if n_open != n_close:
+        out.append(Finding(
+            "error", "引文规范",
+            f"书名号不配对：「《」出现 {n_open} 次、「》」出现 {n_close} 次，请核对"))
+
+    # C2 空书名号
+    for m in re.finditer(r"《[\s\u3000]*》", text):
+        out.append(Finding("error", "引文规范",
+                           f"第{_line_of(text, m.start())}行：书名号内为空"))
+
+    # C3 嵌套书名号
+    for m in re.finditer(r"《[^》]{0,60}《", text):
+        out.append(Finding(
+            "warn", "引文规范",
+            f"第{_line_of(text, m.start())}行：书名号内又出现书名号，"
+            f"嵌套的应为被引文件的正式名称"))
+
+    # C4 首次引用未标注发文字号
+    seen_titles: set[str] = set()
+    for m in _CITE_RE.finditer(text):
+        title = m.group(1).strip()
+        if not title or title in seen_titles:
+            continue          # 只查"首次"：同一文件后文再提不用重复要求
+        seen_titles.add(title)
+        if not _looks_like_cited_doc(title):
+            continue
+        # 字号可能写在书名号之后不远处（允许中间夹"（"或空格）
+        if _CITED_DOC_NO_RE.search(text[m.end(): m.end() + 40]):
+            continue
+        out.append(Finding(
+            "warn", "引文规范",
+            f"第{_line_of(text, m.start())}行：《{title[:20]}》首次引用建议标注"
+            f"发文字号，如“…（×政发〔2026〕5号）”"))
+
+    # C5 字号括号用了半角
+    for m in _CITE_RE.finditer(text):
+        tail = text[m.end(): m.end() + 40]
+        if tail.startswith("(") and "〔" in tail:
+            out.append(Finding(
+                "warn", "引文规范",
+                f"第{_line_of(text, m.start())}行：书名号后标注发文字号应使用"
+                f"全角括号「（）」，当前为半角"))
+
+    # C6 相邻「根据」未合并
+    positions = [m.start() for m in re.finditer("根据", text)]
+    for a, b in zip(positions, positions[1:]):
+        if b - a > 25:
+            continue
+        # 中间有句读说明是各自独立的句子，属正常写法
+        if re.search(r"[。；！？\n]", text[a:b]):
+            continue
+        out.append(Finding(
+            "warn", "引文规范",
+            f"第{_line_of(text, b)}行：与前一处「根据」相邻且无句读分隔，"
+            f"建议合并为一次引导（如“根据《A》《B》”）"))
+
+    return out
+
+
+def _mask_cn_terms(text: str) -> str:
+    """把含汉字数字的固定术语替换为等长全角空格，供数字用法统计使用。
+
+    「三个代表」「四个全面」这类政治术语里的汉字数字**不能**参与"写法统一"
+    统计——否则文中只要另有一处「3个」，就会报一条毫无意义的"不统一"。
+    用等长替换而非删除，是为了保持字符偏移不变（行号仍准确）。
+    """
+    for term in _CN_TERM_EXCLUDE:
+        if term in text:
+            text = text.replace(term, "\u3000" * len(term))
+    return text
+
+
+def _check_number_usage(lines: list[str]) -> list[Finding]:
+    """数字用法：**全文统一性**层面的检查（GB/T 15835 精神，全部为提示级）。
+
+    与纠错层的分工（重要，避免重复报警）
+    ------------------------------------
+    纠错层的 `NUMBER_RULES` 已经覆盖了逐处的数字规范：
+      · 汉字年份「二〇二六年」→ 阿拉伯数字
+      · 相邻数字表概数「3、4个」→ 汉字概数
+      · 小数的百分号写法
+    那三条属于"某处写得不规范"，适合逐处替换。本函数**刻意不重复**它们，
+    只做纠错层做不到的事——**跨全文的写法一致性**：同一量词在全文里
+    一会儿用阿拉伯数字、一会儿用汉字，单看每一处都不算错，只有纵览全文
+    才能发现体例不统一。这正是"体检"相对于"纠错"的独特价值。
+
+    全部为 `info` 级：数字用法的对错高度依赖语境，误判为"错别字"会让用户
+    对纠错失去信任，故这里只提示、不判定。
+    """
+    text = _mask_cn_terms("\n".join(lines))
+    out: list[Finding] = []
+    if not text:
+        return out
+
+    # 同一量词下两种数字形式并存 -> 体例不统一
+    for cl in _NUM_CLASSIFIERS:
+        d = re.search(rf"(?<![\d.])(\d{{1,4}}){cl}", text)
+        c = re.search(rf"([一二三四五六七八九十百千两]{{1,6}}){cl}", text)
+        if d and c:
+            out.append(Finding(
+                "info", "数字用法",
+                f"「{cl}」的数字写法全文不统一：第{_line_of(text, d.start())}行用"
+                f"“{d.group(0)}”，第{_line_of(text, c.start())}行用“{c.group(0)}”。"
+                f"同一语境建议统一为同一种数字形式"))
+
+    # 百分比的两种写法并存
+    if re.search(r"\d+\s*[%％]", text) and re.search(
+            r"百分之[一二三四五六七八九十百千零两]+", text):
+        out.append(Finding(
+            "info", "数字用法",
+            "百分比写法全文不统一：既有“50%”式，又有“百分之五十”式，建议全文统一"))
+    return out
+
+
+def _is_variant(a: str, b: str) -> bool:
+    """判断两个单位名是否**疑似同一主体的简称与全称**。
+
+    刻意做得保守——一致性检查一旦误报，"李强"与"李强华"会被当成同一个人，
+    用户就再也不信这个功能了。只认最明确的一类：短名是长名**删去中间若干字**
+    后得到，且两者以同一个机构后缀结尾。
+
+    具体排除两种常见误判：
+      · 短名是长名的**前缀**（如「安全科」与「安全科研」）——那是不同的词，
+        不是简写，`长名.startswith(短名)` 直接返回 False；
+      · 长度差过大（超过 4 字）——已不像简写了，不猜。
+    """
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) < 3 or len(long_) - len(short) > 4:
+        return False
+    if long_.startswith(short):
+        return False
+    if not long_.startswith(short[:2]):
+        return False
+    if long_[-1] != short[-1]:
+        return False
+    # 短名的字符须在长名中按序出现（即短名是长名的子序列）
+    it = iter(long_)
+    return all(ch in it for ch in short)
+
+
+def _check_consistency(lines: list[str]) -> list[Finding]:
+    """文内一致性：同一单位在全文里出现多种写法时提示核对。
+
+    这类问题**逐句看不出来**——"县应急局"和"县应急管理局"各自都对，
+    只有纵览全文才发现体例不统一。这正是体检相对于逐处纠错的独特价值。
+
+    **只报并列、不判对错**：不告诉用户哪个写法正确（可能两个都不对，
+    或本就是两个不同主体），只把并存事实与各自出现次数摆出来。
+    超过 _MAX_ENTITY_VARIANTS 条时截断，避免长文刷屏。
+    """
+    text = "\n".join(lines)
+    counts: dict[str, int] = {}
+    for m in _ENTITY_RE.finditer(text):
+        name = m.group(1)
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    names = sorted(counts)
+    # 实体太多时两两比较会退化：短文才做这项检查
+    if len(names) < 2 or len(names) > _MAX_ENTITIES:
+        return []
+
+    out: list[Finding] = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if not _is_variant(a, b):
+                continue
+            out.append(Finding(
+                "warn", "一致性",
+                f"「{a}」（{counts[a]} 次）与「{b}」（{counts[b]} 次）并存，"
+                f"请核对是否为同一单位的不同写法，并统一为规范全称"))
+            if len(out) >= _MAX_ENTITY_VARIANTS:
+                return out
+    return out
+
+
+def _check_style(lines: list[str]) -> list[Finding]:
+    """公文用语与文风：口语词与超长句（全部 `info` 级，只提示不判定）。
+
+    为什么是 info 级、且条目克制
+    ----------------------------
+    文风的主观性远高于格式与错别字："差不多"未必不能接受，"80 字长句"也
+    未必该拆。若报成 `warn`/`error`，用户会觉得软件在说教；一旦误报几次，
+    整个体检的可信度都会被带下去。因此这里只放两类**判断明确**的问题，
+    且一律 `info`。
+
+    与纠错层的分工：纠错处理"错别字/易混词"（有确定答案），本检查处理
+    "语体不当"（无确定答案，只给参考）。
+    """
+    text = "\n".join(lines)
+    out: list[Finding] = []
+    if not text:
+        return out
+
+    # 按词长降序处理，并用 covered 记录已被更长词占用的区间。
+    # 不做这件事的话「咱们」与「咱」会命中同一处各报一次——词表内的前缀
+    # 重叠会成倍放大提示数量（"咱们"三处 -> 3 条 + 3 条）。
+    covered: list[tuple[int, int]] = []
+    reported: set[str] = set()
+    for word in sorted(_SPOKEN_WORDS, key=len, reverse=True):
+        if len(out) >= _MAX_STYLE_FINDINGS:
+            return out
+        for m in re.finditer(re.escape(word), text):
+            start, end = m.span()
+            if any(cs <= start < ce for cs, ce in covered):
+                continue
+            covered.append((start, end))
+            if word in reported:
+                continue          # 同一个词只提示一次，避免长文刷屏
+            reported.add(word)
+            out.append(Finding(
+                "info", "文风",
+                f"第{_line_of(text, start)}行出现口语词「{word}」，"
+                f"公文宜改用书面语"))
+
+    long_sentences = 0
+    for m in re.finditer(r"[^。；！？\n]+[。；！？]", text):
+        seg = m.group(0)
+        body = re.sub(r"\s", "", seg)
+        if len(body) <= _MAX_SENTENCE_CHARS:
+            continue
+        out.append(Finding(
+            "info", "文风",
+            f"第{_line_of(text, m.start())}行有一句约 {len(body)} 字，"
+            f"超过 {_MAX_SENTENCE_CHARS} 字，建议拆分以便阅读"))
+        long_sentences += 1
+        if long_sentences >= 3:
+            break
+    return out[: _MAX_STYLE_FINDINGS]
 
 
 def inspect_docx(path: str) -> list[Finding]:

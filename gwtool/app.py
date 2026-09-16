@@ -10,6 +10,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 from . import APP_NAME, __version__
+# 诊断日志：全包零日志是此前的重大缺口——用户机上的故障完全不可诊断。
+# 必须在其他初始化之前 install，才能捕获启动期的异常。
+from . import logs
 # 顶层导入：这两个模块平时只在 UI 回调里延迟导入（classify 用于分类建议、
 # report 用于体检报告导出），冻结包若漏收它们，用户点到才会崩。放到启动路径上，
 # CI 每次构建的启动冒烟即可覆盖。
@@ -94,6 +97,7 @@ def _launch_qapp(argv: list[str]) -> "QApplication | None":
     try:
         return QApplication(argv)
     except Exception as exc:  # 打包版双击启动时错误不可见，落到日志
+        logs.get_logger("app").exception("QApplication 构造失败")
         lines = ["启动失败：Qt 图形环境初始化异常。", f"原始错误：{exc}"]
         if "xcb" in str(exc).lower():
             lines += ["通常是缺少系统运行库，麒麟/Ubuntu 下执行：", "  " + XCB_HINT]
@@ -126,6 +130,9 @@ def _pass_lock() -> bool:
 
 
 def run(import_path: str = "") -> int:
+    # 最先装配诊断日志：此后所有异常（含 QApplication 构造失败）都能落盘
+    logs.install()
+
     # 高分屏适配：默认强制浅色；设置「跟随系统深浅色」后交由系统决定
     if sys.platform == "win32" and not _follow_system_theme():
         sys.argv += ["-platform", "windows:darkmode=0"]
@@ -149,6 +156,7 @@ def run(import_path: str = "") -> int:
         dbconn.configure(db_path())
         ensure_database_seeded()
     except sqlite3.DatabaseError as exc:
+        logs.get_logger("app").exception("数据库文件损坏，无法打开")
         from .paths import backup_dir
         nl = chr(10)
         lines = [f"数据库文件损坏，无法打开：{exc}"]

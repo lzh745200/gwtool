@@ -234,7 +234,7 @@ class RegistryDialog(QDialog):
         for text, slot in (("新增登记", self.add_record),
                            ("编辑", self.edit_selected),
                            ("删除", self.delete_selected),
-                           ("导出 CSV", self.export_csv)):
+                           ("导出", self.export_table)):
             btn = QPushButton(text)
             btn.clicked.connect(slot)
             ops.addWidget(btn)
@@ -361,6 +361,40 @@ class RegistryDialog(QDialog):
         for rid in ids:
             dao.delete_dispatch(rid)
         self.reload()
+
+    def export_table(self) -> None:
+        """导出台账：默认 xlsx（附「统计」工作表），仍可选 CSV。
+
+        两种格式都保留而不是互相替代——CSV 便于脚本处理与老用户沿用，
+        xlsx 才有列宽、表头样式、冻结行与多工作表。
+        """
+        if not self._rows:
+            warn(self, "当前没有可导出的登记记录。")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        default = f"发文登记台账_{date.today():%Y%m%d}.xlsx"
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "导出发文登记台账", default,
+            "Excel 工作簿 (*.xlsx);;CSV 文件 (*.csv)")
+        if not path:
+            return
+        # 以**后缀**为准而非以过滤器为准：用户可能在文件名里手敲 .csv，
+        # 而过滤器仍停在默认项上；两者不一致时按后缀走才符合直觉。
+        try:
+            if path.lower().endswith(".csv"):
+                n = registry.export_csv(self._rows, path)
+                info(self, f"已导出 {n} 条登记到：\n{path}\n"
+                           f"（UTF-8 BOM 编码，Excel 可直接打开）")
+                return
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            n = registry.export_xlsx(self._rows, path, with_stats=True)
+        except OSError as exc:
+            warn(self, f"导出失败：{exc}")
+            return
+        info(self, f"已导出 {n} 条登记到：\n{path}\n"
+                   f"（含「统计」工作表；发文字号已按文本写入，"
+                   f"不会被 Excel 转成科学计数法）")
 
     def export_csv(self) -> None:
         if not self._rows:

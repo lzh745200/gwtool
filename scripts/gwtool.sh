@@ -11,8 +11,12 @@ DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
 EXE="$DIR/gwtool"
 LOG="$HOME/gwtool_启动诊断.log"
 
-say() { echo "$@"; echo "$@" >> "$LOG" 2>/dev/null || true; }
+say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$LOG" 2>/dev/null || true; }
 
+# 注意：参数里若带 \n，必须用 printf 转义，不能交给 echo。
+# bash 内置 echo 默认**不解释** \n，会把 "\n" 原样打成反斜杠+n —— 而这些提示
+# 恰好都在"启动失败"路径上（架构不匹配、缺库），用户看到的将是一行乱码般的
+# 单行文本，最需要可读性的时刻反而最不可读。实测确认过该行为。
 popup() {  # 依次尝试可用的图形提示工具
   if command -v kdialog >/dev/null 2>&1; then kdialog --error "$1" --title "公文汇编助手" 2>/dev/null; return; fi
   if command -v zenity >/dev/null 2>&1; then zenity --error --width=560 --text="$1" --title "公文汇编助手" 2>/dev/null; return; fi
@@ -23,7 +27,8 @@ popup() {  # 依次尝试可用的图形提示工具
 
 if [ ! -x "$EXE" ]; then
   say "未找到主程序：$EXE"
-  popup "未找到主程序：$EXE\n请确认安装包完整（详见 $LOG）"
+  popup "未找到主程序：$EXE
+请确认安装包完整（详见 $LOG）"
   exit 1
 fi
 
@@ -37,7 +42,11 @@ if command -v file >/dev/null 2>&1; then
   MYARCH="$(uname -m)"
   [ "$MYARCH" = "amd64" ] && MYARCH="x86_64"
   if [ -n "$EXEARCH" ] && [ "$MYARCH" != "$EXEARCH" ]; then
-    MSG="程序架构（$EXEARCH）与当前系统（$MYARCH）不匹配。\n请下载与系统架构一致的安装包（本机架构：$(uname -m)）。"
+    # 多行提示直接用真实换行（这里写实换行而非 \n）：
+    # popup 的 kdialog/zenity 会自行解释 \n，但 say 走的 printf 与日志文件
+    # 不会——为保证两处显示一致，消息里就写成实换行。
+    MSG="程序架构（$EXEARCH）与当前系统（$MYARCH）不匹配。
+请下载与系统架构一致的安装包（本机架构：$(uname -m)）。"
     say "$MSG"
     popup "$MSG"
     exit 1
@@ -62,7 +71,10 @@ if [ -n "$MISSING" ]; then
   say "      libxcb-render0 libxcb-shape0 libxcb-randr0 libxcb-xfixes0 \\"
   say "      libxcb-xkb1 libxext6 libxrender1 libsm6 libice6"
   say "详细日志：$LOG"
-  popup "缺少系统运行库，程序可能无法启动。\n\n修复命令已写入：$LOG\n（sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1 等）"
+  popup "缺少系统运行库，程序可能无法启动。
+
+修复命令已写入：$LOG
+（sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1 等）"
 fi
 
 # ---- OCR（内置 Tesseract）：预置路径，无内置时自动回退系统安装 ----
@@ -78,6 +90,7 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
   say "程序异常退出（退出码 $rc）"
   say "若上方出现 Could not load the Qt platform plugin (xcb)，请按上面的命令补装运行库后重试。"
-  popup "程序异常退出（退出码 $rc）。\n详细信息：$LOG"
+  popup "程序异常退出（退出码 $rc）。
+详细信息：$LOG"
 fi
 exit "$rc"

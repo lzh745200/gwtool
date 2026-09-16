@@ -21,20 +21,37 @@
 # ---------------------------------------------------------------------------
 # · Python >= 3.11：可用 1.19 ~ 1.27 一档；
 # · Python 3.9（麒麟 CI 容器）：只能停在 1.17 一档——更高版本已放弃 3.9；
-# · aarch64（麒麟 V10）：上游提供 manylinux 轮子，但**上机前必须核对
-#   `ldd --version` 与轮子的 glibc 基线**（本项目 ARM64 底线 glibc >= 2.31）。
-#   若目标机不满足，请保持 L4 关闭——三级流水线不受影响。
+# · aarch64（麒麟 V10）：**已实测确认可用，无需再注释掉**。见下方"aarch64 实测结论"。
+#
+# aarch64 实测结论（2026-09-15 核对 PyPI 元数据，勿凭印象推翻）
+# ---------------------------------------------------------------------------
+# 曾长期把 aarch64 那行注释掉，理由是"上游轮子可用性不稳、须上机核对 glibc"。
+# 实测核对后该顾虑**不成立**，故现已启用：
+#   · onnxruntime 1.17.3 提供 aarch64 轮子，标签为
+#     `manylinux_2_27_aarch64.manylinux_2_28_aarch64`，
+#     即有 cp38/cp39/cp310/cp311/cp312 六个版本，**含 cp39**（麒麟 CI 的
+#     Debian 11 容器正是 Python 3.9，版本恰好对得上）；
+#   · glibc 基线 = 2.27/2.28 **低于**本项目 ARM64 底线 2.31 → 在麒麟 V10 上
+#     不会出现 "version `GLIBC_2.xx' not found"。这是它可用的关键依据。
+#   · tokenizers 0.15.2 同样有 aarch64 轮子（`manylinux_2_17_aarch64`，
+#     glibc 2.17，含 cp39），L5 的分词器在 aarch64 上同样可用。
+#   · numpy 传递依赖：onnxruntime 要求 `numpy>=1.21.6`；1.26.4 提供
+#     cp39 `manylinux_2_17_aarch64` 轮子，满足。**numpy 2.x 已放弃 3.9**，
+#     故 3.9 档会被解析到 1.x——这是正确行为，不要手动升到 2.x。
+# 结论：L4 与 L5 在 Windows x64、Linux x86_64、麒麟 V10 ARM64 三个平台上
+#       依赖齐备；真正决定"能否启用"的只剩**是否导入增强包**这一件事。
 #
 # 注意：onnxruntime 会引入 numpy 依赖；本项目其余代码不需要 numpy。
 
-# ---- x86_64 / Windows 与通用 Linux（Python >= 3.11） ----
+# ---- Windows x64 / Linux x86_64（Python >= 3.11）：1.19 ~ 1.27 一档 ----
 onnxruntime==1.27.0 ; python_version >= '3.11'
 
 # ---- Python 3.9（麒麟 CI 容器一档；支持 3.9 的最后一档） ----
+# 这一档同时覆盖 **aarch64**：1.17.3 的 cp39 aarch64 轮子已实测存在且
+# glibc 基线（2.27/2.28）低于本机底线 2.31，故无需为架构单独分叉版本。
+# 不要再加 `platform_machine == 'aarch64'` 的单独行——它会把 aarch64 拉到
+# 与 x86_64 不同的版本上，制造"同源码不同行为"的分叉（v1.2.1 事故模式）。
 onnxruntime==1.17.3 ; python_version < '3.11'
-
-# ---- aarch64 备选（若上机核对 glibc 后确认可用，取消注释并锁到实测通过的版本） ----
-# onnxruntime==1.17.3 ; platform_machine == 'aarch64'
 
 # ---- L5 语法纠错包（Seq2Seq / BART 一类）额外需要的分词器 ----
 # 只装 L4（拼写）不需要它；不装本包时 L5 自动静默，纠错行为不变。
@@ -44,7 +61,8 @@ onnxruntime==1.17.3 ; python_version < '3.11'
 #   自研实现与预训练时用的 WordPiece 只要有一处偏差，精度就会明显掉。
 #   tokenizers 是 HuggingFace 官方的 **Rust** 实现，约 5–8 MB，**不含 torch**，
 #   与本项目"不引入 torch"的红线不冲突。
-# 上机前同样要核对 aarch64 轮的 glibc 基线（本项目 ARM64 底线 glibc >= 2.31）。
+# aarch64 已实测：0.15.2 提供 cp39 `manylinux_2_17_aarch64` 轮子（glibc 2.17
+#   基线，低于本项目 ARM64 底线 2.31），麒麟 V10 可直接安装，无需额外分叉。
 #
 # 版本分档：新版已放弃 3.9，故与 onnxruntime 同样分两档。
 tokenizers==0.22.0 ; python_version >= '3.11'

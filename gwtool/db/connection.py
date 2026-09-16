@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from .schema import init_schema
+from .. import logs
 
 _local = threading.local()
 _db_file: Path | None = None
@@ -137,8 +138,10 @@ def _pre_migrate_backup() -> None:
                 snap.unlink()
             except OSError:
                 pass
-    except (OSError, sqlite3.Error):
-        pass
+    except (OSError, sqlite3.Error) as exc:
+        # 迁移前备份失败 = 本次升级失去安全网。绝不能静默：一旦迁移出问题，
+        # 用户既没有回退点、也拿不到任何解释。必须留痕。
+        logs.get_logger("db").warning("迁移前备份失败，本次升级无安全网：%s", exc)
 
 
 def close_current_thread() -> None:

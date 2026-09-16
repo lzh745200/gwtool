@@ -20,6 +20,40 @@ else
         -i https://pypi.tuna.tsinghua.edu.cn/simple
 fi
 
+echo "[2.5/6] 安装可选推理栈（L4 神经精排 / L5 语法纠错）..."
+# 这一层决定"增强层能否启用"，与主依赖一样按离线优先处理：
+# 离线机上若没有这两组 wheel，L4/L5 **永远**开不起来——那正是"麒麟 ARM64 也要
+# 完整实现全部功能"这条要求里最容易被忽略的死角（有代码、无依赖 = 功能不可达）。
+# 因此：能装就装，装完当场**断言可导入**；装不上只告警不阻断（主包照常产出，
+# 退化为三级流水线，语义与"未导入增强包"完全一致）。
+_opt_ok=0
+if [ -d wheels_aarch64 ] && ls wheels_aarch64/onnxruntime-*.whl >/dev/null 2>&1; then
+    pip install --no-index --find-links wheels_aarch64 -r requirements-optional.txt && _opt_ok=1
+elif pip install -r requirements-optional.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple; then
+    _opt_ok=1
+fi
+if [ "$_opt_ok" = "1" ]; then
+    python - <<'PYOPT'
+import importlib.util as u
+import platform
+mods = ("onnxruntime", "tokenizers", "numpy")
+print("      平台：", platform.machine(), platform.python_version())
+missing = [m for m in mods if u.find_spec(m) is None]
+for m in mods:
+    if m not in missing:
+        mod = __import__(m)
+        print(f"      {m:12s} {getattr(mod, '__version__', '?')}")
+if missing:
+    raise SystemExit("      警告：离线已装但缺模块 -> " + ", ".join(missing))
+print("      L4/L5 推理栈就绪，增强层在麒麟 ARM64 上可用。")
+PYOPT
+else
+    echo "      警告：可选推理栈安装失败 —— 主包不受影响，但本机装配的产物"
+    echo "            无法启用 L4/L5（退化为三级流水线）。如需启用，请在有网"
+    echo "            机器上先跑 scripts/kylin_offline_wheels.sh 补齐 wheels_aarch64/。"
+fi
+
 echo "[3/6] 运行测试确认环境正常..."
 python -m pytest tests/ -q
 

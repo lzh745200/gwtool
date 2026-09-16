@@ -87,3 +87,23 @@ def export_report(findings: list[Finding], out_path: str,
 
     tree = build_report_tree(findings, source_name=source_name)
     return generate_docx([tree], tpl or default_template(), out_path)
+
+
+def export_report_xlsx(findings: list[Finding], out_path: str,
+                       source_name: str = "") -> int:
+    """导出体检结果为 xlsx **整改清单**，返回写出的条目数。
+
+    与 DOCX 报告并存：DOCX 适合归档与流转（有正式版式），
+    xlsx 适合**逐条整改销号**——拟稿人可以在表里直接加"已改/待改"列筛选。
+    两者面向的使用场景不同，故都保留。
+    """
+    from .xlsx import write_table
+
+    ordered = sorted(findings,
+                     key=lambda f: (_SEVERITY_ORDER.get(f.severity, 9), f.item))
+    rows = [[_SEVERITY_LABEL.get(f.severity, f.severity), f.item, f.detail,
+             "", ""] for f in ordered]
+    title = f"{source_name}：体检整改清单" if source_name else "体检整改清单"
+    return write_table(out_path,
+                       ["严重程度", "检查项", "问题说明", "处理意见", "备注"],
+                       rows, sheet_name=title)

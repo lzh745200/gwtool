@@ -33,6 +33,11 @@ EXE_NAME = "gwtool.exe" if IS_WIN else "gwtool"
 ALIVE_SECONDS = 12          # 启动后需存活这么久才算没崩（首启动要导种子库）
 MIN_ERROR_PAIRS = 30000     # 与 README/e2e 的验收口径一致
 
+# L4/L5 可选推理栈的模块集（与 scripts/check_inference_stack.py 同口径）。
+# 缺失不算"产物不可用"，但必须显式报告——静默的功能缺失正是过去 ARM64
+# 长期"看起来正常、实际没有增强层"的原因。
+BUILTIN_STACK = ("onnxruntime", "tokenizers", "numpy")
+
 failures: list[str] = []
 
 
@@ -52,6 +57,39 @@ def find_one(root: Path, *needles: str) -> Path | None:
         if any(n.lower() in low for n in needles):
             return path
     return None
+
+
+def _runtime_report(exe: Path, dist: Path, env: dict) -> dict | None:
+    """让**产物自己**报告能力面，解析 `key: value` 行。
+
+    返回 None 表示命令不可用/输出不可解析（调用方据此判失败）。
+    注意 cwd 传 dist：便携模式靠"同级有 Data/"生效，本命令不建 Data/，
+    但保持与启动实测同一工作目录，避免路径相关的行为差异。
+    """
+    try:
+        out = subprocess.run(
+            [str(exe), "--runtime-report"], cwd=str(dist), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=60, check=False,
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"      --runtime-report 执行失败：{type(exc).__name__}: {exc}")
+        return None
+
+    cap: dict[str, str] = {}
+    for raw in out.splitlines():
+        if ":" not in raw:
+            continue
+        key, _, val = raw.partition(":")
+        key, val = key.strip(), val.strip()
+        if key:
+            cap[key] = val
+    if not cap:
+        print("      --runtime-report 无可解析输出：", out[:300])
+        return None
+    for key, val in cap.items():
+        print(f"      {key}: {val}")
+    return cap
 
 
 def main() -> int:
@@ -162,6 +200,44 @@ def main() -> int:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+
+    # ---- 4. 能力面：产物自己报有没有 L4/L5 推理栈与 OCR ----
+    # 必须问**产物自己**，不能在构建机上 import 判定：漏一个 hiddenimport，
+    # PyInstaller 照样"打包成功"，但用户机上 L4/L5 / OCR 永远不可用。
+    # 这一节把"代码在、依赖不在"这类静默功能缺失挡在发布前。
+    print("\n-- 能力面（由产物自报）--")
+    cap = _runtime_report(exe, dist, env)
+    if cap is None:
+        check("产物可执行 --runtime-report", False,
+              "命令未返回可解析输出（打包或入口有问题）")
+    else:
+        check("产物可执行 --runtime-report", True, "已取得能力报告")
+        missing = [m for m in BUILTIN_STACK if cap.get(f"module.{m}", "MISSING") == "MISSING"]
+        # 推理栈是"可选增强"：缺失不算致命（产物仍可用），但必须**显式告知**，
+        # 这正是过去 ARM64 长期"静默降级"的根因所在。
+        check("L4/L5 推理栈已随产物分发", not missing,
+              f"缺失 {missing}；该产物不含 L4/L5 运行时（功能面已削弱，"
+              "请确认是有意为之）" if missing else "onnxruntime/tokenizers/numpy 齐备")
+        # 逐项核对"L4/L5 是否可启用"。注意区分两层：
+        #   runtime = 依赖（onnxruntime/tokenizers）在不在；
+        #   available = 依赖 + 增强包是否都就绪。
+        # 产物里**不该**预置增强包（模型不随主包分发是硬约束），故 available
+        # 期望 False；这里只要求 runtime 为 True，即"闸门修好后随时可用"。
+        for layer in ("L4", "L5"):
+            check(f"{layer} 运行时可导入", cap.get(f"{layer}.runtime") == "True",
+                  f"runtime={cap.get(f'{layer}.runtime', '?')}")
+
+        # OCR 分两个层次核对，只看 available 会被"系统里装了 Tesseract"掩盖：
+        # 构建机/开发机常有系统级 Tesseract，于是 available=True，但产物里
+        # **没有**自带的引擎 → 到离线用户机上就不可用。故显式核对 bundled 路径。
+        check("OCR 引擎可发现", cap.get("ocr.available") == "True",
+              f"available={cap.get('ocr.available', '?')}")
+        check("OCR 走产物自带引擎", cap.get("ocr.bundled") == "True",
+              f"bundled={cap.get('ocr.bundled', '?')}"
+              + ("" if cap.get("ocr.bundled") == "True"
+                 else "；产物未带 tesseract（离线用户机上 OCR 将不可用）"))
+        check("内置中文 OCR 包可用", cap.get("ocr.chi_sim") == "True",
+              f"chi_sim={cap.get('ocr.chi_sim', '?')}")
 
     # 便携 Data/ 是本次校验造的，清掉以免混进安装包产物。
     # Windows 上进程退出后句柄释放有延迟：立即 rmtree 会因 gwtool.db(-wal)

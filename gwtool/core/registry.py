@@ -127,6 +127,43 @@ def export_csv(rows: list[dao.Dispatch], out_path: str) -> int:
     return len(rows)
 
 
+def export_xlsx(rows: list[dao.Dispatch], out_path: str,
+                with_stats: bool = False) -> int:
+    """导出台账为 xlsx，返回写出的数据行数（不含表头）。
+
+    与 `export_csv` **并存而非替代**：CSV 便于脚本处理、老用户也已在用；
+    xlsx 则解决 CSV 的三个硬局限 ——
+      1. 无列宽与表头样式（用户每次拿到都要手工重排）；
+      2. 无多工作表（统计结果只能挤进同一张表）；
+      3. 长数字被 Excel 转成科学计数法。
+    with_stats=True 时额外产出一张「统计」工作表，正是多表能力的用武之地。
+    """
+    from .xlsx import Sheet, write_xlsx
+
+    headers = [label for _key, label in EXPORT_COLUMNS]
+    body = []
+    for r in rows:
+        data = asdict(r)
+        body.append([data.get(key, "") for key, _label in EXPORT_COLUMNS])
+    # 发文字号的语义是"编码"而非"数值"：强制按文本写入，
+    # 否则 Excel 会把它显示成 5.01234E+13 之类
+    text_cols = {i for i, (key, _label) in enumerate(EXPORT_COLUMNS)
+                 if key == "doc_no"}
+    sheets = [Sheet(name="发文台账", headers=headers, rows=body,
+                    text_columns=text_cols)]
+
+    if with_stats:
+        summ = summarize(rows)
+        stat_rows = [["按文种", k, v] for k, v in summ["by_type"].items()]
+        stat_rows += [["按状态", k, v] for k, v in summ["by_status"].items()]
+        stat_rows += [["合计", "总件数", summ["total"]],
+                      ["合计", "总页数", summ["pages"]],
+                      ["合计", "总印数", summ["copies"]]]
+        sheets.append(Sheet(name="统计", headers=["维度", "取值", "数量"],
+                            rows=stat_rows))
+    return write_xlsx(out_path, sheets)
+
+
 def validate(d: dao.Dispatch) -> list[str]:
     """登记前的字段校验，返回问题列表（空列表表示可保存）。"""
     problems: list[str] = []

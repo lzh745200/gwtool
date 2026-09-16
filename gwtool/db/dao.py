@@ -108,6 +108,48 @@ class Dispatch:
 
 
 @dataclass
+class Receive:
+    """一条收文登记记录。
+
+    字段与 `receive_register` 表一一对应，新增字段必须两边同步
+    （`_RECEIVE_COLUMNS` 是写库时的唯一列清单）。
+
+    一次给全办理时限（due_date/done_date）与归档（archive_no/retention）
+    字段：SQLite 的 ALTER 虽便宜，但每次版本迁移都要走"迁移前自动备份"，
+    对用户是可见的开销，能一次到位的就一次到位。
+    """
+    id: int = 0
+    reg_no: str = ""            # 收文登记号（本单位内部流水）
+    incoming_no: str = ""       # 来文字号（外单位格式，宽松保存）
+    title: str = ""
+    doc_type: str = ""
+    from_org: str = ""          # 来文机关
+    main_send: str = ""         # 主送（本单位受文部门）
+    cc: str = ""                # 抄送
+    secret_level: str = "公开"
+    urgency: str = ""
+    receive_date: str = ""      # 收到日期
+    doc_date: str = ""          # 来文成文日期
+    pages: int = 0
+    copies: int = 0
+    propose: str = ""           # 拟办意见
+    instruction: str = ""       # 领导批示
+    handler_dept: str = ""      # 承办部门
+    handler: str = ""           # 承办人
+    due_date: str = ""          # 应办结日期
+    done_date: str = ""         # 实际办结日期
+    result: str = ""            # 办理结果
+    status: str = "签收"         # 签收/拟办/批办/承办/已办结/已归档
+    archive_no: str = ""        # 档号
+    retention: str = ""         # 保管期限：永久/30年/10年
+    archive_date: str = ""      # 归档日期
+    doc_id: int = 0             # 关联资料库文档（0=未关联）
+    remark: str = ""
+    created_time: str = ""
+    updated_time: str = ""
+
+
+@dataclass
 class Attachment:
     """一条文档附件记录。
 
@@ -339,8 +381,10 @@ def list_documents(category_id: int | None = None,
     资料库列表、汇编选料、查重、批量替换都走本函数。
     """
     conn = dbconn.get_conn()
-    cols = ("id,title,tags,category_id,file_type,word_count,import_time,"
-            "updated_time,deleted_time")
+    # file_path 必须带出：批量导出/移交包要按它复制用户的**原始文件**，
+    # 缺了它只能退化成导出的纯文本（原格式与批注全丢）。
+    cols = ("id,title,tags,category_id,file_type,file_path,word_count,"
+            "import_time,updated_time,deleted_time")
     if include_content:
         cols += ",content_text"
     if category_id is None:
@@ -1063,3 +1107,175 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
         if m:
             best = max(best, int(m.group(1)))
     return best
+
+
+# ==================================================== 收文登记台账（receive）
+# 命名与 dispatch 一组保持对称：add/update/delete/get/list/count/stats/monthly。
+_RECEIVE_COLUMNS = (
+    "reg_no", "incoming_no", "title", "doc_type", "from_org", "main_send",
+    "cc", "secret_level", "urgency", "receive_date", "doc_date", "pages",
+    "copies", "propose", "instruction", "handler_dept", "handler",
+    "due_date", "done_date", "result", "status", "archive_no", "retention",
+    "archive_date", "doc_id", "remark",
+)
+# 统计分组列白名单：与 dispatch 同理，绝不把调用方传入的字符串直接拼进 SQL
+_RECEIVE_GROUPABLE = ("doc_type", "from_org", "status", "secret_level",
+                      "urgency", "handler_dept", "handler", "retention")
+
+
+def add_receive(r: Receive) -> int:
+    conn = dbconn.get_conn()
+    cols = ",".join(_RECEIVE_COLUMNS)
+    marks = ",".join("?" * len(_RECEIVE_COLUMNS))
+    cur = conn.execute(
+        f"INSERT INTO receive_register({cols}) VALUES({marks})",
+        [getattr(r, c) for c in _RECEIVE_COLUMNS])
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_receive(r: Receive) -> None:
+    conn = dbconn.get_conn()
+    assigns = ",".join(f"{c}=?" for c in _RECEIVE_COLUMNS)
+    conn.execute(
+        f"UPDATE receive_register SET {assigns},"
+        f"updated_time=datetime('now','localtime') WHERE id=?",
+        [getattr(r, c) for c in _RECEIVE_COLUMNS] + [r.id])
+    conn.commit()
+
+
+def delete_receive(receive_id: int) -> None:
+    conn = dbconn.get_conn()
+    conn.execute("DELETE FROM receive_register WHERE id=?", (receive_id,))
+    conn.commit()
+
+
+def get_receive(receive_id: int) -> Receive | None:
+    conn = dbconn.get_conn()
+    row = conn.execute("SELECT * FROM receive_register WHERE id=?",
+                       (receive_id,)).fetchone()
+    return Receive(**dict(row)) if row else None
+
+
+def list_receive(keyword: str = "", from_org: str = "", doc_type: str = "",
+                 status: str = "", year: str = "", date_from: str = "",
+                 date_to: str = "", limit: int = 5000) -> list[Receive]:
+    """按条件筛选收文登记，收到日期倒序（同日按 id 倒序）。"""
+    where: list[str] = []
+    params: list = []
+    if keyword.strip():
+        # 收文检索最常用的是来文机关与来文字号，必须纳入关键字匹配
+        kw_cols = ("title", "incoming_no", "reg_no", "from_org", "main_send",
+                   "cc", "propose", "instruction", "handler", "handler_dept",
+                   "remark")
+        where.append("(" + " OR ".join(f"{c} LIKE ?" for c in kw_cols) + ")")
+        like = f"%{keyword.strip()}%"
+        params += [like] * len(kw_cols)
+    if from_org:
+        where.append("from_org=?")
+        params.append(from_org)
+    if doc_type:
+        where.append("doc_type=?")
+        params.append(doc_type)
+    if status:
+        where.append("status=?")
+        params.append(status)
+    if year:
+        # 年份既可能来自收到日期，也可能来自来文字号里的〔2026〕
+        where.append("(receive_date LIKE ? OR incoming_no LIKE ?)")
+        params += [f"{year}%", f"%〔{year}〕%"]
+    if date_from:
+        where.append("receive_date>=?")
+        params.append(date_from)
+    if date_to:
+        where.append("receive_date<=?")
+        params.append(date_to)
+    sql = "SELECT * FROM receive_register"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY receive_date DESC, id DESC LIMIT ?"
+    params.append(limit)
+    conn = dbconn.get_conn()
+    rows = conn.execute(sql, params).fetchall()
+    return [Receive(**dict(r)) for r in rows]
+
+
+def count_receive() -> int:
+    conn = dbconn.get_conn()
+    return int(conn.execute("SELECT count(*) FROM receive_register").fetchone()[0])
+
+
+def receive_stats(group_by: str = "from_org", year: str = "") -> list[tuple[str, int]]:
+    """按指定列聚合计数，返回 [(取值, 件数)]，件数倒序。空值归入「未填写」。"""
+    if group_by not in _RECEIVE_GROUPABLE:
+        raise ValueError(f"不支持的分组列：{group_by}")
+    conn = dbconn.get_conn()
+    sql = (f"SELECT COALESCE(NULLIF({group_by},''),'未填写') AS k, count(*) AS n"
+           f" FROM receive_register")
+    params: list = []
+    if year:
+        sql += " WHERE receive_date LIKE ? OR incoming_no LIKE ?"
+        params += [f"{year}%", f"%〔{year}〕%"]
+    sql += " GROUP BY k ORDER BY n DESC, k"
+    return [(r["k"], int(r["n"])) for r in conn.execute(sql, params).fetchall()]
+
+
+def receive_monthly_counts(year: str) -> list[tuple[str, int]]:
+    """某年 1-12 月各月收文件数（按收到日期）。"""
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT substr(receive_date,6,2) AS m, count(*) AS n FROM receive_register"
+        " WHERE receive_date LIKE ? GROUP BY m", (f"{year}%",)).fetchall()
+    got = {r["m"]: int(r["n"]) for r in rows if r["m"]}
+    return [(f"{int(m):02d}月", got.get(m, 0)) for m in
+            [f"{i:02d}" for i in range(1, 13)]]
+
+
+def receive_years() -> list[str]:
+    """台账中出现过的年度（由收到日期推导），倒序。"""
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT substr(receive_date,1,4) AS y FROM receive_register"
+        " WHERE length(receive_date)>=4 ORDER BY y DESC").fetchall()
+    return [r["y"] for r in rows if r["y"] and str(r["y"]).isdigit()]
+
+
+def max_reg_no_serial(prefix: str, year: str) -> int:
+    """取某前缀某年度已用的最大收文登记号序号，无记录返回 0。
+
+    与 max_doc_no_serial 对称，但**独立计数**——收文与发文是两本账。
+    """
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT reg_no FROM receive_register WHERE reg_no LIKE ?",
+        (f"{prefix}%〔{year}〕%",)).fetchall()
+    best = 0
+    for r in rows:
+        m = re.search(r"〕\s*(\d+)\s*号", r["reg_no"] or "")
+        if m:
+            best = max(best, int(m.group(1)))
+    return best
+
+
+def pending_receive(due_within_days: int = 2, today: str = "") -> list[Receive]:
+    """未办结且即将到期或已逾期的收文（供 A2 督办提醒）。
+
+    只认"填了应办结日期、且尚未办结"的记录——没有期限的收文不该被算法
+    替用户判定为"该催办了"，那只会制造噪音。按应办结日期升序（最急在前）。
+    """
+    import datetime as _dt
+
+    base = today or _dt.date.today().isoformat()
+    try:
+        edge = (_dt.date.fromisoformat(base)
+                + _dt.timedelta(days=int(due_within_days))).isoformat()
+    except (TypeError, ValueError):
+        return []
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT * FROM receive_register"
+        " WHERE due_date <> '' AND done_date = ''"
+        "   AND status NOT IN ('已办结','已归档')"
+        "   AND due_date <= ?"
+        " ORDER BY due_date ASC, id ASC", (edge,)).fetchall()
+    return [Receive(**dict(r)) for r in rows]

@@ -108,6 +108,41 @@ def test_spec_bundles_seed_db():
     assert "gwtool/resources/data/seed.db" in text
 
 
+def test_spec_explicitly_collects_optional_inference_stack():
+    """spec 必须**显式**收集 onnxruntime/tokenizers/numpy，不能靠静态分析侥幸。
+
+    L4/L5 的 import 全部写在函数体内（延迟导入），PyInstaller 的静态分析
+    "通常"能扫到，但这不是契约：PyInstaller 只自带 hook-numpy.py，
+    **没有 onnxruntime / tokenizers 的 hook**（_pyinstaller_hooks_contrib 未装），
+    原生扩展的依赖链无人兜底；且 Linux/ARM64 收集 .so 依赖走的是另一条路径。
+
+    一旦漏收，得到的是最坏的一类缺陷：依赖装了、CI 断言"装成了"、产物里却没有
+    → 用户机上 L4/L5 永久不可用且不报错。ARM64 由于是首次获得这些依赖，
+    最容易踩到。故用测试守住"显式收集"这一契约。
+    """
+    text = _read("gwtool.spec")
+    assert "collect_submodules" in text, "spec 未递归收集推理栈子模块"
+    for mod in ("onnxruntime", "tokenizers", "numpy"):
+        assert mod in text, f"spec 未显式收集 {mod}"
+    # 必须容错：主包默认不带这些依赖，包缺席时打包**不能中断**
+    assert "__import__" in text or "find_spec" in text, (
+        "spec 未做存在性探测：依赖缺席时 PyInstaller 会因 hidden import 找不到而中断整条打包")
+    assert "except Exception" in text, "spec 缺少容错分支"
+
+
+def test_spec_does_not_hardcode_hiddenimports_for_optional_deps():
+    """不得用固定列表硬写可选依赖的模块名。
+
+    `hiddenimports += ['onnxruntime']` 这种写法在包缺席时会让 PyInstaller
+    直接报 "Hidden import not found" 并终止打包——而"主包不带推理栈"
+    恰是默认且被允许的情形。
+    """
+    text = _read("gwtool.spec")
+    for mod in ("onnxruntime", "tokenizers"):
+        assert f"'{mod}'" not in text or "append" in text, (
+            f"{mod} 疑似被硬写进列表，缺席时会中断打包")
+
+
 # ------------------------------------------------------------ 硬编码路径
 def test_no_hardcoded_build_machine_paths():
     """全库不得出现构建机的绝对路径 C:\\gwtool——用户机上它不存在。
@@ -194,3 +229,132 @@ def test_no_non_ascii_in_strftime_format():
     assert not offenders, (
         "以下 strftime/日期格式串含非 ASCII 字符，英文区域设置 Windows 上会崩：\n"
         + "\n".join(offenders))
+
+
+# ------------------------------------------------------------ ARM64 完整性
+def test_optional_stack_covers_aarch64_without_arch_fork():
+    """可选推理栈必须让 aarch64 可用，且**不得**为架构单独分叉版本。
+
+    背景：这一行曾被注释掉（"aarch64 轮子可用性不稳，需上机核对 glibc"），
+    导致麒麟 ARM64 上 L4/L5 **永远**装不起来 —— 代码在、依赖不在 = 功能不可达，
+    而 CI 当时是静默降级，谁也不会发现。
+
+    实测核对（2026-09-15，PyPI 元数据）后确认顾虑不成立：
+      · onnxruntime 1.17.3 有 cp39 aarch64 轮子，标签 manylinux_2_27/2_28，
+        glibc 基线 2.27/2.28 **低于**本项目 ARM64 底线 2.31；
+      · tokenizers 0.15.2 有 cp39 aarch64（manylinux_2_17）。
+    故两行都必须处于**生效状态**（未注释）。
+
+    同时禁止加 `platform_machine == 'aarch64'` 的独立行：那会让 aarch64 与
+    x86_64 落在不同版本上，制造"同源码不同行为"的分叉 —— 正是 v1.2.1 事故的成因。
+    """
+    active = []
+    for ln in _read("requirements-optional.txt").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        active.append(s)
+
+    assert any(s.startswith("onnxruntime==") for s in active), (
+        "onnxruntime 无生效行：aarch64 上将无法安装 L4 运行时")
+    assert any(s.startswith("tokenizers==") for s in active), (
+        "tokenizers 无生效行：aarch64 上将无法安装 L5 运行时")
+
+    # 禁止按架构分叉：环境标记里不能出现 platform_machine
+    for s in active:
+        assert "platform_machine" not in s, (
+            f"不得按架构分叉版本（会与 x86_64 产生行为差异）：{s}")
+
+    # Python < 3.11 那一档同时覆盖 aarch64（CI 容器是 3.9），必须存在
+    older = [s for s in active if "python_version < '3.11'" in s]
+    assert len(older) >= 2, (
+        "缺少 python_version < '3.11' 档（CI 容器 Python 3.9 与 aarch64 走这一档）")
+
+
+def test_inference_stack_checker_exists_and_asserts():
+    """必须有可复用的推理栈自检脚本，且默认是**失败即非零退出**。
+
+    这是"麒麟 ARM64 也要完整实现全部功能"的守护点：把"装没装上"从人肉观察
+    变成 CI 断言。若哪天有人把它改回静默告警，这条测试会红。
+    """
+    text = _read("scripts", "check_inference_stack.py")
+    for mod in ("onnxruntime", "tokenizers", "numpy"):
+        assert mod in text, f"自检脚本未覆盖 {mod}"
+    assert "return 1" in text, "缺失时未返回非零退出码（等于静默放行）"
+    assert "--optional" in text, "缺少显式降级开关（降级必须是主动选择）"
+    assert "def main" in text
+
+
+def test_ci_asserts_optional_stack_on_both_platforms():
+    """CI 两个平台都必须**断言**推理栈装成，不能静默降级。
+
+    另需保证 Windows job 也安装了可选栈 —— 曾经只有 Linux job 装，
+    于是 Windows 安装包同样"代码在、依赖不在"，两边功能面不一致。
+    """
+    text = _read(".github", "workflows", "build.yml")
+    assert text.count("check_inference_stack.py") >= 2, (
+        "Windows 与 ARM64 两个 job 都应调用推理栈自检脚本")
+    assert "requirements-optional.txt" in text, "CI 未安装可选推理栈"
+    # 旧的静默降级写法不得复活
+    assert "|| echo \"::warning::requirements-optional.txt" not in text, (
+        "静默降级写法已复活：装不上也不报错，功能面会被悄悄削弱")
+
+
+def test_smoke_dist_checks_runtime_capabilities():
+    """打包冒烟必须让**产物自己**报告能力面（而非在构建机上 import）。"""
+    text = _read("scripts", "smoke_dist.py")
+    assert "--runtime-report" in text, "冒烟脚本未调用产物的能力报告"
+    assert "BUILTIN_STACK" in text, "冒烟脚本未核对推理栈模块"
+
+
+def test_runtime_report_flag_wired_in_entrypoint():
+    """main.py 必须支持 --runtime-report 并走"不启动 GUI"的早退路径。"""
+    text = _read("main.py")
+    assert "--runtime-report" in text, "入口未支持能力报告参数"
+    assert "_runtime_report()" in text, "入口未调用能力报告实现"
+    # 必须早于 GUI 启动：在 `from gwtool.app import run` 之前 sys.exit
+    assert text.index("_runtime_report()") < text.index("from gwtool.app import run"), (
+        "能力报告晚于 GUI 导入，CI 上会因无显示环境卡住")
+
+
+def test_shell_scripts_keep_aarch64_paths():
+    """麒麟离线 wheel 与构建脚本必须包含可选推理栈，否则离线机永远无法启用 L4/L5。"""
+    wheels = _read("scripts", "kylin_offline_wheels.sh")
+    assert "requirements-optional.txt" in wheels, (
+        "离线 wheel 未含可选推理栈：离线麒麟机上 L4/L5 永久不可达")
+    build = _read("scripts", "build_kylin_arm64.sh")
+    assert "requirements-optional.txt" in build, (
+        "麒麟构建脚本未安装可选推理栈")
+
+
+def test_launcher_does_not_rely_on_echo_interpreting_newlines():
+    """启动器提示里的多行文本不得写成字面量 \\n 交给 echo。
+
+    bash 内置 echo 默认**不解释** \\n（那是 `echo -e` 的行为），会把 "\\n"
+    原样打成反斜杠+n。而这些提示恰好都在"启动失败"路径上（架构不匹配、缺库），
+    用户看到的将是一行乱码般的单行文本 —— 最需要可读性的时刻反而最不可读。
+    实测确认过该行为（od -c 显示输出里是反斜杠 + n 两个字符）。
+
+    正确做法：多行消息写真实换行；需要转义时用 printf。
+    """
+    text = _read("scripts", "gwtool.sh")
+
+    # say/popup 的消息构造里不应出现字面量 \n
+    offenders = []
+    for n, line in enumerate(text.splitlines(), 1):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        # echo 后跟含 \n 的字符串，或 MSG= / popup 参数里含 \n
+        if r"\n" in line and ("echo" in line or "MSG=" in line
+                              or "popup" in line):
+            offenders.append(f"{n}: {line.strip()[:80]}")
+    assert not offenders, (
+        "启动器里有把字面量 \\n 交给 echo/popup 的写法（bash 的 echo 不解释 \\n，"
+        "失败提示会显示成一行乱码文本）：\n" + "\n".join(offenders))
+
+    # say 必须用 printf（能正确输出多行与格式），而不是 echo
+    say_line = next((ln for ln in text.splitlines()
+                     if ln.strip().startswith("say()")), "")
+    assert "printf" in say_line, (
+        f"say() 未使用 printf，带 \\n 的提示会原样打出反斜杠+n：{say_line.strip()}")

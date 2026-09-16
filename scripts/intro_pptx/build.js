@@ -80,10 +80,10 @@ const BGWHITE = "FFFFFF";
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("GWTOOL · 单机离线版 v1.5.2", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
+  s.addText("GWTOOL · 单机离线版 v1.6.0", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
   s.addText("公文汇编助手", { x: M, y: 2.15, w: 9.2, h: 1.25, fontSize: 60, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("面向党政机关、企事业单位的单机智能公文汇编与写作辅助工具", { x: 0.53, y: 3.5, w: 8.6, h: 0.5, fontSize: 17, color: DMUTED, fontFace: FONT, margin: 0 });
-  const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GB/T 9704 公文格式", "465 项自动化测试"];
+  const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GB/T 9704 公文格式", "1118 项自动化测试"];
   chips.forEach((t, i) => {
     const cx = M + (i % 2) * 4.55, cy = 4.35 + Math.floor(i / 2) * 0.68;
     s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: cx, y: cy, w: 4.3, h: 0.52, rectRadius: 0.08, fill: { color: DCARD }, line: { color: DLINE, width: 1 } });
@@ -110,7 +110,7 @@ const BGWHITE = "FFFFFF";
     ["04", "智能写作辅助", "15 种文种骨架 · 文秘工具箱 · 写作参考 · 三级纠错"],
     ["05", "一键汇编与成品输出", "三步向导 · 国标模板 · Word 引擎 · 两遍渲染 · A3 小册子"],
     ["06", "质检、对比与安全", "格式体检 · 文档对比查重 · 历史快照 · 加密备份"],
-    ["07", "交付、质量与生态", "双平台 · 打包矩阵 · CI/CD · 465 项测试与性能验收"],
+    ["07", "交付、质量与生态", "双平台 · 打包矩阵 · CI/CD · 1118 项测试与性能验收"],
   ];
   let y = 1.78;
   items.forEach(([n, t, d]) => {
@@ -175,7 +175,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
     ["123393", "词典词条（条）", "开源 CC-CEDICT，随包分发"],
     ["15", "法定文种骨架", "对应《公文处理工作条例》"],
     ["8+4", "可导入格式", "文档 8 种 + 图片 4 类（内置 OCR）"],
-    ["87", "自动化测试用例", "pytest 全量回归 + 性能验收"],
+    ["1118", "自动化测试用例", "pytest 全量回归 + 性能验收"],
     ["<10s", "50 个文件导入", "后台线程批量解析入库"],
     ["<1s", "全文检索响应", "FTS5 + jieba，20 万字语料"],
     ["0", "网络请求", "全离线设计，打包排除网络组件"],
@@ -197,14 +197,14 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
 /* ================= S6 功能全景 ================= */
 {
   const s = p.addSlide();
-  header(s, "01 认识公文汇编助手", "功能全景：六大能力域，24 个功能模块", 6);
+  header(s, "01 认识公文汇编助手", "功能全景：六大能力域，32 个功能模块", 6);
   const groups = [
     ["材料导入", "批量导入去重 · OCR 识别\n剪贴板入库 · 右键菜单"],
     ["写作辅助", "15 文种骨架 · 文秘工具箱\n写作参考 · 朗读校对"],
-    ["质量纠错", "三级纠错流水线 · GB/T 9704 体检\n文档对比 · 相似查重"],
-    ["汇编输出", "三步汇编向导 · 批量模式\nA4 PDF · A3 骑马订小册子"],
-    ["资料管理", "分类树 + 标签 · FTS 全文检索\n历史快照 30 版 · 排版微调"],
-    ["安全保障", "口令锁 · AES 加密备份\n退出/定时自动备份 · 便携模式"],
+    ["质量纠错", "三级纠错流水线 · GB/T 9704 体检\n引文/数字/一致性/文风 · 对比 · 查重"],
+    ["汇编输出", "三步汇编向导 · 批量模式\nA4 PDF · A3 骑马订 · 材料来源清单"],
+    ["资料与台账", "分类树 + FTS 检索 · 历史快照\n发文登记 · 收文全流程 · 时限督办 · 归档"],
+    ["安全与运维", "口令锁 · AES 加密备份 · 便携模式\n诊断日志 · 数据库维护 · 一键诊断包"],
   ];
   const gx = [0.75, 9.15], gw = 3.45, gy = [1.9, 3.55, 5.2], gh = 1.42;
   groups.forEach(([t, d], i) => {
@@ -225,7 +225,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: cx, y: cy, w: cw, h: ch, rectRadius: 0.1, fill: { color: PRIMARY }, line: { type: "none" }, shadow: shadow() });
   s.addText([
     { text: "公文汇编助手", options: { bold: true, fontSize: 17, color: "FFFFFF", breakLine: true } },
-    { text: "24 个功能模块", options: { fontSize: 12, color: "F2D8D0" } },
+    { text: "32 个功能模块", options: { fontSize: 12, color: "F2D8D0" } },
   ], { x: cx, y: cy + 0.12, w: cw, h: ch - 0.2, align: "center", fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
   s.addText("全部功能共享同一本地数据库与模板体系，任何一个模块的产出都可直接被其他模块使用", { x: 4.45, y: 5.55, w: 4.55, h: 1.2, align: "center", valign: "middle", fontSize: 12, color: MUTED, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
 }
@@ -264,7 +264,7 @@ divider(7, "02", "系统架构", "三层解耦的可测试架构：界面、逻�
 /* ================= S9 三层架构图 ================= */
 {
   const s = p.addSlide();
-  header(s, "02 系统架构", "三层架构：约 8900 行 Python，依赖方向清晰", 9);
+  header(s, "02 系统架构", "三层架构：约 20600 行 Python，依赖方向清晰", 9);
   // 入口链
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: 5.02, y: 1.8, w: 3.3, h: 0.56, rectRadius: 0.07, fill: { color: DARK }, line: { type: "none" } });
   s.addText("main.py（--portable / --import）", { x: 5.02, y: 1.8, w: 3.3, h: 0.56, align: "center", valign: "middle", fontSize: 12, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
@@ -277,7 +277,7 @@ divider(7, "02", "系统架构", "三层解耦的可测试架构：界面、逻�
   const layers = [
     ["ui / 界面层", "main_window 三栏主窗口", "编辑 · 资料库 · 参考三面板", "12 个功能对话框", "workers 后台线程机制"],
     ["core / 纯逻辑层", "parsers 多格式解析", "corrector 纠错 · inspector 体检", "docxgen · pdfrender · booklet", "reference · differ · simhash"],
-    ["db / 数据层", "dao.py 唯一数据入口", "9 张业务表 + 3 个 FTS5 虚表", "WAL + 线程本地连接", "schema v2 自动迁移"],
+    ["db / 数据层", "dao.py 唯一数据入口", "12 张业务表 + 3 个 FTS5 虚表", "WAL + 线程本地连接", "schema v4 自动迁移"],
   ];
   layers.forEach(([t, ...its], i) => {
     const x = 0.85 + i * 4.0;
@@ -295,20 +295,21 @@ divider(7, "02", "系统架构", "三层解耦的可测试架构：界面、逻�
 /* ================= S10 数据层设计 ================= */
 {
   const s = p.addSlide();
-  header(s, "02 系统架构", "数据层：9 张业务表，一“室”管全部档案", 10);
-  s.addText("业务表（schema.py · 版本 v2）", { x: M, y: 1.85, w: 5, h: 0.4, fontSize: 14, bold: true, color: INK, fontFace: FONT, margin: 0 });
+  header(s, "02 系统架构", "数据层：12 张业务表，一“室”管全部档案", 10);
+  s.addText("业务表（schema.py · 版本 v4）", { x: M, y: 1.85, w: 5, h: 0.4, fontSize: 14, bold: true, color: INK, fontFace: FONT, margin: 0 });
   const tables = [
     ["documents", "文档"], ["categories", "分类树"], ["dictionary", "词典"],
     ["error_pairs", "纠错对"], ["user_phrases", "常用句式"], ["templates", "排版模板"],
     ["settings", "键值设置"], ["snapshots", "历史快照"], ["ignore_words", "忽略名单"],
+    ["attachments", "附件"], ["dispatch_register", "发文登记"], ["receive_register", "收文登记"],
   ];
   tables.forEach(([en, cn], i) => {
-    const x = M + (i % 3) * 1.98, y = 2.38 + Math.floor(i / 3) * 0.72;
-    chip(s, x, y, 1.84, 0.58, "", {});
+    const x = M + (i % 3) * 1.98, y = 2.30 + Math.floor(i / 3) * 0.58;
+    chip(s, x, y, 1.84, 0.50, "", {});
     s.addText([
-      { text: en, options: { bold: true, fontSize: 11.5, color: PRIMARY, breakLine: true } },
-      { text: cn, options: { fontSize: 10.5, color: MUTED } },
-    ], { x: x + 0.1, y: y + 0.045, w: 1.66, h: 0.5, fontFace: FONT, margin: 0, align: "center", lineSpacingMultiple: 1.0 });
+      { text: en, options: { bold: true, fontSize: 10.5, color: PRIMARY, breakLine: true } },
+      { text: cn, options: { fontSize: 10, color: MUTED } },
+    ], { x: x + 0.1, y: y + 0.035, w: 1.66, h: 0.44, fontFace: FONT, margin: 0, align: "center", lineSpacingMultiple: 1.0 });
   });
   s.addText([
     { text: "全文检索虚表：", options: { bold: true, fontSize: 12.5, color: INK } },
@@ -961,7 +962,7 @@ divider(30, "06", "质检、对比与安全", "交出去之前，再把它从头
 divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全、发得出", [
   "Windows x64 + 麒麟 V10 ARM64 双平台交付",
   "2 个离线安装包自动构建，GitHub Actions 全自动发布",
-  "465 项测试 + 18 步端到端自检",
+  "1118 项测试 + 20 步端到端自检",
 ]);
 
 /* ================= S36 双平台 ================= */
@@ -1035,7 +1036,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     { text: "push v* 标签\n或手动触发\n\nbuild.yml\nGitHub Actions", options: { fontSize: 12.5, color: DTEXT } },
   ], { x: 0.72, y: 2.15, w: 2.1, h: 3.5, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
   const jobs = [
-    ["Job 1 · windows-latest", ["ruff 静态检查（gwtool/scripts/tests）", "pytest 全量 465 用例 + 18 步端到端自检", "PyInstaller 按 spec 打包 + Tesseract/中文包内置", "smoke_dist 冒烟校验 → ISCC 安装包（版本号取自代码）"]],
+    ["Job 1 · windows-latest", ["ruff 静态检查（gwtool/scripts/tests）", "pytest 全量 1118 用例 + 20 步端到端自检", "PyInstaller 按 spec 打包 + Tesseract/中文包内置", "smoke_dist 冒烟校验 → ISCC 安装包（版本号取自代码）"]],
     ["Job 2 · ubuntu-24.04-arm", ["原生 ARM64 runner（非交叉编译）", "Debian 11 容器（glibc 2.31 对齐麒麟 V10）", "同一 spec 打包 + OCR 集成 + 运行库自检", "smoke_dist 冒烟校验 → dpkg-deb 组装 .deb"]],
     ["Job 3 · release", ["依赖前两个 Job 全绿（含打包与冒烟）", "推 v* 标签触发 / 手动 workflow_dispatch", "gh release create 自动建发布", "附 2 个安装包 + 自动 Release Notes"]],
   ];
@@ -1052,7 +1053,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
 /* ================= S39 质量保障 ================= */
 {
   const s = p.addSlide();
-  header(s, "07 交付、质量与生态", "质量保障：465 项测试，性能指标写进断言", 39);
+  header(s, "07 交付、质量与生态", "质量保障：1118 项测试，性能指标写进断言", 39);
   // 手绘条形图
   s.addText("测试分布（pytest，按文件 · 前 9）", { x: M, y: 1.9, w: 5, h: 0.38, fontSize: 13.5, bold: true, color: INK, fontFace: FONT, margin: 0 });
   const bars = [
@@ -1068,7 +1069,7 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     s.addText(String(v), { x: bx0 + bw2 * v / maxV + 0.08, y: by, w: 0.6, h: 0.34, valign: "middle", fontSize: 11.5, bold: true, color: PRIMARY, fontFace: FONT, margin: 0 });
     by += 0.44;
   });
-  s.addText("合计 465 用例 · 32 个测试文件 · 每次提交 ruff E9+F821 静态门槛（拦截“忘导入即崩溃”）", { x: M, y: 6.5, w: 7, h: 0.4, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
+  s.addText("合计 1118 用例 · 61 个测试文件 · 每次提交 ruff E9+F821 静态门槛（拦截“忘导入即崩溃”）", { x: M, y: 6.5, w: 7, h: 0.4, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
   // 右侧性能验收
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: 7.6, y: 1.9, w: 5.23, h: 4.95, rectRadius: 0.08, fill: { color: DARK }, line: { type: "none" } });
   s.addText("性能验收（写进测试的硬指标）", { x: 7.88, y: 2.08, w: 4.7, h: 0.4, fontSize: 13.5, bold: true, color: "F2D8A0", fontFace: FONT, margin: 0 });
@@ -1087,7 +1088,31 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
     if (i < 5) s.addShape(p.shapes.LINE, { x: 7.88, y: py + 0.5, w: 4.65, h: 0, line: { color: DLINE, width: 1 } });
     py += 0.62;
   });
-  s.addText("另有 e2e_check.py：模拟真实数据目录走通 18 大流程，逐项 PASS/FAIL", { x: 7.88, y: 6.35, w: 4.7, h: 0.45, fontSize: 11, color: DMUTED, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.2 });
+  s.addText("另有 e2e_check.py：模拟真实数据目录走通 20 大流程，逐项 PASS/FAIL", { x: 7.88, y: 6.35, w: 4.7, h: 0.45, fontSize: 11, color: DMUTED, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.2 });
+}
+
+/* ================= S39b v1.6.0 新增能力 ================= */
+{
+  const s = p.addSlide();
+  header(s, "07 交付、质量与生态", "v1.6.0 新增：把公文管理的另一半补齐", 40);
+  const rows = [
+    ["收文登记台账", "签收 → 拟办 → 批办 → 承办 → 办结 → 归档 全流程登记：来文机关、来文字号、拟办意见、领导批示、承办部门与办理时限全要素；可按机关/文种/状态/年度组合筛选并统计"],
+    ["办理时限督办", "填了“应办结日期”的件自动纳入督办：启动时扫描已逾期与 2 日内到期的，状态栏常显角标、点开即见清单。刻意不做后台常驻轮询 —— 那会伤续航，而公文以“天”为粒度"],
+    ["归档与移交清单", "已办结收文批量编档号、标注保管期限（永久/30年/10年），并生成可签字盖章随卷的《归档移交清单》。在办件不允许归档 —— 那会造成“卷内缺件”，比不归档更难收拾"],
+    ["Excel 导出（零新依赖）", "台账、统计报表、体检整改清单均可导出 xlsx。xlsx 本质是 ZIP + XML，用标准库手写即可完成，不为此引入任何第三方依赖，安装包体积零增长"],
+    ["运维可诊断", "运行期诊断日志（有界轮转、队列异步、不记正文）+ 启动库完整性自检（正常时完全静默）+ 一键碎片整理 + 诊断包（只含版本与计数，绝不含公文正文）"],
+    ["体检与移交增强", "格式体检新增引文规范、数字用法、文内一致性、公文文风四类；汇编可附材料来源清单；资料可按分类/时段导出为移交包（含每份文档的 sha256 校验清单）"],
+  ];
+  const cols = [0.5, 6.92], cw2 = 5.9, rowsy = [1.85, 3.58, 5.31], chh = 1.58;
+  rows.forEach(([t, d], i) => {
+    const x = cols[i % 2], y = rowsy[Math.floor(i / 2)];
+    s.addShape(p.shapes.ROUNDED_RECTANGLE, { x, y, w: cw2, h: chh, rectRadius: 0.08, fill: { color: PAPER }, line: { color: LINE, width: 1 } });
+    s.addShape(p.shapes.RECTANGLE, { x, y, w: 0.09, h: chh, fill: { color: PRIMARY }, line: { type: "none" } });
+    s.addText([
+      { text: t, options: { bold: true, fontSize: 14.5, color: PRIMARY, breakLine: true } },
+      { text: d, options: { fontSize: 11.5, color: INK } },
+    ], { x: x + 0.28, y: y + 0.14, w: cw2 - 0.52, h: chh - 0.28, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.2 });
+  });
 }
 
 /* ================= S40 结束页 ================= */
@@ -1095,13 +1120,13 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("公文汇编助手 · 单机离线版 v1.5.2", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
+  s.addText("公文汇编助手 · 单机离线版 v1.6.0", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
   s.addText("完全离线 · 数据自主 · 开箱即用", { x: M, y: 2.3, w: 11.5, h: 1.0, fontSize: 42, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("不联网、不上传、不留痕 —— 一台电脑，就是一座公文资料馆。", { x: 0.53, y: 3.45, w: 10, h: 0.5, fontSize: 16, color: DMUTED, fontFace: FONT, margin: 0 });
   const docs = [
     ["README.md", "功能总览 · 快速开始 · 打包发布 · 验收对照"],
     ["项目文件结构说明.md", "写给新手的逐文件导读与“改 X 去哪”速查表"],
-    ["scripts/e2e_check.py", "18 步端到端自检，部署后一键验货"],
+    ["scripts/e2e_check.py", "20 步端到端自检，部署后一键验货"],
   ];
   docs.forEach(([t, d], i) => {
     const x = M + i * 4.2;
@@ -1115,4 +1140,4 @@ divider(35, "07", "交付、质量与生态", "装得上、跑得动、测得全
   seal(s, 11.2, 5.55, 1.15, "文");
 }
 
-p.writeFile({ fileName: "C:/gwtool/公文汇编助手-系统介绍.pptx" }).then(() => console.log("DONE 40 slides"));
+p.writeFile({ fileName: "C:/gwtool/公文汇编助手-系统介绍.pptx" }).then(() => console.log("DONE 41 slides"));

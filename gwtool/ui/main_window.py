@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, QThread, QTimer, Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
-                               QMainWindow, QSplitter, QStatusBar)
+                               QMainWindow, QPushButton, QSplitter, QStatusBar)
 
 from .. import APP_NAME, __version__
 from ..core.backup import (MODE_AUTO, MODE_MANUAL, create_backup_detailed,
@@ -23,6 +23,7 @@ from .import_dialog import ImportDialog
 from .library_panel import LibraryPanel
 from .material_dialogs import RecycleBinDialog
 from .reference_panel import ReferencePanel
+from .receive_dialog import ReceiveDialog
 from .registry_dialog import RegistryDialog
 from .template_editor import TemplateEditor
 from .widgets import (ask, info, missing_official_fonts, wait_for_threads, warn)
@@ -77,6 +78,8 @@ class MainWindow(QMainWindow):
         self._first_run_checks()
         self._setup_backup_timer()
         self._update_status()
+        self.refresh_reminders()
+        self._maybe_db_health_check()
 
     def _setup_backup_timer(self):
         """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。
@@ -165,6 +168,10 @@ class MainWindow(QMainWindow):
         act_registry.setShortcut("Ctrl+R")
         act_registry.setToolTip("发文登记台账：登记、查询、统计、导出")
         act_registry.triggered.connect(self.open_registry)
+        act_receive = QAction("收文登记", self)
+        act_receive.setShortcut("Ctrl+Shift+R")
+        act_receive.setToolTip("收文登记台账：来文签收、拟办、批示、承办、办结与归档")
+        act_receive.triggered.connect(self.open_receive)
         act_anydoc = QAction("任意文档纠错", self)
         act_anydoc.setShortcut("Ctrl+Shift+F7")
         act_anydoc.setToolTip("任意文档纠错：任意格式文档或粘贴文本，标记视图逐处修正，保结构导出")
@@ -176,7 +183,8 @@ class MainWindow(QMainWindow):
                       (act_tts, "tts"), (act_clip, "clipboard"),
                       (act_fmt, "cleanup"), ("SEP", ""),
                       (act_compare, "compare"), (act_dict, "book"),
-                      (act_registry, "registry"), ("SEP", ""),
+                      (act_registry, "registry"), (act_receive, "registry"),
+                      ("SEP", ""),
                       (act_backup, "backup")):
             if a == "SEP":
                 tb.addSeparator()
@@ -192,6 +200,15 @@ class MainWindow(QMainWindow):
         # 常驻信息（不会被瞬态 showMessage 覆盖）
         self._perm_label = QLabel()
         self.status.addPermanentWidget(self._perm_label)
+        # 督办角标：启动时算一次、点开才拉清单，不做后台轮询
+        # （理由见 core/reminder 模块说明：常驻定时器伤续航且对"天"级业务无意义）
+        self._reminder_btn = QPushButton()
+        self._reminder_btn.setFlat(True)
+        self._reminder_btn.setCursor(Qt.PointingHandCursor)
+        self._reminder_btn.setToolTip("点击查看待办收文清单")
+        self._reminder_btn.clicked.connect(self.open_reminders)
+        self._reminder_btn.hide()
+        self.status.addPermanentWidget(self._reminder_btn)
 
     def _build_menu(self):
         m_file = self.menuBar().addMenu("文件(&F)")
@@ -201,6 +218,7 @@ class MainWindow(QMainWindow):
         m_file.addAction("一键汇编…", self.open_compile_wizard, "Ctrl+N")
         m_file.addAction("保存到资料库", lambda: self.editor.save_to_db(), "Ctrl+S")
         m_file.addAction("发文登记台账…", self.open_registry, "Ctrl+R")
+        m_file.addAction("收文登记台账…", self.open_receive, "Ctrl+Shift+R")
         m_file.addSeparator()
         m_file.addAction("退出", self.close, "Ctrl+Q")
 
@@ -220,6 +238,7 @@ class MainWindow(QMainWindow):
         m_tool.addAction("词典与词库管理…", self.open_dict_manager)
         m_tool.addAction("备份…", self._do_backup)
         m_tool.addAction("恢复…", self._do_restore)
+        m_tool.addAction("批量导出与移交包…", self.export_handover)
         m_tool.addSeparator()
         m_tool.addAction("回收站…", self.open_recycle_bin)
 
@@ -229,8 +248,11 @@ class MainWindow(QMainWindow):
 
         m_set = self.menuBar().addMenu("设置(&S)")
         m_set.addAction("系统与安全…", self.open_security)
+        m_set.addAction("数据库维护…", self.open_db_maintenance)
 
         m_help = self.menuBar().addMenu("帮助(&H)")
+        m_help.addAction("生成诊断包…", self.export_diagpack)
+        m_help.addSeparator()
         m_help.addAction("关于", lambda: info(
             self, f"{APP_NAME} v{__version__}\n\n单机离线版智能公文汇编与写作辅助工具\n"
                   f"数据目录：{db_path().parent}\n全程无网络请求。"))
@@ -269,6 +291,180 @@ class MainWindow(QMainWindow):
         """发文登记台账：登记、查询、统计、导出。"""
         dlg = RegistryDialog(self)
         dlg.exec()
+
+    def open_receive(self):
+        """收文登记台账：来文签收、拟办、批示、承办、办结与归档。"""
+        dlg = ReceiveDialog(self)
+        dlg.exec()
+        self.refresh_reminders()      # 从台账回来可能已办结若干件
+
+    def refresh_reminders(self):
+        """刷新状态栏督办角标。无需关注时整个按钮隐藏，不占地方。"""
+        from ..core import reminder
+        try:
+            items = reminder.pending()
+            text = reminder.status_text(items)
+        except Exception:
+            # 提醒坏掉绝不能影响主流程
+            self._reminder_btn.hide()
+            return
+        if not text:
+            self._reminder_btn.hide()
+            return
+        self._reminder_btn.setText(f"督办：{text}")
+        self._reminder_btn.show()
+
+    def open_reminders(self):
+        """点开督办角标：列出待办收文，可一键跳到收文台账。"""
+        from ..core import reminder
+        items = reminder.pending()
+        if not items:
+            info(self, "当前没有需要督办的收文。")
+            self.refresh_reminders()
+            return
+        body = "\n".join(reminder.detail_lines(items))
+        if ask(self, f"以下收文需要办理：\n\n{body}\n\n是否打开收文台账处理？"):
+            self.open_receive()
+
+    # ------------------------------------------------ 数据库健康
+    def _maybe_db_health_check(self):
+        """低频数据库自检（正常时**完全静默**）。
+
+        放后台线程：quick_check 要扫全部页，大库上会明显拖慢启动。
+        仅当距上次自检超过阈值才跑（见 core/dbhealth.CHECK_INTERVAL_DAYS）。
+        """
+        from ..core import dbhealth
+        try:
+            if not dbhealth.should_check():
+                return
+        except Exception:
+            return
+        from .workers import FnWorker
+        worker = FnWorker(dbhealth.run_scheduled_check, parent=self)
+        worker.ok.connect(self._on_db_check_done)
+        self._db_check_worker = worker
+        worker.start()
+
+    def export_handover(self):
+        """批量导出与移交包：按范围导出资料与清单，用于交接、专题归档。
+
+        与「备份」的区别：备份是整库全量（灾难恢复用），本功能按范围导出，
+        适合把某个分类的资料交给同事——整库交出去既过度又容易带出无关内容。
+        """
+        from ..core import exporter
+        from PySide6.QtWidgets import QInputDialog
+
+        cats = list(dao.list_categories())
+        options = ["全部资料"] + [c.name for c in cats]
+        choice, ok = QInputDialog.getItem(
+            self, "批量导出与移交包", "导出范围（按分类）：", options, 0, False)
+        if not ok:
+            return
+        category_id = None
+        if choice != "全部资料":
+            for c in cats:
+                if c.name == choice:
+                    category_id = c.id
+                    break
+        include_att = ask(
+            self, "是否一并打包附件？\n\n"
+                  "附件按体积上限纳入；超出的会写进包内清单并注明原因，"
+                  "不会静默丢弃。")
+        from PySide6.QtWidgets import QFileDialog
+        default = str(export_dir() / exporter.default_filename())
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "保存移交包", default, "ZIP 压缩包 (*.zip)")
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rep = exporter.build(exporter.ExportRequest(
+                out_path=path, category_id=category_id,
+                include_attachments=include_att,
+                note=f"由 {choice} 导出"))
+        except ValueError as exc:
+            warn(self, str(exc))
+            return
+        except OSError as exc:
+            warn(self, f"导出失败：{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        tail = (f"，其中 {rep['excluded']} 个附件因超限未纳入（清单已注明原因）"
+                if rep["excluded"] else "")
+        info(self, f"移交包已生成：\n{path}\n\n"
+                   f"文档 {rep['documents']} 篇、附件 {rep['attachments']} 个"
+                   f"{tail}。\n"
+                   f"包内 manifest.json 含每份文档的原文件名与 sha256 校验值。")
+
+    def _on_db_check_done(self, problem):
+        """自检回调：只有发现问题才提示。"""
+        if problem:
+            warn(self, str(problem))
+
+    def export_diagpack(self):
+        """生成诊断包：环境信息 + 能力探测 + 表计数 + 运行日志。
+
+        **绝不含公文正文**。生成前把内容清单（含"不包含什么"）逐项摆给用户，
+        让隐私承诺变成用户可核查的事实，而不是一句口头保证。
+        """
+        from ..core import diagpack
+
+        body = "\n".join(f"· {ln}" if ln else "" for ln in diagpack.preview_lines())
+        if not ask(self, f"将生成诊断包，包含以下内容：\n\n{body}\n\n是否继续？"):
+            return
+        from PySide6.QtWidgets import QFileDialog
+        default = str(export_dir() / diagpack.default_filename())
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "保存诊断包", default, "ZIP 压缩包 (*.zip)")
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        try:
+            diagpack.build(path)
+        except OSError as exc:
+            warn(self, f"生成失败：{exc}")
+            return
+        info(self, f"诊断包已生成：\n{path}\n\n"
+                   f"可直接发给技术支持。内含环境信息与运行日志，"
+                   f"不含任何公文正文。")
+
+    def open_db_maintenance(self):
+        """数据库维护：自检 + 碎片整理 + 重建检索索引。"""
+        from ..core import dbhealth
+
+        ok, detail = dbhealth.quick_check()
+        status = "正常" if ok else f"发现问题 —— {detail}"
+        size = dbhealth.human_size(dbhealth.db_file_size())
+        if not ask(self, f"数据库自检：{status}\n当前占用：{size}\n\n"
+                         f"维护将执行：碎片整理（VACUUM）、索引重建（REINDEX）"
+                         f"与全文检索索引重建。\n"
+                         f"过程中需要约 2 倍库体积的临时磁盘空间，"
+                         f"请勿中途关闭程序。\n\n是否开始？"):
+            return
+        # VACUUM 是同步且不可中断的：给等待光标，并保证异常路径也复位
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rep = dbhealth.maintenance()
+        except Exception as exc:
+            warn(self, f"维护失败：{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not rep.get("ok"):
+            warn(self, rep.get("reason", "维护失败"))
+            return
+        fts = rep.get("fts_rows", -1)
+        info(self, f"维护完成。\n\n"
+                   f"占用：{dbhealth.human_size(rep['before'])} → "
+                   f"{dbhealth.human_size(rep['after'])}\n"
+                   f"回收：{dbhealth.human_size(rep['saved'])}\n"
+                   f"检索索引：{'未重建' if fts < 0 else f'{fts} 条'}")
 
     def new_skeleton_doc(self):
         dlg = SkeletonDialog(self)

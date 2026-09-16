@@ -674,7 +674,8 @@ def _validate_restored_db(tmp: Path) -> None:
 
     import sqlite3
 
-    from ..db.schema import required_table_names
+    from .. import logs
+    from ..db.schema import core_table_names, required_table_names
 
     conn = sqlite3.connect(str(tmp))
     try:
@@ -691,14 +692,24 @@ def _validate_restored_db(tmp: Path) -> None:
         conn.close()
 
     required = required_table_names()
-    missing = sorted(required - present)
-    if len(missing) == len(required):
-        raise ValueError("备份包内的数据库没有任何业务表（疑似空库或非本程序的库），"
-                         "已中止恢复，当前数据未被改动")
-    if missing:
-        raise ValueError("备份包内的数据库缺少必需的表 " + "、".join(missing[:5])
-                         + ("…" if len(missing) > 5 else "")
-                         + "（备份包与本程序版本不匹配），已中止恢复")
+    core = set(core_table_names())
+    # 只拦"这不是本程序创建的库"：核心表缺任意一张即拒绝。
+    #
+    # 其余业务表是后续版本陆续新增的，**老备份缺它们属正常版本差异**。
+    # 若一并拒绝，用户只要升级过版本，自己的旧备份就全部打不开了 ——
+    # 这是"给数据库加一张新表"最容易踩到的向后兼容陷阱，且症状极隐蔽：
+    # 只有拿旧备份去恢复时才会暴露。缺的表会在恢复后的首次启动由
+    # init_schema 建出来（空表），完全不影响已有数据。
+    missing_core = sorted(core - present)
+    if missing_core:
+        raise ValueError(
+            "备份包内的数据库缺少核心业务表 " + "、".join(missing_core)
+            + "（疑似空库或非本程序创建的库），已中止恢复，当前数据未被改动")
+    missing_new = sorted(required - core - present)
+    if missing_new:
+        logs.get_logger("backup").info(
+            "备份包缺少后续版本新增的表（恢复后将为空表，不影响已有数据）：%s",
+            "、".join(missing_new[:8]))
 
 
 def _missing_attachments(recorded: list[dict]) -> list[dict]:

@@ -65,6 +65,11 @@ def no_tess_env(clean_settings, monkeypatch):
     本机 .venv/Scripts 旁无捆绑目录、无 /opt/gwtool —— 三种来源全空，
     tesseract_path()/ocr_image()/ocr_pdf() 必须走"未找到"分支。
     """
+    # 先自愈清理解释器旁的捆绑树：bundled_tree fixture 的清理在 Windows 文件
+    # 锁下最多重试 5×0.5s，若仍未删净，残留的 tesseract/ 会让本用例拿到非空
+    # 路径而**偶发失败**（全量运行时踩到，单跑该文件必过）。
+    # 这里不假设"上一个用例清理干净了"，而是自己保证前置状态。
+    _wipe_bundled_tree()
     monkeypatch.setenv("PATH", r"C:\Windows\System32")
     monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
     yield
@@ -208,6 +213,34 @@ def test_tesseract_path_empty_when_no_source(no_tess_env):
     """设置空 + 无捆绑 + PATH 无 tesseract：返回空，available 为假。"""
     assert ocr.tesseract_path() == ""
     assert ocr.available() is False
+
+
+# ---------------------------------------------------------- 交付口径（是否走自带引擎）
+def test_using_bundled_true_only_when_bundled_tree_present(bundled_tree,
+                                                          clean_settings):
+    """有捆绑树且无设置项：using_bundled 为真。
+
+    这条对应一个真实误判风险：`available()` 只回答"能不能找到一个 tesseract"，
+    构建机/开发机装有系统级引擎时它同样是 True，于是**产物没带引擎也会判通过**，
+    到离线用户机上 OCR 才失效。打包冒烟必须看本函数。
+    """
+    assert ocr.using_bundled() is True
+
+
+def test_using_bundled_false_without_bundled_tree(no_tess_env):
+    """无捆绑树：即便系统 PATH 上有 tesseract，也不得算作"走自带引擎"。"""
+    assert ocr.using_bundled() is False
+
+
+def test_using_bundled_false_when_setting_overrides(bundled_tree, clean_settings):
+    """用户显式配置了别的 tesseract：不算走自带引擎（交付口径要反映真实来源）。"""
+    other = _real_tess()
+    if not other:
+        pytest.skip("本机无独立 Tesseract 可执行文件用于覆盖")
+    if Path(other) == bundled_tree["exe"]:
+        pytest.skip("系统引擎与捆绑树同路径，无法构造覆盖场景")
+    dao.set_setting("tesseract_path", other)
+    assert ocr.using_bundled() is False
 
 
 # ---------------------------------------------------------- 语言包探测

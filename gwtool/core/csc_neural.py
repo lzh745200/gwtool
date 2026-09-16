@@ -38,7 +38,10 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import logs
 from . import enhance_pack
+
+log = logs.get_logger("csc.l4")
 
 SETTING_KEY = "corrector_neural_enabled"     # 设置表键名（值为 "1"/"0"）
 _MARK_CATEGORY = "神经纠错"
@@ -201,6 +204,7 @@ def _load_engine() -> _Engine | None:
             raise ValueError(f"词汇表过小（{len(vocab)} 行），疑似文件错误")
     except Exception as e:
         _ENGINE_ERROR = f"加载模型失败：{e}"
+        log.warning("L4 词汇表校验失败，已降级到三级流水线：%s", e)
         return None
     # ③ 真正的重依赖：只有前两级都通过才需要 numpy/onnxruntime。
     try:
@@ -208,6 +212,7 @@ def _load_engine() -> _Engine | None:
         import onnxruntime as ort
     except Exception as e:                       # 依赖缺失
         _ENGINE_ERROR = f"缺少推理依赖：{e}"
+        log.warning("L4 缺少推理依赖，已降级到三级流水线：%s", e)
         return None
     try:
         token_to_id = {t: i for i, t in enumerate(vocab)}
@@ -233,6 +238,7 @@ def _load_engine() -> _Engine | None:
         return _ENGINE
     except Exception as e:
         _ENGINE_ERROR = f"加载模型失败：{e}"
+        log.warning("L4 模型加载失败，已降级到三级流水线：%s", e)
         _ENGINE = None
         return None
 
@@ -361,6 +367,7 @@ def enhance(text: str, existing=None) -> list:
     except Exception as e:                       # 硬约束：绝不外抛
         global _ENGINE_ERROR
         _ENGINE_ERROR = f"推理异常：{e}"
+        log.warning("L4 推理异常，本层结果丢弃：%s", e)
         _ENGINE = None
         return []
 

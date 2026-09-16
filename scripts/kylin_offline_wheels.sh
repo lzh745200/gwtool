@@ -19,6 +19,8 @@
 #      bash scripts/kylin_offline_wheels.sh
 #  产物：wheels_aarch64/ —— 随源码拷到麒麟目标机，
 #        由 build_kylin_arm64.sh 自动检测并用 --no-index 离线安装。
+#        目录内含**两套**依赖：主 requirements（必需）+ requirements-optional
+#        （L4/L5 推理栈，可选）。后者一并备好，离线机才可能启用增强层。
 #
 #  注意：在 x86_64 Linux 上直接跑会下载 x86_64 轮子（同样"成功"但不可用），
 #        因此脚本会校验 uname -m，非 aarch64 直接拒绝。
@@ -59,6 +61,28 @@ mkdir -p wheels_aarch64
 "$PY" -m pip download -r requirements.txt \
   -d wheels_aarch64 \
   -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# ---- 可选推理栈（L4 神经精排 / L5 语法纠错） ----
+# 必须一起下载，否则会出现这个死角：目标机完全离线 → 装不了 onnxruntime /
+# tokenizers → **增强层永远无法启用**，"完整功能"在离线麒麟机上天然残缺。
+# 本文件与 requirements-optional.txt 是两套用途：
+#   · 主 requirements 决定"程序能不能跑"（必需）；
+#   · 本文件决定"增强层能不能开"（可选，但离线机没有它就没法补装）。
+# 放在这里下载只是**把 wheel 备好**；安装与否仍由使用者决定，不影响主包行为。
+#
+# 关键：此处必须用 `--python-version 3.9` 之外的方式保持一致——本脚本已校验
+# 当前环境就是 Python 3.9 + aarch64，因此 markers（python_version < '3.11'）
+# 会自然选中 1.17.3 / 0.15.2 这一档，与麒麟 CI 容器**同版本**。
+# 失败不阻断：上游若临时撤轮子，主包仍应产出（增强层降级为不可启用）。
+echo "[附加] 下载可选推理栈（L4/L5）..."
+if "$PY" -m pip download -r requirements-optional.txt \
+      -d wheels_aarch64 \
+      -i https://pypi.tuna.tsinghua.edu.cn/simple; then
+    echo "      可选推理栈已一并下载（onnxruntime / tokenizers / numpy）。"
+else
+    echo "警告：可选推理栈下载失败 —— 主包不受影响，但离线机上 L4/L5 将无法启用。" >&2
+    echo "      不影响本次离线 wheel 目录的可用性，可稍后在有网机器上重跑补齐。" >&2
+fi
 
 echo
 echo "完成：$(find wheels_aarch64 -maxdepth 1 -type f | wc -l) 个文件已下载到 wheels_aarch64/"

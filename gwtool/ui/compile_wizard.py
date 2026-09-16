@@ -148,6 +148,13 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         v.addWidget(self.chk_pdf)
         v.addWidget(self.chk_booklet)
         v.addWidget(self.chk_batch)
+        # 来源清单：汇编类公文需要可追溯性（"内容从哪来"要答得出来）。
+        # 默认勾选——正式对外行文可在向导里取消。
+        self.chk_sources = QCheckBox("附「汇编材料来源清单」（便于追溯与归档）")
+        self.chk_sources.setChecked(True)
+        self.chk_sources.setToolTip(
+            "在成稿末尾附一张表，列出每份材料的标题、原文件名、导入时间与分类")
+        v.addWidget(self.chk_sources)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -216,7 +223,9 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             tpl2.cover.date = self.ed_date.text().strip()
             tpl2.insert_material_titles = self.chk_titles.isChecked()
             out_docx = stem + ".docx"
-            self._worker = CompileWorker(ids, [], tpl2, out_docx, parent=self)
+            self._worker = CompileWorker(ids, [], tpl2, out_docx,
+                                         include_sources=self.chk_sources.isChecked(),
+                                         parent=self)
             self._worker.done.connect(lambda p: self._after_docx(p, tpl, ids))
             self._worker.error.connect(self._fail)
             self._worker.start()

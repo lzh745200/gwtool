@@ -192,12 +192,23 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         from datetime import datetime
 
         default = f"公文格式体检报告_{datetime.now():%Y%m%d_%H%M}.docx"
-        path, _sel = QFileDialog.getSaveFileName(self, "导出体检报告", default,
-                                                 "Word 文档 (*.docx)")
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "导出体检报告", default,
+            "Word 文档 (*.docx);;Excel 整改清单 (*.xlsx)")
         if not path:
             return
         from ..core import report
+        # 以后缀为准：DOCX 适合归档流转（有正式版式），
+        # xlsx 适合逐条整改销号（可自行加"处理意见"列筛选）
         try:
+            if path.lower().endswith(".xlsx"):
+                n = report.export_report_xlsx(self._findings, path,
+                                              source_name=self._source)
+                info(self, f"体检整改清单已导出：\n{path}\n\n"
+                           f"共 {n} 条，可直接在表中登记处理意见与备注。")
+                return
+            if not path.lower().endswith(".docx"):
+                path += ".docx"
             report.export_report(self._findings, path, source_name=self._source)
         except OSError as exc:
             warn(self, f"导出失败：{exc}")

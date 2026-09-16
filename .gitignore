@@ -13,6 +13,10 @@ dist_samples/
 .coverage
 .workbuddy/
 .zcode/
+# PPT 生成脚本的 npm 依赖（scripts/intro_pptx/）。
+# package.json / package-lock.json 要入库（记录并锁定依赖），
+# node_modules 不入库（可由 npm install 复现，且体积大）。
+node_modules/
 # 仅忽略仓库根目录的便携模式数据目录（不匹配子目录里的 data/）
 /Data/
 

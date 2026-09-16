@@ -12,7 +12,12 @@ from __future__ import annotations
 import re
 import sqlite3
 
-SCHEMA_VERSION = 3
+from .. import logs
+
+# 版本 4：新增 receive_register（收文登记台账）。
+# 该表由 TABLES 里的 CREATE TABLE IF NOT EXISTS 建立（老库同样会补上），
+# 故 MIGRATIONS[4] 无需任何语句——版本号只用于记录结构代数。
+SCHEMA_VERSION = 4
 
 # 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级。
 #
@@ -153,6 +158,43 @@ TABLES = [
         size INTEGER NOT NULL DEFAULT 0,
         added_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )""",
+    # 收文登记台账：来文的签收、拟办、批办、承办、办结与归档。
+    # 此前只有 dispatch_register（发文），公文实务的"进"这一半完全缺失。
+    #
+    # 字段一次给全（含办理时限与归档所需的列），不留给后续版本逐个 ALTER：
+    # 每次版本迁移都要走"迁移前自动备份"，对用户是可见的开销与风险，
+    # 能一次到位的就一次到位。
+    """CREATE TABLE IF NOT EXISTS receive_register(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reg_no TEXT NOT NULL DEFAULT '',
+        incoming_no TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        doc_type TEXT DEFAULT '',
+        from_org TEXT DEFAULT '',
+        main_send TEXT DEFAULT '',
+        cc TEXT DEFAULT '',
+        secret_level TEXT DEFAULT '公开',
+        urgency TEXT DEFAULT '',
+        receive_date TEXT DEFAULT '',
+        doc_date TEXT DEFAULT '',
+        pages INTEGER NOT NULL DEFAULT 0,
+        copies INTEGER NOT NULL DEFAULT 0,
+        propose TEXT DEFAULT '',
+        instruction TEXT DEFAULT '',
+        handler_dept TEXT DEFAULT '',
+        handler TEXT DEFAULT '',
+        due_date TEXT DEFAULT '',
+        done_date TEXT DEFAULT '',
+        result TEXT DEFAULT '',
+        status TEXT DEFAULT '签收',
+        archive_no TEXT DEFAULT '',
+        retention TEXT DEFAULT '',
+        archive_date TEXT DEFAULT '',
+        doc_id INTEGER NOT NULL DEFAULT 0,
+        remark TEXT DEFAULT '',
+        created_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
 ]
 
 # 二级索引：统一在"建表+迁移"之后创建。
@@ -170,7 +212,19 @@ INDEXES = [
     """CREATE INDEX IF NOT EXISTS idx_dispatch_sign_date ON dispatch_register(sign_date)""",
     """CREATE INDEX IF NOT EXISTS idx_dispatch_org ON dispatch_register(org)""",
     """CREATE INDEX IF NOT EXISTS idx_attachments_doc ON attachments(doc_id, id)""",
+    """CREATE INDEX IF NOT EXISTS idx_receive_no ON receive_register(incoming_no)""",
+    """CREATE INDEX IF NOT EXISTS idx_receive_date ON receive_register(receive_date)""",
+    """CREATE INDEX IF NOT EXISTS idx_receive_org ON receive_register(from_org)""",
+    """CREATE INDEX IF NOT EXISTS idx_receive_due ON receive_register(due_date)""",
 ]
+
+# 核心业务表：这四张缺任意一张，就判定"不是本程序创建的库"。
+#
+# 与 `required_table_names()`（由 TABLES 推导的**全部**业务表）的区别至关重要：
+# 备份恢复时，**只有核心表缺失才该拒绝**。其余表是后续版本陆续新增的，
+# 老备份缺它们属正常版本差异——若一并拒绝，用户升级后就**打不开自己的旧备份**。
+# 这正是"新增一张表"最容易踩到的向后兼容陷阱。
+CORE_TABLES = ("documents", "settings", "dictionary", "error_pairs")
 
 # FTS5 虚拟表：ref_id 指向源表 id；tokenized 为 jieba 分词后文本
 FTS_TABLES = [
@@ -199,6 +253,11 @@ def required_table_names() -> set[str]:
     return names
 
 
+def core_table_names() -> tuple[str, ...]:
+    """核心业务表名（备份恢复时判定"是不是本程序的库"就靠这几张）。"""
+    return CORE_TABLES
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """建库建表并执行版本化迁移；设置用户版本号以支持后续迁移。
 
@@ -219,8 +278,15 @@ def init_schema(conn: sqlite3.Connection) -> None:
         for stmt in MIGRATIONS.get(v, []):
             try:
                 cur.execute(stmt)
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                # "duplicate column name" 是预期分支（新库建表时已含该列）。
+                # 但**其他** OperationalError（语法错、库损坏、锁冲突）是真故障——
+                # 此前一并静默吞掉，等于把迁移失败藏了起来：老库停在半途，
+                # 程序却报告一切正常。真故障必须留痕。
+                if "duplicate column" not in str(exc).lower():
+                    logs.get_logger("db").warning(
+                        "迁移 v%d 的语句执行失败（已跳过，该库可能结构不完整）：%s",
+                        v, exc)
     for ddl in INDEXES:
         cur.execute(ddl)
     for ddl in FTS_TABLES:

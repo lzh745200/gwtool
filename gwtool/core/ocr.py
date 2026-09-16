@@ -61,6 +61,24 @@ def available() -> bool:
     return bool(tesseract_path())
 
 
+def using_bundled() -> bool:
+    """当前是否在使用**随包捆绑**的 Tesseract（而非系统 PATH 上的）。
+
+    与 `available()` 的区别很重要：`available()` 只回答"能不能找到一个
+    tesseract"，而构建机/开发机往往装有系统级引擎，于是答案为真、产物里却
+    可能**没有**自带的那一份 —— 离线用户机上就不可用了。
+    打包冒烟与"离线可部署"断言应当看本函数，而不是 available()。
+    """
+    bundled, _ = _bundled()
+    if not bundled:
+        return False
+    # 用户显式配置了路径且该路径存在时优先用配置值，此时不算"走自带引擎"。
+    configured = dao.get_setting("tesseract_path", "")
+    if configured and Path(configured).exists():
+        return Path(configured) == Path(bundled)
+    return True
+
+
 def _tess_env(tess: str) -> dict:
     """构造子进程环境：TESSDATA_PREFIX 只传给 tesseract，不改进程全局。
 

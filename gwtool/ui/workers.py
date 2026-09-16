@@ -7,10 +7,26 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from .. import logs
 from ..core import compiler, importer
 from ..core.booklet import make_booklet
 from ..db import connection as dbconn
 from ..db import dao
+
+log = logs.get_logger("workers")
+
+
+def _log_exc(where: str) -> None:
+    """记录后台任务异常：写日志 + 保留 stderr 输出。
+
+    此前这里只有 `traceback.print_exc()`，而打包版是 `--windowed`（无控制台），
+    异常信息实际**完全丢失** —— 用户报"点了一下没反应"时我们无可查证据。
+    """
+    try:
+        log.exception("%s 执行失败", where)
+    except Exception:
+        pass
+    traceback.print_exc()
 
 
 def _close_thread_conn() -> None:
@@ -44,7 +60,7 @@ class FnWorker(QThread):
         try:
             self.ok.emit(self._fn(*self._args, **self._kwargs))
         except Exception as exc:
-            traceback.print_exc()
+            _log_exc("后台任务")
             self.failed.emit(str(exc))
         finally:
             _close_thread_conn()
@@ -96,7 +112,7 @@ class ImportWorker(QThread):
                     ok += 1
             self.finished_ok.emit(ok, skip)
         except Exception as exc:
-            traceback.print_exc()
+            _log_exc("批量导入")
             self.failed.emit(str(exc))
         finally:
             _close_thread_conn()
@@ -109,12 +125,13 @@ class CompileWorker(QThread):
     error = Signal(str)
 
     def __init__(self, doc_ids, extra_paths, template, out_docx,
-                 material_titles=None, parent=None):
+                 material_titles=None, include_sources=False, parent=None):
         super().__init__(parent)
         self.req = compiler.CompileRequest(
             doc_ids=list(doc_ids), extra_paths=list(extra_paths),
             template=template, out_docx=out_docx,
-            material_titles=material_titles)
+            material_titles=material_titles,
+            include_sources=bool(include_sources))
 
     def run(self):
         try:
@@ -122,7 +139,7 @@ class CompileWorker(QThread):
             out = compiler.compile_docx(self.req)
             self.done.emit(out)
         except Exception as exc:
-            traceback.print_exc()
+            _log_exc("一键汇编")
             self.error.emit(str(exc))
         finally:
             _close_thread_conn()
@@ -153,7 +170,7 @@ class PdfRenderWorker(QThread):
             pdfrender.render_compiled_pdf(trees, self.template, self.out_pdf)
             self.done.emit(self.out_pdf)
         except Exception as exc:
-            traceback.print_exc()
+            _log_exc("PDF 渲染")
             self.error.emit(str(exc))
         finally:
             _close_thread_conn()
@@ -176,7 +193,7 @@ class BookletWorker(QThread):
             n = make_booklet(self.src_pdf, self.out_pdf)
             self.done.emit(f"{self.out_pdf}\n共 {n} 页（A3横向，骑马钉）")
         except Exception as exc:
-            traceback.print_exc()
+            _log_exc("小册子重排")
             self.error.emit(str(exc))
         finally:
             _close_thread_conn()
@@ -207,6 +224,7 @@ class TTSWorker(QThread):
             from ..core import tts as tts_core
             self._engine = tts_core.TTSEngine()
         except Exception as exc:
+            _log_exc("朗读引擎初始化")
             self.failed.emit(str(exc))
             return
         try:

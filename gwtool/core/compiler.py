@@ -14,6 +14,11 @@ from .template import DocTemplate
 from . import docxgen
 
 
+# 附录标题。与 build_sources_tree 里的 DocTree.title 保持一致：
+# docxgen 会按 tree.title 插入一级标题，两者不一致会出现标题重复。
+SOURCES_TITLE = "汇编材料来源清单"
+
+
 @dataclass
 class CompileRequest:
     doc_ids: list[int] = field(default_factory=list)      # 资料库文档
@@ -21,6 +26,7 @@ class CompileRequest:
     template: DocTemplate | None = None
     out_docx: str = ""
     material_titles: list[str] | None = None              # 覆盖材料标题
+    include_sources: bool = False                          # 追加材料来源清单
 
 
 def load_trees(doc_ids: list[int], extra_paths: list[str]) -> list[DocTree]:
@@ -44,6 +50,56 @@ def load_trees(doc_ids: list[int], extra_paths: list[str]) -> list[DocTree]:
     return trees
 
 
+def collect_sources(doc_ids: list[int], extra_paths: list[str]) -> list[dict]:
+    """收集汇编材料的来源信息（标题 / 原文件名 / 导入时间 / 所属分类）。
+
+    **为什么要它**：汇编类公文需要可追溯性 —— "这份汇编里的内容从哪来"
+    必须能答出来（审计、责任划分、领导询问）。此前成品是一个孤立的 DOCX，
+    来源只存在于操作者的记忆里，隔周就说不清了。
+    """
+    out: list[dict] = []
+    try:
+        cats = {c.id: c.name for c in dao.list_categories()}
+    except Exception:
+        cats = {}
+    for did in doc_ids:
+        d = dao.get_document(did)
+        if not d:
+            continue          # 材料在汇编前被删掉了：跳过而不是编造一行
+        # 软删除（已进回收站）的材料同样不该出现在清单里——
+        # get_document 仍能取到它，只看 `d` 是否存在会把它列进去
+        if (d.deleted_time or "").strip():
+            continue
+        out.append({
+            "title": d.title or Path(d.file_path or "").stem,
+            "file": Path(d.file_path).name if d.file_path else "",
+            "time": (d.import_time or "")[:16],
+            "category": cats.get(d.category_id, "") or "未分类",
+        })
+    for p in extra_paths:
+        out.append({
+            "title": Path(p).stem,
+            "file": Path(p).name,
+            "time": "",
+            "category": "（未入库）",
+        })
+    return out
+
+
+def build_sources_tree(sources: list[dict]) -> DocTree:
+    """把来源清单组织成 DocTree，复用既有公文排版（不另起排版逻辑）。"""
+    from .model import HEADING, TABLE, Block
+
+    tree = DocTree(title=SOURCES_TITLE)
+    tree.blocks.append(Block(type=HEADING, level=1, text=SOURCES_TITLE))
+    rows = [["序号", "材料标题", "原文件名", "导入时间", "所属分类"]]
+    for i, s in enumerate(sources, start=1):
+        rows.append([str(i), s.get("title", ""), s.get("file", ""),
+                     s.get("time", ""), s.get("category", "")])
+    tree.blocks.append(Block(type=TABLE, rows=rows))
+    return tree
+
+
 def compile_docx(req: CompileRequest) -> str:
     tpl = req.template or DocTemplate()
     trees = load_trees(req.doc_ids, req.extra_paths)
@@ -53,6 +109,11 @@ def compile_docx(req: CompileRequest) -> str:
         for t, title in zip(trees, req.material_titles):
             if title:
                 t.title = title
+    if req.include_sources:
+        sources = collect_sources(req.doc_ids, req.extra_paths)
+        # 无材料时不追加空清单（否则会凭空多出一个只有表头的附录）
+        if sources:
+            trees.append(build_sources_tree(sources))
     return docxgen.generate_docx(trees, tpl, req.out_docx)
 
 

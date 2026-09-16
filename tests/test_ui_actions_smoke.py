@@ -8,7 +8,7 @@
 import pytest
 
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +25,19 @@ def block_modal_dialogs(monkeypatch):
     monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "question",
                         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    # QInputDialog 的**静态**方法（getItem/getText/…）是 C++ 侧实现，
+    # 内部不走 Python 层的 `QDialog.exec`，所以上面那条 patch 拦不住它们 ——
+    # 必须逐个屏蔽。漏掉会真的弹出模态框，把"遍历触发全部动作"的用例挂死：
+    # 实测表现为全量跑永远停在 83%、日志 15 分钟不增一行、无任何报错。
+    # （QFileDialog 的静态方法在 win fixture 里已有同样处理，这里补齐 QInputDialog。）
+    monkeypatch.setattr(QInputDialog, "getItem",
+                        staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(QInputDialog, "getInt",
+                        staticmethod(lambda *a, **k: (0, False)))
+    monkeypatch.setattr(QInputDialog, "getDouble",
+                        staticmethod(lambda *a, **k: (0.0, False)))
 
 
 @pytest.fixture()
@@ -58,6 +71,7 @@ def win(tmp_db, qapp, monkeypatch):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
+@pytest.mark.timeout(180)
 def test_all_menu_and_toolbar_actions_triggerable(win, qapp, monkeypatch):
     """遍历触发全部 QAction：任何一个动作抛异常都视为"点开就崩"缺陷。
 

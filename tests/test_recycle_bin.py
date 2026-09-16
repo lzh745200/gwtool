@@ -48,16 +48,26 @@ def _columns(conn, table="documents") -> set:
 
 
 # ------------------------------------------------------------------ 迁移
-def test_migration_v2_to_v3_adds_column_and_keeps_data(tmp_path):
-    """老库升级：列加上、原有数据一字不改、附件表建好、迁移前有自动备份。"""
+def test_migration_from_v2_adds_column_and_keeps_data(tmp_path):
+    """老库升级：列加上、原有数据一字不改、附件表建好、迁移前有自动备份。
+
+    断言写成"等于当前 SCHEMA_VERSION"而不是硬编码数字：硬编码会在每次
+    加版本时误报失败（schema v4 新增收文表时就发生过），而它要守的其实是
+    "版本号被正确推进到最新"，与具体数字无关。
+    """
     dbf = tmp_path / "old.db"
     _make_v2_db(dbf)
     dbconn.configure(dbf)
     try:
         conn = dbconn.get_conn()          # 首次连接即触发 init_schema
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION > 2, "本测试前提是从 v2 升级，版本号必须已推进"
         assert "deleted_time" in _columns(conn), "迁移未补上 deleted_time 列"
         assert "simhash" in _columns(conn), "v2 的列不能丢"
+        # v3 补了 attachments、v4 补了收文台账：老库升级后都应存在
+        tables_v4 = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "receive_register" in tables_v4, "v4 的收文表未随迁移创建"
 
         row = conn.execute(
             "SELECT title,content_text,tags,word_count,text_hash,deleted_time"
@@ -72,9 +82,7 @@ def test_migration_v2_to_v3_adds_column_and_keeps_data(tmp_path):
         # 本测试造的旧库没有 documents_fts 行（真实老库有），重建后应能检索
         dao.rebuild_fts()
         assert dao.search_documents("安全生产"), "升级后全文检索应仍可用"
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "attachments" in tables, "附件表应随建表语句一起创建"
+        assert "attachments" in tables_v4, "附件表应随建表语句一起创建"
         assert list((tmp_path / "backups").glob("*_premigrate_v2.zip")), \
             "老库升级前应有原始文件备份作为安全网"
     finally:
