@@ -282,22 +282,6 @@ def _check_runs(text: str, ctx: dict) -> list[Correction]:
 
 
 # ------------------------------------------------------------------ cXc 间隔重复
-def _segmentable(s: str, words: set) -> bool:
-    """s 能否被切成若干词典词（覆盖整串，至少一段）。"""
-    n = len(s)
-    if n == 0:
-        return False
-    reach = [False] * (n + 1)
-    reach[0] = True
-    for i in range(n):
-        if not reach[i]:
-            continue
-        for j in range(i + 1, n + 1):
-            if s[i:j] in words:
-                reach[j] = True
-    return reach[n]
-
-
 def _check_interval_repeat(text: str, ctx: dict) -> list[Correction]:
     """cXc 间隔重复：四条全中才报，且置信度**恒为 0.5**（仅提示、不进确认错）。
 
@@ -322,9 +306,14 @@ def _check_interval_repeat(text: str, ctx: dict) -> list[Correction]:
                     form = text[i:i + 3]
                     keep_left = text[i:i + 2]       # cX（删右侧 c）
                     keep_right = text[i + 1:i + 3]  # Xc（删左侧 c）
-                    deletable = (keep_right in words or keep_left in words
-                                 or _segmentable(keep_right, words)
-                                 or _segmentable(keep_left, words))
+                    # 判据收紧（2026-09-21，CI 抓到真误报后修）：必须删出一个
+                    # **真正的词典词**，不能只看"能否切成词典词"。
+                    # 原先允许 `_segmentable` 兜底，而 cX 只有两个字、常见字几乎
+                    # 都能切成两个单字词（如 "会在" → 会+在），于是该兜底永远成立
+                    # —— 判据形同虚设。实测代价：正常语句 "现在会在…" 里的
+                    # "在会在" 被判为疑似重复（0.5 灰档）。
+                    # 既有正例全部满足"删一字得真词"：是否/不在/完了，故收紧不误伤。
+                    deletable = keep_left in words or keep_right in words
                     if deletable and form not in words:
                         suggestion = keep_left if keep_left in words else keep_right
                         out.append(Correction(

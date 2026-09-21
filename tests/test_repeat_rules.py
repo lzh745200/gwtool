@@ -301,6 +301,24 @@ def test_interval_repeat_never_exceeds_gray():
         assert c.confidence <= 0.5, f"{c.wrong!r} 越档：{c.confidence}"
 
 
+def test_interval_repeat_requires_real_word_after_deletion():
+    """判据必须是「删一字得到**真正的词典词**」，不能只看能否切成词。
+
+    回归用例（2026-09-21 由 CI 的语料零误报断言抓到）：
+    正常语句「现在会在…」里含子串「在会在」—— `在` 是虚词、形态又是 cXc，
+    原先 `_segmentable` 兜底把 "会在" 切成 会+在（两个单字词）就判为"可删"，
+    于是整句被误报。这类"两个常用字都能切成单字词"的情形极其普遍，
+    兜底判据等于永远成立。收紧为「必须删出真词」后即不再误报。
+    """
+    # 误报原文（CI 报出的那一句），必须 0 命中
+    for s in ["现在会在结果对话框中逐条点名。",
+              "现在会在所有步骤都真正成功时出现。"]:
+        assert not rep(s), f"正常语句被误报：{s!r} -> {pairs(s)}"
+    # 既有正例必须仍然报（删一字得到的是词典词：是否 / 不在 / 完了）
+    for s in ["是否是文件被占用", "在不在", "了完了"]:
+        assert len(rep(s)) == 1, f"{s!r} 应仍命中 1 处：{pairs(s)}"
+
+
 # ============================================================ 7) 集成
 def test_corrector_integration_category_kind_style():
     hits = corrector.check_text("工作作。")
