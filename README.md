@@ -30,7 +30,8 @@
 | 写作参考 | 输入词语/主题，从资料库、词典、句式库按相关度检索，双击一键插入 |
 | 任意文档纠错 | 任意格式文件/粘贴文本全文纠错：按类别底色**标记视图**、点击定位、逐处/整篇修正、保结构导出 DOCX/TXT |
 | 资料移交包 | 按分类/标签/时间段批量导出为移交包（ZIP）：文档按目录树归档、附件可选、`manifest.json` 含每份文档的原文件名与 sha256 校验值。与"整库备份"互补——交接某专题不必把整个数据库交出去 |
-| 词典/词库扩充 | 自定义词条、纠错对、常用句式、忽略名单，支持批量导入，立即生效 |
+| 词典/词库扩充 | 自定义词条、纠错对、常用句式、忽略名单，支持批量导入，立即生效。**多格式词表导入**：CSV/TSV/TXT（自动识别编码与分隔符：UTF-8/GBK/BOM、逗号/制表符/分号）、JSON、Excel(.xlsx)、Word 表格、TBX/XLIFF；导入前先**预检并列出**「新增/覆盖/冲突/跳过/无效」，**确认后才写库**，整批单事务、失败全回滚 |
+| 词表的三种用途 | **纠错对**（错→对，直接进纠错）；**行业术语**（规范名+异名 → 按「疑似」档提示，不自动替换）；**保护词**（人名/地名/机构简称等你的合法词：既防止被纠错误判，也能在写作参考里检索到）。每份词表按「来源」成组，可整体启停或一键回退 |
 | 纠错规则集 | 纠错对按「来源」成组管理：整体启用/停用（停用后立即不参与纠错，数据保留可随时恢复）、CSV 双向导入导出（UTF-8-BOM，含来源与启用状态，可原样导回或分发到别的电脑），承载「单位内部规范词库」。注：程序内置的人工精标对始终生效，不受该开关影响 |
 | 文档对比 | 两文档红绿差异视图（增/删/改 + 相似度统计） |
 | 相似查重 | SimHash 粗筛 + 字符三元组 Jaccard 精判，找出高度相似的材料对 |
@@ -65,7 +66,7 @@
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python main.py        # 启动
-.venv\Scripts\python -m pytest tests\ -q   # 运行测试（1127 个用例）
+.venv\Scripts\python -m pytest tests\ -q   # 运行测试（1190 个用例）
 python scripts\e2e_check.py         # 端到端自检（18 步全流程 PASS/FAIL 清单）
 python scripts\smoke_dist.py dist\gwtool   # 打包后校验产物（需先打包）
 ```
@@ -276,7 +277,7 @@ gwtool/
 │   │   └── theme.py            #   语义色常量（深浅色兼容）
 │   └── resources/data/
 │       └── seed.db             # 种子库：词典 12.3 万 + 纠错对 4 万（15.7 MB）
-├── tests/                      # pytest 测试套件（1127 个用例，含性能验收）
+├── tests/                      # pytest 测试套件（1190 个用例，含性能验收）
 ├── scripts/                    # 构建与运维脚本
 │   ├── build_windows.bat       #   Windows x64 打包（PyInstaller + 便携 zip）
 │   ├── build_kylin_arm64.sh    #   麒麟 ARM64 打包（支持离线 wheels）
@@ -285,7 +286,7 @@ gwtool/
 │   ├── install_context_menu.bat / uninstall_context_menu.bat  # 右键菜单
 │   ├── gwtool.desktop          #   Linux 桌面入口
 │   ├── seed_data.py            #   构建期生成 seed.db（词典下载+混淆对生成）
-│   ├── e2e_check.py            #   端到端自检（20 步全流程）
+│   ├── e2e_check.py            #   端到端自检（23 步全流程）
 │   ├── smoke_dist.py           #   打包产物冒烟（含能力面自报断言）
 │   ├── check_inference_stack.py #   推理栈自检（双平台 CI 共用，默认失败即非零退出）
 │   ├── bench_scale.py          #   大数据量性能基线（临时库，不碰用户数据）

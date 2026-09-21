@@ -17,7 +17,16 @@ from .. import logs
 # 版本 4：新增 receive_register（收文登记台账）。
 # 该表由 TABLES 里的 CREATE TABLE IF NOT EXISTS 建立（老库同样会补上），
 # 故 MIGRATIONS[4] 无需任何语句——版本号只用于记录结构代数。
-SCHEMA_VERSION = 4
+#
+# 版本 5：新增 wordlist_sources（用户导入词表的来源登记）。
+# 同样是**整张新表**，由 TABLES 的 CREATE TABLE IF NOT EXISTS 覆盖老库，
+# 故 MIGRATIONS[5] 同样无需语句。新增它要解决的是一个真实缺陷：
+#   `dictionary` 表被 repeat_rules 当作"这段字是不是汉语真词"的**证据集**，
+#   而用户导入的行业术语属于"领域词汇"、不是关于汉语的证据。两者混在一起
+#   会让常见二字词（如"会在"）成为 ⑤/cXc 的证据，把**原本放行的正常语句
+#   翻成 0.85/0.5 误报**。wordlist_sources 记录"哪些 source 是用户导入的"，
+#   供 repeat_rules 把证据集与用户词集**分开取用**。
+SCHEMA_VERSION = 5
 
 # 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级。
 #
@@ -96,6 +105,27 @@ TABLES = [
         context TEXT DEFAULT '',
         source TEXT DEFAULT 'user',
         tag TEXT DEFAULT ''
+    )""",
+    # 用户导入词表的来源登记（v5）
+    #
+    # 为什么单独一张表、而不是给 dictionary 加一列：同一份词表会**同时**落到
+    # dictionary（词）与 error_pairs（纠错对/术语），需要一处统一的"这批东西
+    # 是用户导入的、角色是什么、来自哪个文件"的登记；且 repeat_rules 必须能
+    # 一次问出"哪些 source 属于用户导入"，避免每行都去判断。
+    #
+    # role 取值：
+    #   pairs   纠错对（错→对）
+    #   terms   行业术语（异名→规范名，展平后同样落 error_pairs）
+    #   protect 保护词（防误纠 + 检索 + 重复字豁免）
+    """CREATE TABLE IF NOT EXISTS wordlist_sources(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL DEFAULT 'pairs',
+        label TEXT DEFAULT '',
+        fmt TEXT DEFAULT '',
+        entry_count INTEGER NOT NULL DEFAULT 0,
+        imported_at TEXT DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1
     )""",
     # 公文模板
     """CREATE TABLE IF NOT EXISTS templates(
@@ -206,6 +236,12 @@ INDEXES = [
     """CREATE INDEX IF NOT EXISTS idx_documents_simhash ON documents(simhash)""",
     """CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted_time)""",
     """CREATE INDEX IF NOT EXISTS idx_dictionary_word ON dictionary(word)""",
+    # 按来源取词（user_terms / 证据集分离、按来源启停）需要它。
+    # ⚠️ 刻意**不**给 dictionary(word) 加唯一索引：老库里可能已有重复行
+    # （旧版 UI 导入不去重），加唯一索引会当场建索引失败、升级即崩。
+    # 去重放在应用层（core/wordlist.py 的预检阶段）。
+    """CREATE INDEX IF NOT EXISTS idx_dictionary_word_source ON dictionary(word, source)""",
+    """CREATE INDEX IF NOT EXISTS idx_wordlist_role ON wordlist_sources(role, enabled)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_error_pairs_key ON error_pairs(wrong, correct)""",
     """CREATE INDEX IF NOT EXISTS idx_snapshots_doc ON snapshots(doc_id, id DESC)""",
     """CREATE INDEX IF NOT EXISTS idx_dispatch_no ON dispatch_register(doc_no)""",

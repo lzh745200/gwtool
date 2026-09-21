@@ -19,7 +19,7 @@ import pytest
 from gwtool.core import receive, registry
 from gwtool.db import connection as dbconn
 from gwtool.db import dao
-from gwtool.db.schema import init_schema
+from gwtool.db.schema import SCHEMA_VERSION, init_schema
 
 
 def _rec(**kw) -> dao.Receive:
@@ -69,7 +69,10 @@ class TestSchema:
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "receive_register" in names, "从 v3 升级后必须补出收文表"
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        # 断言"等于当前版本"而不是硬编码数字 —— 与 test_recycle_bin.py 同一纪律：
+        # 硬编码会在每次推进 SCHEMA_VERSION 时误报，而它想守的其实只是
+        # "升级链把版本号推到了最新"。
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     def test_upgrade_preserves_existing_data(self, tmp_db):
         """升级不能动既有数据。"""

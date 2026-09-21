@@ -183,7 +183,43 @@ def main() -> int:
     _rh = repeat_rules.check_repeat(_essay)
     step("重复字：公文范文零误报", len(_rh) == 0, f"{len(_rh)} 命中")
 
-    # 9) 备份
+    # 9) 词表导入：预检 → 预览 → 事务写入 → 生效与回归校验
+    #
+    # ⚠️ 本脚本跑在**真实数据目录**上，所以自检用的词表**导入后必须删掉**，
+    # 不能把测试数据留在用户的库里。同时验证：
+    #   · 导入的规则真的在纠错里生效（不是"导入成功但没作用"）；
+    #   · 新增来源不会让重复字检测产生误报（导入污染的核心回归点）。
+    from gwtool.core import wordlist as _wl
+    try:
+        _src = "E2E自检词表"
+        _csv = Path(sample_dir) / "e2e_wordlist.csv"
+        _csv.write_text("错误写法,正确写法\n各自,各\n", encoding="utf-8")
+        _parsed = _wl.parse(str(_csv), "pairs")
+        _rep = _wl.precheck(_parsed, _src, "pairs")
+        _applied = _wl.apply(_parsed, _rep, _src, "pairs", label="E2E 自检")
+        _preview = "／".join(f"{k}{v}" for k, v in _rep.counts.items())
+        step("词表导入（预检→预览→事务写入）",
+             _applied.ok and _applied.pairs_added >= 1,
+             f"新增 {_applied.pairs_added} 条；预检 {_preview}")
+
+        from gwtool.core.corrector import check_text
+        _hit = [c for c in check_text("各自负责。") if c.wrong == "各自"]
+        step("词表导入后纠错生效", bool(_hit),
+             f"命中 {[c.wrong + '→' + c.suggestion for c in _hit[:3]]}")
+
+        from gwtool.core import repeat_rules
+        _fp = repeat_rules.check_repeat("现在会在结果对话框中逐条点名。")
+        step("词表导入后重复字零误报回归", len(_fp) == 0, f"{len(_fp)} 命中")
+    except Exception as _exc:                       # 自检失败要报出来，不吞
+        step("词表导入（预检→预览→事务写入）", False,
+             f"{type(_exc).__name__}: {_exc}")
+    finally:
+        try:
+            _wl.delete_source(_src)                 # 不留测试数据在用户库里
+        except Exception:
+            pass
+
+    # 10) 备份
     from gwtool.core.backup import create_backup
     bz = create_backup(note="E2E自检")
     step("一键备份", Path(bz).exists(), str(Path(bz).name))

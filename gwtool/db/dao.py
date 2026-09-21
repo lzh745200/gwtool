@@ -550,10 +550,126 @@ def all_dictionary_words() -> list[str]:
 
     只读查询；词典为空（如未导入种子的临时库）时返回空列表，
     调用方据此退化为"不报"（宁少报不误报）。
+
+    ⚠️ 保留"全部词"的原语义：`scripts/e2e_check.py` 与
+    `scripts/eval_corrector.py` 依赖它做全量断言。
+    **纠错证据集请改用 `builtin_dictionary_words()`** —— 见其文档。
     """
     rows = dbconn.get_conn().execute(
         "SELECT DISTINCT word FROM dictionary").fetchall()
     return [r["word"] for r in rows if r["word"]]
+
+
+# ------------------------------------------------- 词表来源分离（v5）
+def user_wordlist_sources() -> set:
+    """用户导入词表占用的全部 source 名（可能为空集）。
+
+    这是"证据集 / 用户词集"分离的唯一判据来源，被 `repeat_rules` 在
+    **每次派生缓存时**调用一次，不在热路径上。
+    """
+    try:
+        rows = dbconn.get_conn().execute(
+            "SELECT source FROM wordlist_sources").fetchall()
+    except Exception:
+        # 库还是 v4 结构（未迁移）时退化为"没有用户来源"：
+        # 等价于旧行为，绝不能因此让重复字检测整个挂掉。
+        return set()
+    return {r["source"] for r in rows if r["source"]}
+
+
+def builtin_dictionary_words() -> list[str]:
+    """**证据集**：不含用户导入来源的词条，供 repeat_rules 作判词依据。
+
+    为什么必须把用户来源排除在外：`repeat_rules` 拿这个集合回答
+    "这段字是不是汉语里的真词"，而用户导入的行业术语属于**领域词汇**，
+    不是关于汉语的证据。混进去会产生双向污染：
+      · ②④⑦ 拿它放行 → 漏报增加；
+      · ⑤b/⑤c 的左右证据与 cXc 的 `deletable` 也拿它判 → 导入常见二字词
+        （如"会在"）会把**原本放行的正常语句翻成 0.85/0.5 误报**。
+    用户词的保护交由 `user_dictionary_words()` 的"整段豁免"承担。
+    """
+    srcs = user_wordlist_sources()
+    conn = dbconn.get_conn()
+    if not srcs:
+        rows = conn.execute("SELECT DISTINCT word FROM dictionary").fetchall()
+    else:
+        ph = ",".join("?" * len(srcs))
+        rows = conn.execute(
+            "SELECT DISTINCT word FROM dictionary "
+            f"WHERE COALESCE(source,'') NOT IN ({ph})", tuple(srcs)).fetchall()
+    return [r["word"] for r in rows if r["word"]]
+
+
+def user_dictionary_words() -> list[str]:
+    """**豁免集**：用户导入的词，**只**用于"整个同字连被该词覆盖 → 放行"。
+
+    刻意不参与 ②④⑤⑦ 的通用放行与 cXc 的 `deletable` ——
+    那些判据代表"汉语是否真词"，用户词不能作证。
+    """
+    srcs = user_wordlist_sources()
+    if not srcs:
+        return []
+    ph = ",".join("?" * len(srcs))
+    rows = dbconn.get_conn().execute(
+        "SELECT DISTINCT word FROM dictionary "
+        f"WHERE COALESCE(source,'') IN ({ph})", tuple(srcs)).fetchall()
+    return [r["word"] for r in rows if r["word"]]
+
+
+def list_wordlist_sources() -> list:
+    """用户导入词表的登记清单（供 UI 与预检）。"""
+    try:
+        rows = dbconn.get_conn().execute(
+            "SELECT * FROM wordlist_sources ORDER BY id").fetchall()
+    except Exception:
+        return []
+    return [dict(r) for r in rows]
+
+
+def upsert_wordlist_source(source: str, role: str = "pairs", label: str = "",
+                           fmt: str = "", entry_count: int = 0) -> None:
+    """登记/更新一个用户导入来源（同 source 覆盖，不产生重复登记）。"""
+    from datetime import datetime
+    conn = dbconn.get_conn()
+    conn.execute(
+        "INSERT INTO wordlist_sources(source,role,label,fmt,entry_count,"
+        "imported_at,enabled) VALUES(?,?,?,?,?,?,1) "
+        "ON CONFLICT(source) DO UPDATE SET role=excluded.role, "
+        "label=excluded.label, fmt=excluded.fmt, "
+        "entry_count=excluded.entry_count, imported_at=excluded.imported_at",
+        (source, role, label, fmt, int(entry_count),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+
+
+def set_wordlist_source_enabled(source: str, enabled: bool) -> int:
+    """按来源整体启停：同步改登记表 + 该来源的纠错对 enabled。返回受影响对数。"""
+    conn = dbconn.get_conn()
+    conn.execute("UPDATE wordlist_sources SET enabled=? WHERE source=?",
+                 (1 if enabled else 0, source))
+    cur = conn.execute("UPDATE error_pairs SET enabled=? WHERE source=?",
+                       (1 if enabled else 0, source))
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def delete_wordlist_source(source: str) -> dict:
+    """整体移除一个用户导入来源：同时清掉它的词条、纠错对与登记。"""
+    conn = dbconn.get_conn()
+    n_words = conn.execute("DELETE FROM dictionary WHERE source=?",
+                           (source,)).rowcount or 0
+    n_pairs = conn.execute("DELETE FROM error_pairs WHERE source=?",
+                           (source,)).rowcount or 0
+    conn.execute("DELETE FROM wordlist_sources WHERE source=?", (source,))
+    conn.commit()
+    return {"words": int(n_words), "pairs": int(n_pairs)}
+
+
+def count_dictionary_by_source(source: str) -> int:
+    row = dbconn.get_conn().execute(
+        "SELECT count(*) AS n FROM dictionary WHERE COALESCE(source,'')=?",
+        (source,)).fetchone()
+    return int(row["n"]) if row else 0
 
 
 # ---------------------------------------------------------------- error pairs

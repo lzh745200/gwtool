@@ -2,7 +2,6 @@
 """词典与用户词库管理：词典/错别字对/常用句式三个标签页。"""
 from __future__ import annotations
 
-import csv
 from datetime import date
 from pathlib import Path
 
@@ -11,11 +10,14 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
                                QPushButton, QTabWidget,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
+from .. import logs as _logs
 from ..core import ruleset
 from ..core.corrector import invalidate_cache
 from ..db import dao
 from ..db.connection import get_conn
 from .widgets import ask, info, warn
+
+_log = _logs.get_logger("dict_manager")
 
 
 class DictManager(QDialog):
@@ -51,7 +53,10 @@ class DictManager(QDialog):
         self.dict_search.returnPressed.connect(self._reload_dict)
         btn_add = QPushButton("添加词条")
         btn_add.clicked.connect(self._add_word)
-        btn_import = QPushButton("导入词典文件(CSV/TSV)…")
+        btn_import = QPushButton("导入保护词表…")
+        btn_import.setToolTip("导入人名/地名/机构简称/生僻专名等**你自己的合法词**："
+                              "既防止被纠错误判，也能在写作参考里检索到。"
+                              "支持 CSV/TSV/TXT、JSON、Excel、Word 表格")
         btn_import.clicked.connect(self._import_dict)
         btn_del = QPushButton("删除所选")
         btn_del.clicked.connect(self._del_dict_row)
@@ -94,32 +99,83 @@ class DictManager(QDialog):
         self._reload_dict()
         self._refresh_stats()
 
-    def _import_dict(self):
-        path, _ = QFileDialog.getOpenFileName(self, "导入词典", "",
-                                              "CSV/TSV (*.csv *.tsv *.txt)")
+    # ---------------------------------------------------------- 统一词表导入
+    def _import_wordlist(self, default_role: str = "pairs"):
+        """统一的词表导入：选文件 → 定角色 → 命名来源 → 预检 → 预览确认 → 写库。
+
+        为什么把三个入口统一到一处：此前"词典页"与"错别字对页"各写了一套导入，
+        各自只认 CSV、冲突处理还不一致（一个不去重、一个覆盖）。而**格式解析与
+        冲突规则只应有一份实现** —— 否则每加一种格式就要改两遍，规则必然漂移。
+
+        流程严格分三步（对齐 `core/batch.py` 的"预览→确认"模式）：
+        `parse` 只读文件、`precheck` 只读库、**确认之前不写任何东西**，
+        `apply` 才写且整批单事务。
+        """
+        from ..core import wordlist
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入词表", "", wordlist.supported_hint())
         if not path:
             return
-        n = 0
-        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            first_line = sample.splitlines()[0] if sample else ""
-            delim = "\t" if "\t" in first_line else ","
-            reader = csv.reader(f, delimiter=delim)
-            for row in reader:
-                if not row or not row[0].strip():
-                    continue
-                word = row[0].strip()
-                pinyin = row[1].strip() if len(row) > 1 else ""
-                definition = row[2].strip() if len(row) > 2 else ""
-                example = row[3].strip() if len(row) > 3 else ""
-                dao.add_dictionary_entry(word, pinyin, definition, example,
-                                         source="user")
-                n += 1
+        roles = ["纠错对（错→对）",
+                 "行业术语（异名→规范名）",
+                 "保护词（不被误纠 + 可检索）"]
+        keys = ["pairs", "terms", "protect"]
+        try:
+            idx = keys.index(default_role)
+        except ValueError:
+            idx = 0
+        choice, ok = QInputDialog.getItem(
+            self, "词表类型", "这份词表打算怎么用？", roles, idx, False)
+        if not ok:
+            return
+        role = keys[roles.index(choice)] if choice in roles else keys[idx]
+        name, ok = QInputDialog.getText(
+            self, "命名来源",
+            "给这份词表起个名字（用于按来源启停、整体回退）：",
+            text=Path(path).stem)
+        if not ok:
+            return
+        source = (name or Path(path).stem or "用户导入").strip()
+
+        try:
+            parsed = wordlist.parse(path, role)
+        except Exception as exc:                      # 解析失败必须是可读的
+            warn(self, "无法解析这个文件：\n%s" % exc)
+            return
+        rep = wordlist.precheck(parsed, source, role)
+        head = "\n".join(wordlist.preview_lines(rep))
+        if rep.total_valid == 0:
+            warn(self, head + "\n\n没有可导入的有效条目，未做任何改动。")
+            return
+        if not ask(self, head + "\n\n确认导入吗？（确认前不会改动任何数据）"):
+            return
+        out = wordlist.apply(parsed, rep, source, role, label=source)
+        if not out.ok:
+            warn(self, "导入失败，已**整批回滚**，库中数据未被改动：\n%s"
+                 % out.error)
+        else:
+            info(self, out.summary())
+        self._after_wordlist_change()
+
+    def _after_wordlist_change(self):
+        """导入/删除后统一收尾：失效缓存 + 刷新各表。"""
         invalidate_cache()
-        self._reload_dict()
+        # 导入已成功、这两步只是刷新界面：失败**不能抛**（否则用户会以为
+        # 导入失败），但要留痕 —— 界面显示陈旧数据本身是个可查的问题。
+        try:
+            self._reload_dict()
+        except Exception as exc:
+            _log.warning("词表变更后刷新词典页失败：%s", exc)
+        try:
+            self._reload_errors()
+        except Exception as exc:
+            _log.warning("词表变更后刷新纠错对页失败：%s", exc)
         self._refresh_stats()
-        info(self, f"已导入 {n} 条词条。")
+
+    def _import_dict(self):
+        """词典页的导入 —— 按**保护词**角色走统一入口。"""
+        self._import_wordlist("protect")
 
     def _del_dict_row(self):
         rows = {i.row() for i in self.dict_table.selectedIndexes()}
@@ -139,13 +195,20 @@ class DictManager(QDialog):
         self.err_search.returnPressed.connect(self._reload_errors)
         btn_add = QPushButton("添加纠错对")
         btn_add.clicked.connect(self._add_pair)
-        btn_import = QPushButton("批量导入(CSV: 错,对)…")
+        btn_import = QPushButton("导入词表…")
+        btn_import.setToolTip("支持 CSV/TSV/TXT、JSON、Excel(.xlsx)、Word 表格、"
+                              "TBX/XLIFF；导入前会先预检并让你确认")
         btn_import.clicked.connect(self._import_pairs)
+        btn_terms = QPushButton("导入术语表…")
+        btn_terms.setToolTip("术语表：规范名 + 异名；导入后按「疑似」档提示，"
+                             "不会自动替换")
+        btn_terms.clicked.connect(self._import_terms)
         btn_del = QPushButton("删除所选")
         btn_del.clicked.connect(self._del_pair_row)
         bar.addWidget(self.err_search, 1)
         bar.addWidget(btn_add)
         bar.addWidget(btn_import)
+        bar.addWidget(btn_terms)
         bar.addWidget(btn_del)
         v.addLayout(bar)
 
@@ -257,26 +320,12 @@ class DictManager(QDialog):
         self._refresh_stats()
 
     def _import_pairs(self):
-        path, _ = QFileDialog.getOpenFileName(self, "导入纠错对", "",
-                                              "CSV/TSV (*.csv *.tsv *.txt)")
-        if not path:
-            return
-        n = 0
-        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            first = sample.splitlines()[0] if sample else ""
-            delim = "\t" if "\t" in first else ","
-            for row in csv.reader(f, delimiter=delim):
-                if len(row) >= 2 and row[0].strip() and row[1].strip():
-                    cat = row[2].strip() if len(row) > 2 else "用户导入"
-                    dao.add_error_pair(row[0].strip(), row[1].strip(), cat,
-                                       confidence=0.95)
-                    n += 1
-        invalidate_cache()
-        self._reload_errors()
-        self._refresh_stats()
-        info(self, f"已导入 {n} 条纠错对。")
+        """错别字对页的导入 —— 按**纠错对**角色走统一入口。"""
+        self._import_wordlist("pairs")
+
+    def _import_terms(self):
+        """行业术语导入 —— 异名 → 规范名，落橙档「疑似」不自动改。"""
+        self._import_wordlist("terms")
 
     def _del_pair_row(self):
         rows = {i.row() for i in self.err_table.selectedIndexes()}

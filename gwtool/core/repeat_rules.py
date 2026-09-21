@@ -23,6 +23,14 @@
   ⑦ 叠字白名单   —— ``c`` 出现在任一词典词的"同字两连"位置 → 放行；
   ⑧ 兜底         —— 无任何解释 → 0.5。
 
+另有 ⑨ **用户导入词整段豁免**（v5 新增，实际判定顺序紧跟 ②）：连同字连被某个
+**用户导入的词**完整覆盖 → 放行。它只保护用户词自己那一段。
+
+⚠️ 证据集与用户词集**必须分离**（``_context()`` 派生两组）：
+``words`` 只由**不含用户来源**的词条构成，用于回答"这段字是不是汉语里的真词"；
+用户导入的行业术语属**领域词汇**、不是关于汉语的证据，混入会双向污染 ——
+既借 ②④⑦ 放行而增漏报，又借 ⑤/cXc 判据把正常语句（如「现在会在…」）翻成误报。
+
 ⑤b/⑤c 的**位置守卫**是精髓：``进行行``（后接标点）报，``直接接时间``
 （"接"自然延伸）放行；``我我们``（段首）报，``奇数页|页码``（前有汉字）
 放行。
@@ -63,35 +71,62 @@ def invalidate_cache() -> None:
     _CACHE.clear()
 
 
-def _context() -> dict:
-    """运行期从词典派生并缓存 {words, maxlen, white}。
+def _derive_evidence(items) -> tuple:
+    """从一组词派生（最大词长, 叠字白名单），两处派生共用同一实现。"""
+    mx = 1
+    wh: set = set()
+    for w in items:
+        if len(w) > mx:
+            mx = len(w)
+        prev = ""
+        for ch in w:
+            if ch == prev:
+                wh.add(ch)
+            prev = ch
+    return mx, wh
 
-    - ``words``   ：全部唯一词条集合，O(1) 判词；
-    - ``maxlen``  ：最大词长（封顶 ``_MAX_WIN``），决定 ② 的扫描窗口；
-    - ``white``   ：叠字白名单——出现在任一词典词"同字两连"位置的字。
+
+def _context() -> dict:
+    """运行期从词典派生并缓存两组集合（v5 起**分离**）。
+
+    - ``words``      ：**证据集** —— 不含用户导入来源的词条，O(1) 判词。
+                       供 ②③④⑤（左右证据）⑦ 与 cXc 的 ``deletable`` 使用；
+    - ``maxlen``     ：证据集最大词长（封顶 ``_MAX_WIN``），决定 ② 的扫描窗口；
+    - ``white``      ：叠字白名单 —— 出现在**证据集**任一词"同字两连"位置的字；
+    - ``user_terms`` ：**豁免集** —— 用户导入的词，**只**供 ⑨「整段覆盖即放行」；
+    - ``user_maxlen``：豁免集最大词长（同样封顶 ``_MAX_WIN``），给 ⑨ 的窗口封顶。
+
+    ⚠️ 两组**绝不能混用**。``words`` 回答的是"这段字是不是**汉语里的真词**"，
+    而用户导入的行业术语属于**领域词汇**、不是关于汉语的证据。混用会双向污染：
+      · ②④⑦ 借它放行 → 本应报的重复字被放过（漏报增加）；
+      · ⑤b/⑤c 的左右证据与 cXc 的 ``deletable`` 也借它判 → 导入常见二字词
+        （如"会在"）会把**原本放行的正常语句翻成 0.85/0.5 误报**。
+    详见 ``dao.builtin_dictionary_words()`` 与 ``user_dictionary_words()``。
     """
     ctx = _CACHE.get("ctx")
     if ctx is not None:
         return ctx
     from ..db import dao
     try:
-        words = dao.all_dictionary_words()
+        words = dao.builtin_dictionary_words()
     except Exception:
         words = []
+    try:
+        user_terms = dao.user_dictionary_words()
+    except Exception:
+        user_terms = []
     word_set = set(words)
-    maxlen = 1
-    white: set = set()
-    for w in words:
-        if len(w) > maxlen:
-            maxlen = len(w)
-        prev = ""
-        for ch in w:
-            if ch == prev:
-                white.add(ch)
-            prev = ch
+    maxlen, white = _derive_evidence(words)
+    # ⚠️ 豁免集**不参与** white 派生：用户词只豁免它自己那一段，
+    # 不应把某个字变成"全局可叠用"（那又是一次变相放行）。
+    user_set = set(user_terms)
+    user_maxlen, _ = _derive_evidence(user_terms)
     if maxlen > _MAX_WIN:
         maxlen = _MAX_WIN
-    ctx = {"words": word_set, "maxlen": maxlen, "white": white}
+    if user_maxlen > _MAX_WIN:
+        user_maxlen = _MAX_WIN
+    ctx = {"words": word_set, "maxlen": maxlen, "white": white,
+           "user_terms": user_set, "user_maxlen": user_maxlen}
     _CACHE["ctx"] = ctx
     return ctx
 
@@ -187,6 +222,30 @@ def _covered_by_longer_word(text: str, i: int, k: int, ctx: dict) -> bool:
     return False
 
 
+def _covered_by_user_term(text: str, i: int, k: int, ctx: dict) -> bool:
+    """⑨ 区间 [i, i+k) 是否被某个**用户导入词**完整覆盖（长度 > k）。
+
+    只做"整段豁免"：用户词能保护**它自己那一段**，但**不得**成为 ⑤b/⑤c 的
+    左右证据或 cXc 的 ``deletable`` 判据 —— 否则导入常见二字词（如"会在"）
+    会把正常语句翻成误报。这是本模块"证据集 / 豁免集"分离的全部意义。
+
+    与 ② 同形：在 ``[i-maxlen, i+k]`` 窗口内找是否存在长度 > k 的豁免词。
+    ``user_maxlen`` 已封顶 ``_MAX_WIN``，故窗口扫描代价可控。
+    """
+    terms: set = ctx["user_terms"]
+    if not terms:
+        return False
+    maxlen: int = ctx["user_maxlen"]
+    n = len(text)
+    lo = max(0, i - maxlen + 1)
+    for a in range(lo, i + 1):
+        hi = min(n, a + maxlen)
+        for b in range(a + k + 1, hi + 1):
+            if text[a:b] in terms:
+                return True
+    return False
+
+
 def _left_word_exists(text: str, i: int, ctx: dict) -> bool:
     """⑤ 左侧证据：存在以连首字（下标 i）结尾、且左伸（长度≥2）的词典词。"""
     words: set = ctx["words"]
@@ -227,6 +286,11 @@ def _judge_run(text: str, i: int, k: int, c: str, ctx: dict):
     if _aabb_or_abab(text, i):
         return None
     if _covered_by_longer_word(text, i, k, ctx):
+        return None
+    # ⑨ 用户导入词整段覆盖（v5 新增）
+    # 放在最前（紧跟 ②）：它是**用户显式声明**"这是我们的合法写法"，
+    # 优先级应高于一切通用判据。只豁免用户词自己覆盖的那一段。
+    if _covered_by_user_term(text, i, k, ctx):
         return None
     # ③ k ≥ 3
     if k >= 3:
