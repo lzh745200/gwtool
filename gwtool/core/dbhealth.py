@@ -100,8 +100,10 @@ def record_check(today: str = "") -> None:
     from ..db import dao
     try:
         dao.set_setting(SETTING_LAST_CHECK, today or date.today().isoformat())
-    except Exception:
-        pass
+    except Exception as exc:
+        # 记录失败会让"下次是否该自检"的判断失真（可能每次启动都重跑），
+        # 属可忍受的降级，但要有痕迹可查。
+        logs.get_logger("dbhealth").warning("自检日期未能记录：%s", exc)
 
 
 def should_check(today: str = "") -> bool:

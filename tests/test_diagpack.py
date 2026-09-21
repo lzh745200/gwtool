@@ -79,7 +79,11 @@ class TestLogTail:
         monkeypatch.setattr(logs, "log_path", lambda: big)
         got = diagpack.log_tail(max_bytes=1000)
         assert "仅保留最后" in got
-        assert got.endswith("A" * 1000)
+        # 超长行必须被脱敏（隐私红线）：完整的 1000 个 'A' 不得原样出现，
+        # 但要保留行首与长度标记，保证排障者知道"有一行、多大"
+        assert ("A" * 1000) not in got
+        assert "内容已隐去" in got
+        assert len(got) < 3000
 
     def test_survives_unreadable_log(self, tmp_db, tmp_path, monkeypatch):
         from gwtool import logs

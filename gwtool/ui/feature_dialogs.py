@@ -9,12 +9,13 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                               QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QPlainTextEdit, QProgressBar,
-                               QPushButton, QRadioButton, QSpinBox, QSplitter,
-                               QTextBrowser, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QPlainTextEdit,
+                               QProgressBar, QPushButton, QRadioButton,
+                               QSpinBox, QSplitter, QTextBrowser, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from .. import logs
 from ..core import inspector, simhash
 from ..core import skeletons as skeleton
 from ..core import backup as backup_core
@@ -23,6 +24,8 @@ from ..db import dao
 from . import theme
 from .widgets import ThreadSafeDialog, ask, info, warn
 from .workers import _close_thread_conn
+
+log = logs.get_logger("ui.pack")
 
 # ================================================================ 骨架向导
 class SkeletonDialog(QDialog):
@@ -268,15 +271,21 @@ class _BulkReplaceWorker(QThread):
                 # 层级。查找可能是跨行正则，无法映射回旧块，故按标题正则从新
                 # 文本重建块结构（与编辑器保存的重建策略一致）；并补上此前
                 # 文档承诺的「写回前每篇留快照」。
+                snap_note = ""
                 try:
                     dao.add_snapshot(did, d.title, d.content_text,
                                      reason="批量替换前")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 与批量纠错同型（batch.py）：快照失败不拦住替换，
+                    # 但必须出现在结果里 —— 结果元组第二项就是「说明」位，
+                    # 空串表示一切正常，非空会被对话框列出来。
+                    snap_note = ("正文已替换，但改动前的回滚快照未保存（%s）："
+                                 "这篇无法用「历史版本」退回改前状态"
+                                 % type(exc).__name__)
                 from ..core.importer import _text_to_tree
                 blocks = _text_to_tree(new_text).to_json()
                 dao.update_document_content(did, d.title, new_text, blocks_json=blocks)
-                results.append((d.title, "", n))
+                results.append((d.title, snap_note, n))
         self.done.emit(results)
 
 
@@ -1207,8 +1216,10 @@ class SecurityDialog(QDialog):
         mod.reset()
         try:
             mod.set_setting(True)      # 导入成功即默认开启，用户可随时关
-        except Exception:
-            pass
+        except Exception as exc:
+            # 不打断导入流程（包已就位），但"自动开启"没存下来要说出口：
+            # 否则用户下次启动发现开关又关了，会以为导入没生效。
+            log.warning("增强包导入后未能自动开启（%s）：%s", kind, exc)
         self._refresh_pack_group(kind)
         info(self, f"已导入{label}增强包：\n{pack.summary()}\n\n"
                    + self._pack_post_import_hint(mod))
@@ -1251,8 +1262,8 @@ class SecurityDialog(QDialog):
         mod.reset()
         try:
             mod.set_setting(False)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("增强包卸载后未能关闭开关（%s）：%s", kind, exc)
         self._refresh_pack_group(kind)
         info(self, f"已卸载{label}增强包。" if removed
              else f"当前没有已安装的{label}增强包。")

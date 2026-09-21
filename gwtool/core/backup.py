@@ -107,6 +107,11 @@ class RestoreReport:
     restored_files: int = 0                 # 从包内还原到附件目录的文件数
     missing: list[dict] = field(default_factory=list)
     attachments_dir: str = ""               # 提示用户去哪儿补附件
+    # 恢复过程中"没成功、但没到要让整次恢复失败"的步骤。
+    # 为什么必须有：这些步骤原先各自 `except: pass`，于是"恢复前自动备份没做成"
+    # 与"附件没还原成功"在外部都表现为"恢复成功" —— 用户据此以为数据安全，
+    # 实际安全网不存在或附件丢了。恢复是灾难场景，任何降级都必须说出口。
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -531,6 +536,9 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
         zf_obj.setpassword(password.encode("utf-8"))
     else:
         zf_obj = zipfile.ZipFile(zip_path)
+    # 恢复过程中"没成功、但没到要让整次恢复失败"的步骤，统一收集到报告里。
+    # 声明在 with 之外，保证任何提前返回路径都拿得到它。
+    warnings: list[str] = []
     with zf_obj as zf:
         names = zf.namelist()
         if "gwtool.db" not in names:
@@ -543,8 +551,13 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
         # 这个兜底包的价值在数据库，没必要再压一遍全量附件把恢复拖慢。
         try:
             create_backup(note="恢复前自动备份", mode=MODE_AUTO)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 这一步是"恢复失败时的退路"。它失败了不能拦住恢复本身，
+            # 但**必须说出口** —— 否则用户以为有安全网，实际没有。
+            msg = ("恢复前的自动备份未能创建（%s），本次恢复没有退路备份。"
+                   % type(exc).__name__)
+            warnings.append(msg)
+            _append_log([msg])
         dbconn.close_current_thread()
         # 占用检查：本线程连接已关，但**其它线程**可能仍持有连接（后台导入/
         # 汇编/查重）。此时 os.replace 覆盖主库必被 Windows 拒绝，与其让用户
@@ -578,17 +591,26 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
         if "templates.json" in names:
             try:
                 _restore_templates(zf)
-            except Exception:
-                pass
+            except Exception as exc:
+                msg = ("模板未能从备份包还原（%s），模板列表仍是当前值。"
+                       % type(exc).__name__)
+                warnings.append(msg)
+                _append_log([msg])
         # 附件回数据目录（备份包里没有该目录时静默跳过，兼容旧备份）
         restored = 0
         try:
             restored = _restore_attachments(zf)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 附件还原失败原先被吞成 `restored = 0`，而报告仍是 ok=True ——
+            # 用户以为附件都回来了。附件是公文原件，丢了就是丢了，必须点名。
+            msg = ("附件未能从备份包还原（%s）：库里引用的附件可能不在磁盘上，"
+                   "请用「缺失附件清单」核对。" % type(exc).__name__)
+            warnings.append(msg)
+            _append_log([msg])
     return RestoreReport(ok=True, legacy=legacy, restored_files=restored,
                          missing=_missing_attachments(recorded),
-                         attachments_dir=str(paths.attachments_dir()))
+                         attachments_dir=str(paths.attachments_dir()),
+                         warnings=warnings)
 
 
 def _unlink_quietly(p: Path) -> None:

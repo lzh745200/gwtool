@@ -49,6 +49,66 @@ def redact(value) -> str:
         return "<长度未知，内容已隐去>"
 
 
+# 单条参数/消息超过该长度即视为"可能携带正文"。
+# 正常的排障参数（路径、行号、计数、错误码）都远小于此；而公文正文
+# 动辄数百上千字。阈值取 64 是保守值 —— 短到能整体出现在日志里的
+# 有用信息（函数名、状态码）都不会被误伤。
+_MAX_ARG = 64
+# 格式串本身（无参时即整条消息）的长度上限
+_MAX_MSG = 512
+
+
+class RedactingFilter(logging.Filter):
+    """在日志**入队之前**把可能携带正文的内容压成长度标记。
+
+    为什么必须在 `QueueHandler` 之前：一旦进了队列，`RotatingFileHandler`、
+    `diagpack` 与 `preview_lines()` 看到的都是同一份内容 —— 在下游再脱敏
+    只能靠调用方记得，而"靠调用方记得"正是本项目反复踩的坑。
+
+    处理两类渠道：
+    1. **带参日志**（`log("%s", value)`）：`args` 逐个压成长度标记；
+    2. **无参长消息**（f-string 直接拼进 `msg`）：超过 `_MAX_MSG` 截断。
+       —— f-string 拼正文是**编码纪律**问题，过滤器只能兜底（截断），
+       根治靠"传参 + 让本过滤器接管"，这也是新增本过滤器的目的。
+
+    过滤器自身任何异常都吞掉：日志坏了不能拖垮主流程。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            self._redact_record(record)
+        except Exception:
+            pass
+        return True
+
+    @classmethod
+    def _short(cls, value) -> str:
+        try:
+            s = str(value)
+        except Exception:
+            return "<参数不可读，内容已隐去>"
+        if len(s) <= _MAX_ARG:
+            return s
+        return redact(s)
+
+    @classmethod
+    def _redact_record(cls, record: logging.LogRecord) -> None:
+        args = record.args
+        if args:
+            if isinstance(args, dict):
+                record.args = {k: cls._short(v) for k, v in args.items()}
+            elif isinstance(args, tuple):
+                record.args = tuple(cls._short(a) for a in args)
+            else:
+                record.args = (cls._short(args),)
+        msg = record.msg
+        if isinstance(msg, str) and len(msg) > _MAX_MSG:
+            # 长消息几乎必然是 f-string 拼了正文。**必须整体替换**而不是
+            # 截断 —— 截断只丢掉后面的，标记若落在前 512 字里照样泄漏
+            # （实测：`导入失败：正文×40` 截到 512 字仍有 20 份标记）。
+            record.msg = redact(msg)
+
+
 def log_path():
     """当前日志文件路径；路径不可用时返回 None（绝不抛）。"""
     try:
@@ -72,14 +132,18 @@ def setup() -> None:
             str(path), maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT,
             encoding="utf-8", delay=True)
         handler.setFormatter(logging.Formatter(_FMT))
-        # 队列把"产生日志"与"写盘"解耦：UI 线程只做一次入队
+        # 队列把"产生日志"与"写盘"解耦：UI 线程只做一次入队。
+        # RedactingFilter 挂在 QueueHandler 上 —— 过滤发生在**入队之前**，
+        # 因此落盘的日志本身已脱敏，diagpack 与 preview_lines 自然安全。
         q = queue.SimpleQueue()
         listener = logging.handlers.QueueListener(q, handler,
                                                    respect_handler_level=True)
         listener.start()
         logger = logging.getLogger(_LOG_NAME)
         logger.setLevel(logging.INFO)
-        logger.addHandler(logging.handlers.QueueHandler(q))
+        qh = logging.handlers.QueueHandler(q)
+        qh.addFilter(RedactingFilter())
+        logger.addHandler(qh)
         # 不向 root 传播：避免与第三方库的 handler 重复输出
         logger.propagate = False
         _listener = listener
@@ -93,11 +157,23 @@ def setup() -> None:
 
 
 def shutdown() -> None:
-    """停止日志线程并落盘。幂等，异常吞掉。"""
+    """停止日志线程、摘掉 handler 并落盘。幂等，异常吞掉。
+
+    必须把 QueueHandler 从 logger 上移除：只停 listener 会留下悬空 handler，
+    下一次 `setup()` 会再挂一个 —— handler 数量随 stop/setup 往返无限增长
+    （实测累积到 10 个），且旧 handler 持有的过滤器配置会遮住新配置。
+    """
     global _listener, _configured
     try:
         if _listener is not None:
             _listener.stop()
+    except Exception:
+        pass
+    try:
+        logger = logging.getLogger(_LOG_NAME)
+        for h in list(logger.handlers):
+            if isinstance(h, logging.handlers.QueueHandler):
+                logger.removeHandler(h)
     except Exception:
         pass
     finally:
@@ -123,6 +199,28 @@ def _format_exc(exc_type, exc, tb) -> str:
             return "<异常信息不可读>"
 
 
+def _crash_summary(exc_type, exc, tb) -> str:
+    """崩溃日志只取「异常类型 + 消息长度 + 最末帧位置」，**绝不带消息正文**。
+
+    为什么不能落完整 traceback：异常消息里经常有被处理的数据 ——
+    实测 `ValueError: 无法识别的金额：'<正文片段>'` 会把正文片段原样带进
+    `diagpack`。而排障真正需要的是"哪类错、在哪一行、数据多大"，
+    这三样都不含正文。
+    """
+    try:
+        frames = traceback.extract_tb(tb)
+        last = frames[-1] if frames else None
+        where = f"{last.filename}:{last.lineno}" if last else "<位置未知>"
+    except Exception:
+        where = "<位置未知>"
+    try:
+        name = exc_type.__name__ if isinstance(exc_type, type) else str(exc_type)
+    except Exception:
+        name = "未知异常"
+    msg = redact(exc)
+    return f"{name}（{msg}）@ {where}"
+
+
 def install_excepthooks() -> None:
     """把未捕获异常落到日志。
 
@@ -131,8 +229,12 @@ def install_excepthooks() -> None:
     """
     def _hook(exc_type, exc, tb):
         try:
-            get_logger("crash").error("未捕获异常\n%s",
-                                      _format_exc(exc_type, exc, tb))
+            # 摘要由 _crash_summary 构造，**天然不含正文**（类型+长度+位置）。
+            # 因此这里**不带参**记录 —— 若作为 %s 参数传入，会被本模块的
+            # RedactingFilter 当作"可能带正文的长参数"整体隐去，类型名就丢了
+            # （实测：`未捕获异常：<66 字，内容已隐去>`，连 ValueError 都看不到）。
+            get_logger("crash").error(
+                "未捕获异常：" + _crash_summary(exc_type, exc, tb))
         except Exception:
             pass
         # 保留默认行为，开发态仍能在终端看到
@@ -144,8 +246,9 @@ def install_excepthooks() -> None:
     def _thread_hook(args):
         try:
             get_logger("crash").error(
-                "线程未捕获异常（%s）\n%s", getattr(args, "thread", None),
-                _format_exc(args.exc_type, args.exc_value, args.exc_traceback))
+                "线程未捕获异常（%s）：" % getattr(args, "thread", None)
+                + _crash_summary(args.exc_type, args.exc_value,
+                                 args.exc_traceback))
         except Exception:
             pass
 

@@ -167,8 +167,10 @@ def set_setting(on: bool) -> None:
     try:
         from ..db import dao
         dao.set_setting(SETTING_KEY, "1" if on else "0")
-    except Exception:
-        pass
+    except Exception as exc:
+        # 开关没写进库 = 重启后回到旧值。用户会看到"我明明开了又关了"，
+        # 而界面在本次会话内是生效的，属于最难排查的一类不一致。
+        log.warning("L5 开关未能持久化（%s），重启后将回到原值", exc)
 
 
 def available() -> bool:

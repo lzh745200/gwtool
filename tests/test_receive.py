@@ -247,7 +247,7 @@ class TestValidation:
         assert any("不能为负" in p for p in receive.validate(_rec(pages=-1)))
 
     def test_unknown_doc_type_only_warns(self):
-        """非 15 种法定文种的来文仍可保存（仅提示），不阻断。"""
+        """非 12 种法定文种的来文仍可保存（仅提示），不阻断。"""
         got = receive.validate(_rec(doc_type="内部通报"))
         assert any("法定文种" in p for p in got)
 

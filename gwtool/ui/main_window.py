@@ -797,14 +797,22 @@ class MainWindow(QMainWindow):
         if rep is None:
             warn(self, self._restore_failure_text(err))
             return
-        if rep.missing:
-            warn(self, f"数据库已恢复，但有 {len(rep.missing)} 个附件不在此备份包内：\n"
-                       + self._format_backup_items(rep.missing)
-                       + "\n\n怎么补回来：这些附件的原件在「备份来源电脑」的数据目录 "
-                         "attachments 子目录里，把同名文件复制回本机同一目录即可：\n"
-                         f"    {rep.attachments_dir}\n"
-                         "（恢复不会删除本机已有的附件文件；若来源电脑已不可用，"
-                         "只能从原始出处重新添加。）\n\n请重启程序使数据完全生效。")
+        if rep.missing or rep.warnings:
+            # 降级必须可见：恢复是灾难场景，"恢复成功"四个字不能让用户
+            # 以为一切都好 —— 自动备份没做成、附件没还原成功，都要点名。
+            parts = ["数据库已恢复，但有以下情况需要你知道："]
+            if rep.warnings:
+                parts += ["", "· " + "\n· ".join(rep.warnings)]
+            if rep.missing:
+                parts += ["", f"有 {len(rep.missing)} 个附件不在此备份包内：",
+                          self._format_backup_items(rep.missing),
+                          "", "怎么补回来：这些附件的原件在「备份来源电脑」的数据目录 "
+                              "attachments 子目录里，把同名文件复制回本机同一目录即可：",
+                          f"    {rep.attachments_dir}",
+                          "（恢复不会删除本机已有的附件文件；若来源电脑已不可用，"
+                          "只能从原始出处重新添加。）"]
+            parts += ["", "请重启程序使数据完全生效。"]
+            warn(self, "\n".join(parts))
         else:
             info(self, f"恢复成功（附件 {rep.restored_files} 个已还原），"
                        "请重启程序使数据完全生效。")

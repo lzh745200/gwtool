@@ -35,9 +35,10 @@ _CN_ORD = "一二三四五六七八九十"
 _CITE_RE = re.compile(r"《([^《》]{0,100})》")
 _CITED_DOC_NO_RE = re.compile(
     r"[（(][^）)]{0,40}〔\s*\d{4}\s*〕[^）)]{0,16}号\s*[）)]")
-# 法定公文文种：书名号内以这些词结尾的，判为"公文标题"，引用时须带发文字号
-_CITE_KIND_TAIL = ("决议", "决定", "命令", "公报", "公告", "通告", "意见",
-                   "通知", "通报", "报告", "请示", "批复", "议案", "函", "纪要")
+# 法定公文文种（12 种军队机关公文，见《军队机关公文处理工作条例》第八条）：
+# 书名号内以这些词结尾的判为"公文标题"，引用时须带发文字号。
+_CITE_KIND_TAIL = ("命令", "通令", "决定", "指示", "通知", "通报", "报告",
+                   "请示", "批复", "函", "通告", "纪要")
 # 法规/规章/制度类：引用惯例**不带**发文字号（如《XX条例》《XX办法》）。
 # 必须先排除，否则「凡书名号都要求带字号」会造成大面积误报，反而让用户
 # 关掉整个检查——低误报率是这类提示能活下去的前提。
@@ -126,7 +127,7 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
     lines = [ln.strip() for ln in text.split("\n")]
     title = next((ln for ln in lines if ln), "")
     kind = kind_hint or next(
-        (k for k in ("请示", "报告", "通知", "函", "批复", "通报", "意见", "纪要")
+        (k for k in ("请示", "报告", "通知", "函", "批复", "通报", "指示", "纪要")
          if k in title), "")
 
     # ---- 标题编号链条 ----
@@ -214,7 +215,7 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
         out.append(Finding("info", "请示规则", "请示应一文一事，请核对是否合并多事项"))
 
     # ---- 主送机关 ----
-    if kind in ("通知", "通报", "请示", "报告", "函", "批复", "意见"):
+    if kind in ("通知", "通报", "请示", "报告", "函", "批复", "指示"):
         has_recipient = any(
             ln.endswith(("：", ":")) and len(ln) <= 40 and i <= 6
             for i, ln in enumerate(lines[:8]))

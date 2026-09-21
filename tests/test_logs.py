@@ -58,10 +58,18 @@ class TestRedact:
 
 class TestSetupAndLifecycle:
     def test_setup_is_idempotent(self, log_env):
+        """第二次 setup 不得重复挂 QueueHandler（挂重复=同一日志写多份）。
+
+        恒定不变量是「恰好 1 个 QueueHandler」，而不是"恰好 1 个 handler"
+        —— pytest 的 LogCaptureHandler 也会挂到同一条链上，按 handler 总数
+        断言会随测试框架的变化而误报。
+        """
+        from logging.handlers import QueueHandler
         logs.setup()
         logs.setup()          # 第二次不得重复挂 handler
         lg = logs.get_logger()
-        assert len(lg.handlers) == 1
+        qhs = [h for h in lg.handlers if isinstance(h, QueueHandler)]
+        assert len(qhs) == 1, f"QueueHandler 应恰好 1 个，实为 {len(qhs)}"
 
     def test_log_actually_reaches_disk(self, log_env):
         logs.setup()
@@ -119,7 +127,12 @@ class TestExcepthooks:
             sys.excepthook = original
 
     def test_uncaught_exception_is_written_to_log(self, log_env):
-        """打包版 --windowed 无控制台：未捕获异常必须落到文件，否则不可诊断。"""
+        """打包版 --windowed 无控制台：未捕获异常必须落到文件，否则不可诊断。
+
+        但**只落摘要**：异常消息里经常有被处理的数据（如
+        `ValueError: 无法识别的金额：'<正文片段>'`），原文进日志=正文进日志。
+        排障需要的是"哪类错、在哪一行、数据多大"—— 这三样都不含正文。
+        """
         logs.setup()
         original = sys.excepthook
         try:
@@ -132,8 +145,12 @@ class TestExcepthooks:
             sys.excepthook = original
         logs.shutdown()
         text = logs.log_path().read_text(encoding="utf-8")
-        assert "无人捕获的故障标记-4471" in text
+        # 异常类型必须保留：排障第一步是"什么类型的错"
         assert "ValueError" in text
+        # ⚠️ 消息正文不得出现（隐私红线）：正文标记必须被隐去
+        assert "无人捕获的故障标记-4471" not in text
+        # 摘要必须带"内容已隐去"标记，证明走的是脱敏通道而非漏记
+        assert "内容已隐去" in text
 
     def test_hook_does_not_raise_on_broken_exception(self, log_env):
         """异常自身的 repr 崩掉时，钩子也不能抛——否则遮住真实故障。"""

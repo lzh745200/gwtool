@@ -427,11 +427,14 @@ def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectRe
             if not applied:
                 continue        # 一处都没改成就不写库，避免白刷 updated_time
             # 批量改动没有 Ctrl+Z，写回前留一份快照供「历史版本」逐篇回滚；
-            # 快照只是安全网，它自己失败不该拦住纠错
+            # 快照只是安全网，它自己失败不该拦住纠错 —— 但**必须让用户知道**：
+            # 失败还继续改，等于撤掉安全网再动手，而用户会以为随时能退回改前状态。
             try:
                 dao.add_snapshot(d.id, d.title, d.content_text, reason="批量纠错前")
-            except Exception:
-                pass
+            except Exception as exc:
+                result.failures.append(
+                    (title, "正文已修正，但改动前的回滚快照未保存（"
+                            f"{type(exc).__name__}）：这篇无法用「历史版本」退回改前状态"))
             blocks_stats: dict = {}
             blocks = _apply_to_blocks(d.blocks_json, old_text, confirmed,
                                       stats=blocks_stats)

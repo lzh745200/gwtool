@@ -54,7 +54,10 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import logs
 from .. import paths
+
+log = logs.get_logger("enhance_pack")
 
 SCHEMA = 1
 MANIFEST_NAME = "manifest.json"
@@ -157,8 +160,11 @@ def migrate_layout() -> None:
             if item.name in VALID_KINDS or item == target:
                 continue
             shutil.move(str(item), str(target / item.name))
-    except Exception:
-        pass
+    except Exception as exc:
+        # 老布局（模型文件散在基目录）迁移失败会让后续加载找不到包。
+        # 这里不阻断（调用方还有别的回退路径），但必须留痕 —— 否则表现为
+        # "增强包明明导入了却用不了"，而没有任何线索。
+        log.warning("增强包旧布局迁移失败（%s），部分模型文件可能仍在原位", exc)
 
 
 def _sha256(path: Path) -> str:

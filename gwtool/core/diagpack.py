@@ -70,6 +70,8 @@ def capability_info() -> list:
     "冒烟说没问题、诊断包说有问题"的扯皮。
     """
     rows = []
+    from .. import logs as _logs
+
     for layer, modname in (("L4 神经精排", "csc_neural"), ("L5 语法纠错", "csc_gec")):
         try:
             mod = importlib.import_module(f"gwtool.core.{modname}")
@@ -82,8 +84,11 @@ def capability_info() -> list:
                 pass
             if err:
                 # 这一句能直接回答"为什么 L4 没生效"——外部原本无法区分
-                # "层没开启"与"开启了但没命中"
-                rows.append((f"{layer} · 最近一次错误", err))
+                # "层没开启"与"开启了但没命中"。
+                # ⚠️ 错误串可能携带被处理的数据（如"无法识别的金额：'正文片段'"），
+                # 因此只落长度标记，不落内容 —— 与本模块的隐私纪律一致。
+                rows.append((f"{layer} · 最近一次错误",
+                             _logs.redact(err)))
         except Exception as exc:
             rows.append((layer, f"探测失败：{type(exc).__name__}"))
     try:
@@ -132,7 +137,14 @@ def database_info() -> list:
 
 
 def log_tail(max_bytes: int = LOG_TAIL_BYTES) -> str:
-    """运行日志的末尾若干字节。"""
+    """运行日志的末尾若干字节。
+
+    日志在**写入时**已经过 `logs.RedactingFilter` 脱敏（参数压成长度标记、
+    崩溃摘要不含正文），所以这里读到的是脱敏后的内容。
+    仍保留一层兜底：若历史日志是在过滤器上线前写的，其中的长行
+    有携带正文的风险 —— 对超长行做一次「只保留长度」的降级，
+    宁可少一点排障信息，也不能把正文带出内网。
+    """
     from .. import logs
 
     path = logs.log_path()
@@ -146,7 +158,18 @@ def log_tail(max_bytes: int = LOG_TAIL_BYTES) -> str:
     if len(data) > max_bytes:
         data = data[-max_bytes:]
         prefix = f"（日志较长，此处仅保留最后 {max_bytes // 1024} KB）\n"
-    return prefix + data.decode("utf-8", errors="replace")
+    text = data.decode("utf-8", errors="replace")
+    out = []
+    for line in text.splitlines():
+        # 行长超过 200 字视为可能携带正文（正常诊断行是"状态 + 计数"，
+        # 远短于此；带参日志的参数超过 64 字已被过滤器压成长度标记，
+        # 但历史日志/短标记仍可能溜进来 —— 这里再拦一道）。
+        # 只保留行首 40 字（时间戳/级别/logger 前缀）+ 长度标记。
+        if len(line) > 200:
+            out.append(line[:40] + " " + logs.redact(line))
+        else:
+            out.append(line)
+    return prefix + "\n".join(out)
 
 
 def build_text_report() -> str:

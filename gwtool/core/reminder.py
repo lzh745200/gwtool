@@ -18,7 +18,10 @@
 """
 from __future__ import annotations
 
+from .. import logs
 from ..db import dao
+
+log = logs.get_logger("reminder")
 
 DEFAULT_DUE_SOON_DAYS = 2
 SETTING_ENABLED = "reminder_enabled"
@@ -36,8 +39,9 @@ def enabled() -> bool:
 def set_enabled(flag: bool) -> None:
     try:
         dao.set_setting(SETTING_ENABLED, "1" if flag else "0")
-    except Exception:
-        pass
+    except Exception as exc:
+        # 与 L4/L5 开关同型：写不进去 = 重启后回到旧值，用户会认为"设了不生效"
+        log.warning("督办提醒开关未能持久化（%s），重启后将回到原值", exc)
 
 
 def due_soon_days() -> int:

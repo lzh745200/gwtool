@@ -187,9 +187,9 @@ def test_export_csv_empty(tmp_path):
 
 
 def test_doc_types_reuses_skeletons():
-    """文种清单必须与 15 种法定文种骨架同源，避免两处各写一份而漂移。"""
+    """文种清单必须与 12 种军队机关公文骨架同源，避免两处各写一份而漂移。"""
     kinds = registry.doc_types()
-    assert len(kinds) == 15
-    for expected in ("决议", "决定", "命令（令）", "公报", "公告", "通告", "意见",
-                     "通知", "通报", "报告", "请示", "批复", "议案", "函", "纪要"):
+    assert len(kinds) == 12
+    for expected in ("命令", "通令", "决定", "指示", "通知", "通报", "报告",
+                     "请示", "批复", "函", "通告", "纪要"):
         assert expected in kinds

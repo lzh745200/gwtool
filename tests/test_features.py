@@ -43,9 +43,10 @@ def test_s2t_t2s():
 
 
 # ================================================================ F1 骨架
-def test_skeletons_15_kinds():
+def test_skeletons_12_kinds():
+    """12 种军队机关公文文种（《军队机关公文处理工作条例》第八条）。"""
     from gwtool.core.skeletons import kinds
-    assert len(kinds()) == 15
+    assert len(kinds()) == 12
     for k in kinds():
         assert k.strip()
 
