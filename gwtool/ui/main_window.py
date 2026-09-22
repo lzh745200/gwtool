@@ -7,7 +7,7 @@ from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut, QTe
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
                                QMainWindow, QPushButton, QSplitter, QStatusBar)
 
-from .. import APP_NAME, __version__
+from .. import APP_NAME, __version__, logs
 from ..core.backup import (MODE_AUTO, MODE_MANUAL, create_backup_detailed,
                            list_backups, restore_backup_detailed)
 from ..db import dao
@@ -27,6 +27,8 @@ from .receive_dialog import ReceiveDialog
 from .registry_dialog import RegistryDialog
 from .template_editor import TemplateEditor
 from .widgets import (ask, info, missing_official_fonts, wait_for_threads, warn)
+
+log = logs.get_logger("ui.main")
 
 
 def _fit_to_screen(win, want_w: int, want_h: int) -> None:
@@ -90,6 +92,101 @@ def _wait_all_threads(win) -> list[str]:
     return stuck
 
 
+def _terminate_stuck_threads(win) -> None:
+    """closeEvent 最后的兜底：对等待超时后仍在运行的线程 terminate。
+
+    QThread 存活时进程退出会触发 Qt qFatal（0xC0000409 直接崩掉整个退出
+    流程）；而 Fn/Compile/PdfRender/Booklet 的 run() 都是单次长调用，没有
+    可检查 requestInterruption 的循环，stop() 只能表达中断意图。走到这里
+    说明用户已等满 10 秒并被明确告知"程序将退出"，terminate 可能留下半截
+    输出文件——这个代价可以接受，换回的是退出流程本身不再崩溃。
+    任何异常都必须咽掉：这条路径绝不能拦住 event.accept()。
+    """
+    targets: list = []
+    finder = getattr(win, "findChildren", None)
+    if callable(finder):
+        try:
+            targets.extend(finder(QThread))
+        except (RuntimeError, TypeError):
+            pass
+    app = QApplication.instance()
+    if app is not None:
+        # 对话框自己起的 worker 挂在对话框上（_wait_all_threads 同款范围），
+        # 退出兜底必须覆盖同一批线程，否则对话框线程仍会触发 qFatal。
+        try:
+            dialogs = list(app.findChildren(QDialog))
+        except (RuntimeError, TypeError):
+            dialogs = []
+        for w in dialogs:
+            try:
+                targets.extend(w.findChildren(QThread))
+            except RuntimeError:
+                continue
+    seen: set[int] = set()
+    for th in targets:
+        if id(th) in seen:
+            continue
+        seen.add(id(th))
+        try:
+            if th.isRunning():
+                th.terminate()
+                th.wait(1500)
+        except RuntimeError:
+            continue
+        except Exception:
+            pass  # 退出路径上任何意外都不许抛出
+
+
+def _run_bg(fn, *, on_ok=None, on_error=None, on_progress=None,
+            want_progress=False, parent=None):
+    """把耗时调用丢进后台线程执行，结果经信号回到主线程；返回 worker。
+
+    **调用方必须持有返回的 worker 引用**（`self._xxx_worker = _run_bg(...)`）：
+    Python 侧一旦被回收，QThread 对象可能在线程还没跑完时就被销毁。
+
+    为什么统一走这里：备份/恢复、全库打包（`exporter.build`）、数据库维护
+    （VACUUM + 全库重分词）实测都是秒级到十几秒。老实现全部在主线程同步
+    调用，期间窗口**完全不响应** —— 用户以为死机，于是强杀进程，而备份或
+    迁移正跑到一半，那才是真正危险的时刻。放进后台后主线程继续跑事件循环，
+    状态栏可以持续显示"正在做什么"。
+
+    需要"失败原因按原文分流"的路径（备份/恢复）请用 `_guarded` 包住 fn，
+    让异常变成 `(None, 错误文本)` 由 `on_ok` 处理 —— worker 的 `failed`
+    通道会给用户文案（经 errmsg 翻译），原文只进日志。
+    """
+    from PySide6.QtCore import QObject
+
+    from .workers import FnWorker
+
+    # 轻量替身（测试里的 _Win）不是 QObject，不能充当 parent；此时退化为
+    # 无父线程，由调用方持有引用保证生命周期。
+    kwargs = {"parent": parent} if isinstance(parent, QObject) else {}
+    worker = FnWorker(fn, want_progress=want_progress, **kwargs)
+    if on_ok is not None:
+        worker.ok.connect(on_ok)
+    if on_error is not None:
+        worker.failed.connect(on_error)
+    if on_progress is not None:
+        worker.progress.connect(on_progress)
+    worker.start()
+    return worker
+
+
+def _status_msg(win, text: str, ms: int = 0) -> None:
+    """往状态栏发一条消息；没有状态栏的轻量替身静默跳过。
+
+    后台任务把"正在做什么"写在状态栏：这是长任务期间用户唯一的进度来源，
+    但**不能因为状态栏缺失就让操作本身失败**，故异常一律咽掉。
+    """
+    status = getattr(win, "status", None)
+    if status is None:
+        return
+    try:
+        status.showMessage(text, ms)
+    except Exception:
+        pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -132,10 +229,28 @@ class MainWindow(QMainWindow):
             timer.start(int(hours * 3600 * 1000))
 
     def _scheduled_backup(self):
-        """定时备份走自动档：附件预算小，不卡界面；有附件没随包时在状态栏留痕。"""
-        try:
-            rep = create_backup_detailed(note="定时备份", mode=MODE_AUTO)
-        except Exception:
+        """定时备份走自动档：附件预算小，不卡界面；有附件没随包时在状态栏留痕。
+
+        打包整库 + 复制附件是秒级操作，且**触发时机由定时器决定**：用户
+        此刻可能正在编辑器里打字，不能因为"备份到点了"就让输入卡住。
+        故放后台线程，结果只走状态栏（不用模态框打断他正在做的事）。
+        """
+        worker = getattr(self, "_scheduled_backup_worker", None)
+        if worker is not None and worker.isRunning():
+            return          # 上一轮还没跑完：跳过本轮，不排队堆积
+        self._scheduled_backup_worker = _run_bg(
+            lambda: self._guarded(
+                lambda: create_backup_detailed(note="定时备份", mode=MODE_AUTO)),
+            on_ok=self._scheduled_backup_done, parent=self)
+
+    def _scheduled_backup_done(self, result):
+        rep, err = result
+        if rep is None:
+            # 自动档失败绝不弹模态框：用户没主动操作，弹窗只会打断他。
+            # 但必须留痕（状态栏 + 日志）——"定时备份从来没成功过"这种事，
+            # 用户往往在真需要恢复时才发现。
+            log.warning("定时备份失败：%s", err)
+            self.status.showMessage(f"定时备份未完成：{err}（详见运行日志）", 15000)
             return
         if rep.excluded:
             self.status.showMessage(
@@ -410,21 +525,25 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".zip"):
             path += ".zip"
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            rep = exporter.build(exporter.ExportRequest(
+        # 全库打包（读全部文档 + 复制附件 + 逐个算 sha256）实测 1.5–2.1s@3000 篇：
+        # 放后台线程，期间状态栏报进度，窗口仍可交互。
+        _status_msg(self, "正在打包移交包…")
+        self._handover_worker = _run_bg(
+            lambda: self._guarded(lambda: exporter.build(exporter.ExportRequest(
                 out_path=path, category_id=category_id,
                 include_attachments=include_att,
-                note=f"由 {choice} 导出"))
-        except ValueError as exc:
-            warn(self, str(exc))
-            return
-        except OSError as exc:
-            warn(self, f"导出失败：{exc}")
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
+                note=f"由 {choice} 导出"))),
+            on_ok=lambda result: self._handover_done(path, result),
+            parent=self)
 
+    def _handover_done(self, path: str, result):
+        rep, err = result
+        if rep is None:
+            log.warning("移交包导出失败：%s", err)
+            _status_msg(self, "导出未完成", 8000)
+            warn(self, f"导出失败：{err}")
+            return
+        _status_msg(self, "移交包已生成", 5000)
         tail = (f"，其中 {rep['excluded']} 个附件因超限未纳入（清单已注明原因）"
                 if rep["excluded"] else "")
         info(self, f"移交包已生成：\n{path}\n\n"
@@ -478,18 +597,28 @@ class MainWindow(QMainWindow):
                          f"过程中需要约 2 倍库体积的临时磁盘空间，"
                          f"请勿中途关闭程序。\n\n是否开始？"):
             return
-        # VACUUM 是同步且不可中断的：给等待光标，并保证异常路径也复位
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            rep = dbhealth.maintenance()
-        except Exception as exc:
-            warn(self, f"维护失败：{exc}")
+        # VACUUM + 全库重新分词实测 2.4–3.4s@3000 篇，且不可中断：必须放后台，
+        # 否则维护期间窗口完全无响应，用户以为死机就去强杀进程 —— 而 VACUUM
+        # 正写到一半，那是真正可能损坏库的时刻。
+        _status_msg(self, "正在维护数据库（VACUUM + 重建索引）…")
+        self._maintenance_worker = _run_bg(
+            lambda: self._guarded(dbhealth.maintenance),
+            on_ok=self._maintenance_done, parent=self)
+
+    def _maintenance_done(self, result):
+        from ..core import dbhealth
+
+        rep, err = result
+        if rep is None:
+            log.warning("数据库维护失败：%s", err)
+            _status_msg(self, "数据库维护未完成", 8000)
+            warn(self, f"维护失败：{err}")
             return
-        finally:
-            QApplication.restoreOverrideCursor()
         if not rep.get("ok"):
+            _status_msg(self, "数据库维护未完成", 8000)
             warn(self, rep.get("reason", "维护失败"))
             return
+        _status_msg(self, "数据库维护完成", 5000)
         fts = rep.get("fts_rows", -1)
         text = (f"维护完成。\n\n"
                 f"占用：{dbhealth.human_size(rep['before'])} → "
@@ -747,18 +876,22 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _guarded(fn):
-        """在等待光标下跑一段可能耗时几秒的备份/恢复，返回 (结果, 错误文本)。
+        """跑 fn()，把任何异常变成 `(None, 错误文本)`，**绝不向外抛**；返回二元组。
 
-        光标必须在弹窗**之前**复位：override cursor 是全应用生效的，
-        带着沙漏弹模态框会让用户以为程序还卡着。
+        为什么不让异常直接冒到 worker 的 `failed` 通道：备份/恢复的失败文案
+        要按**原文**分流（`_restore_failure_text` 按 "password"/"占用"/"不完整"
+        判定是口令错、库被占用还是包损坏），而 `failed` 通道给的是经 errmsg
+        翻译的用户话术 —— 翻过之后这层判定就失效了，用户会丢掉"包是好的、
+        等任务结束重试即可"这个关键区别。
+
+        注：等待光标**不在这里设置**。这些调用已移入后台线程，而
+        `setOverrideCursor` 是 GUI 线程专属操作，跨线程调用未定义；进度
+        改由状态栏承载（这也正是"操作期间窗口仍可交互"的前提）。
         """
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             return fn(), ""
         except Exception as exc:
             return None, str(exc)
-        finally:
-            QApplication.restoreOverrideCursor()
 
     def _do_backup(self, encrypted: bool = False):
         pw = ""
@@ -770,13 +903,30 @@ class MainWindow(QMainWindow):
                 if ok:
                     warn(self, "口令至少 4 位。")
                 return
+        worker = getattr(self, "_backup_worker", None)
+        if worker is not None and worker.isRunning():
+            info(self, "上一次备份仍在进行，请稍候。")
+            return
+        # 整库打包 + 逐个附件复制实测秒级：放后台，期间窗口可交互。
+        # 结果一律经 _guarded 的 (结果, 错误文本) 二元组回来，保持
+        # 「失败原因按原文分流」的能力（见 _guarded 与 _restore_failure_text）。
+        _status_msg(self, "正在备份（整库 + 附件）…")
+        self._backup_worker = _run_bg(
+            lambda: self._guarded(lambda: create_backup_detailed(
+                note="手动备份", password=pw, mode=MODE_MANUAL)),
+            on_ok=lambda result: self._backup_done(result, password=pw),
+            parent=self)
+
+    def _backup_done(self, result, password: str = ""):
         from ..core.attachments import human_size
-        rep, err = self._guarded(lambda: create_backup_detailed(
-            note="手动备份", password=pw, mode=MODE_MANUAL))
+        rep, err = result
         if rep is None:
+            log.warning("手动备份失败：%s", err)
+            _status_msg(self, "备份未完成", 8000)
             warn(self, f"备份失败：{err}")
             return
-        msg = f"备份成功：\n{rep.path}" + ("（已 AES 加密）" if pw else "")
+        _status_msg(self, "备份完成", 5000)
+        msg = f"备份成功：\n{rep.path}" + ("（已 AES 加密）" if password else "")
         if rep.excluded:
             # 绝不静默丢附件：当场告诉用户哪些没随包、为什么、去哪儿改上限
             limit_text = "不限制" if rep.limit_bytes < 0 else human_size(rep.limit_bytes)
@@ -828,10 +978,34 @@ class MainWindow(QMainWindow):
                 return
         if not ask(self, "恢复将覆盖当前全部数据（恢复前会自动再备份一次），确定继续？"):
             return
-        rep, err = self._guarded(lambda: restore_backup_detailed(path, password=pw))
+        # 恢复放后台线程执行（解包 + 自动备份 + 还原附件都是秒级，且最怕
+        # "用户以为死机去强杀"——恢复写库到一半被中断比慢几秒危险得多）。
+        #
+        # 但必须先关掉**主线程自己**的数据库连接：restore_backup_detailed 的
+        # 占用检查（dbconn.live_connection_threads）会点名列其它线程持有的
+        # 连接，只排除"当前线程"（此刻是 worker）。主线程若还攥着一条连接，
+        # 就会被自己挡住 —— 实测报"数据库正被后台任务占用（MainThread）"。
+        # 这次的 dao 调用会自动重开连接，指向恢复后的新库。
+        from ..db import connection as _dbconn
+
+        try:
+            _dbconn.close_current_thread()
+        except Exception:
+            pass
+        _status_msg(self, "正在恢复备份…")
+        self._restore_worker = _run_bg(
+            lambda: self._guarded(
+                lambda: restore_backup_detailed(path, password=pw)),
+            on_ok=self._restore_done, parent=self)
+
+    def _restore_done(self, result):
+        rep, err = result
         if rep is None:
+            log.warning("恢复备份失败：%s", err)
+            _status_msg(self, "恢复未完成", 8000)
             warn(self, self._restore_failure_text(err))
             return
+        _status_msg(self, "恢复完成", 8000)
         if rep.missing or rep.warnings:
             # 降级必须可见：恢复是灾难场景，"恢复成功"四个字不能让用户
             # 以为一切都好 —— 自动备份没做成、附件没还原成功，都要点名。
@@ -942,7 +1116,17 @@ class MainWindow(QMainWindow):
                            + "\n\n如果刚在生成 PDF/汇编，请退出后检查输出目录是否完整。")
             except Exception:
                 pass
+            # 用户已确认退出：对超时线程 terminate 兜底，避免 QThread 存活时
+            # 进程退出触发 Qt qFatal（0xC0000409）。必须在 accept() 之前。
+            _terminate_stuck_threads(self)
         if self._tts_worker is not None and self._tts_worker.isRunning():
             self._tts_worker.stop()
             self._tts_worker.wait(2000)
+            if self._tts_worker.isRunning():
+                # SAPI 朗读卡在 COM 调用里时 stop/wait 都唤不回，同款兜底。
+                try:
+                    self._tts_worker.terminate()
+                    self._tts_worker.wait(1500)
+                except Exception:
+                    pass
         event.accept()

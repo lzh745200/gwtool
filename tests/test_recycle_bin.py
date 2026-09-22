@@ -314,7 +314,7 @@ def test_recycle_bin_dialog_restore_and_purge(tmp_db, qapp):
         dlg.close()
 
 
-def test_library_panel_delete_goes_to_bin(tmp_db, qapp, monkeypatch):
+def test_library_panel_delete_goes_to_bin(tmp_db, qapp, monkeypatch, wait_bg):
     """资料库右键删除 = 移入回收站，面板上随即消失。"""
     from gwtool.ui.library_panel import LibraryPanel
 
@@ -324,6 +324,8 @@ def test_library_panel_delete_goes_to_bin(tmp_db, qapp, monkeypatch):
         assert panel.doc_list.count() == 1
         panel.doc_list.item(0).setSelected(True)
         panel._delete_selected()
+        assert wait_bg(panel._delete_worker, cond=lambda: panel.doc_list.count() == 0), \
+            "删除任务未在限期内完成并刷新列表"
         assert panel.doc_list.count() == 0, "删除后仍显示在列表里"
         assert dao.count_deleted_documents() == 1
         assert dao.get_document(did) is not None

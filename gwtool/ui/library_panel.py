@@ -381,6 +381,14 @@ class LibraryPanel(QWidget):
         self.reload()                # 可能恢复了材料，分类计数一并刷新
 
     def _delete_selected(self):
+        """把选中材料移入回收站（后台线程执行）。
+
+        每篇删除都要更新 FTS 索引、写回收站记录；选几十篇时逐篇同步执行
+        会把面板冻住。放后台线程并在完成后刷新列表 —— 删除期间面板仍可
+        滚动（用户能确认自己选的是不是都要删）。
+        """
+        from .workers import FnWorker
+
         items = self.doc_list.selectedItems()
         if not items:
             return
@@ -388,12 +396,28 @@ class LibraryPanel(QWidget):
                          "移入后不再出现在列表、计数与全文检索里，"
                          "可在「回收站」中恢复；彻底删除才会真删数据与附件。"):
             return
-        failed: list[str] = []
-        for item in items:
-            try:
-                dao.delete_document(item.data(Qt.UserRole))
-            except Exception as exc:
-                failed.append(f"{item.text()}：{exc}")
+        targets = [(item.data(Qt.UserRole), item.text()) for item in items]
+        worker = getattr(self, "_delete_worker", None)
+        if worker is not None and worker.isRunning():
+            warn(self, "上一次删除仍在进行，请稍候。")
+            return
+
+        def work():
+            failed: list[str] = []
+            for did, label in targets:
+                try:
+                    dao.delete_document(did)
+                except Exception as exc:
+                    failed.append(f"{label}：{exc}")
+            return failed
+
+        w = FnWorker(work, parent=self)
+        w.ok.connect(self._delete_done)
+        w.failed.connect(lambda msg: warn(self, f"删除失败：{msg}"))
+        self._delete_worker = w
+        w.start()
+
+    def _delete_done(self, failed: list):
         self._reload_docs()
         if failed:
             warn(self, "以下材料未能移入回收站：\n" + "\n".join(failed[:5]))

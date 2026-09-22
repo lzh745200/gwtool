@@ -154,13 +154,13 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         row.addWidget(self.file_path, 1)
         row.addWidget(btn_pick)
         v.addLayout(row)
-        btn_run = QPushButton("开始体检")
-        btn_run.clicked.connect(self._run)
+        self.btn_run = QPushButton("开始体检")
+        self.btn_run.clicked.connect(self._run)
         self.btn_export = QPushButton("导出报告…")
         self.btn_export.setToolTip("把体检结果导出为规范 DOCX 报告，可归档或转交拟稿人整改")
         self.btn_export.clicked.connect(self._export_report)
         ops = QHBoxLayout()
-        ops.addWidget(btn_run)
+        ops.addWidget(self.btn_run)
         ops.addWidget(self.btn_export)
         ops.addStretch(1)
         v.addLayout(ops)
@@ -178,18 +178,50 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
             self.rb_file.setChecked(True)
 
     def _run(self):
-        findings: list[inspector.Finding] = []
+        """开始体检（后台线程执行，见 FnWorker）。
+
+        体检要把整篇文档过一遍 20+ 条规则（docx 路径还要先解析包），
+        放主线程会在这几秒里冻住对话框 —— 而这个对话框恰恰是用户
+        在等结果的地方，冻住会让他以为是卡死了。
+        """
+        from .workers import FnWorker
+
         if self.rb_file.isChecked():
             path = self.file_path.text().strip()
             if not Path(path).exists():
                 warn(self, "请选择有效的 docx 文件")
                 return
-            findings = inspector.inspect_docx(path)
+            source = Path(path).name
+
+            def work():
+                return inspector.inspect_docx(path)
         else:
-            findings = inspector.inspect_text(self._get_text())
+            # 取值必须在主线程：QTextEdit 不是线程安全的
+            text = self._get_text()
+            source = "当前编辑文档"
+
+            def work():
+                return inspector.inspect_text(text)
+
+        worker = getattr(self, "_inspect_worker", None)
+        if worker is not None and worker.isRunning():
+            warn(self, "上一次体检仍在进行，请稍候。")
+            return
+        self.btn_run.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self.lbl_stat.setText("体检中…")
+        self.result_list.clear()
+        w = FnWorker(work, parent=self)
+        w.ok.connect(lambda findings: self._run_done(findings, source))
+        w.failed.connect(self._run_failed)
+        self._inspect_worker = w
+        w.start()
+
+    def _run_done(self, findings, source: str):
+        self.btn_run.setEnabled(True)
+        self.btn_export.setEnabled(True)
         self._findings = findings
-        self._source = (Path(self.file_path.text().strip()).name
-                        if self.rb_file.isChecked() else "当前编辑文档")
+        self._source = source
         self.result_list.clear()
         colors = {"error": theme.DANGER, "warn": theme.WARN, "info": theme.INFO}
         for f in findings:
@@ -205,6 +237,14 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
             f"体检完成：问题 {n_err} 项、建议 {n_warn} 项、提示 {len(findings) - n_err - n_warn} 项。"
             + ("" if findings else "未发现问题。"))
 
+    def _run_failed(self, msg: str):
+        # 失败必须解锁按钮并改掉"体检中…"：否则用户面对一个永远转着的
+        # 对话框，既不知道失败、也点不了重试。
+        self.btn_run.setEnabled(True)
+        self.btn_export.setEnabled(True)
+        self.lbl_stat.setText("体检未完成")
+        warn(self, msg)
+
     def _export_report(self):
         if not self._findings and not self.lbl_stat.text():
             warn(self, "请先点击「开始体检」。")
@@ -217,23 +257,50 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
             "Word 文档 (*.docx);;Excel 整改清单 (*.xlsx)")
         if not path:
             return
-        from ..core import report
-        # 以后缀为准：DOCX 适合归档流转（有正式版式），
-        # xlsx 适合逐条整改销号（可自行加"处理意见"列筛选）
-        try:
+        if not path.lower().endswith((".docx", ".xlsx")):
+            path += ".docx"
+        # 导出要排版全文 + 逐条渲染正式版式，秒级操作：放后台，导出期间
+        # 按钮置灰防重复点击，失败/成功都复位 —— 不能让用户对着一个
+        # 看起来还能点的按钮反复触发。
+        findings = list(self._findings)
+        source = self._source
+        from .workers import FnWorker
+
+        def work():
+            from ..core import report
+            # 以后缀为准：DOCX 适合归档流转（有正式版式），
+            # xlsx 适合逐条整改销号（可自行加"处理意见"列筛选）
             if path.lower().endswith(".xlsx"):
-                n = report.export_report_xlsx(self._findings, path,
-                                              source_name=self._source)
-                info(self, f"体检整改清单已导出：\n{path}\n\n"
-                           f"共 {n} 条，可直接在表中登记处理意见与备注。")
-                return
-            if not path.lower().endswith(".docx"):
-                path += ".docx"
-            report.export_report(self._findings, path, source_name=self._source)
-        except OSError as exc:
-            warn(self, f"导出失败：{exc}")
+                return ("xlsx", report.export_report_xlsx(
+                    findings, path, source_name=source))
+            report.export_report(findings, path, source_name=source)
+            return ("docx", report.verdict(findings))
+
+        worker = getattr(self, "_export_worker", None)
+        if worker is not None and worker.isRunning():
+            warn(self, "上一次导出仍在进行，请稍候。")
             return
-        info(self, f"体检报告已导出：\n{path}\n\n结论：{report.verdict(self._findings)}")
+        self.btn_export.setEnabled(False)
+        self.lbl_stat.setText("正在导出体检报告…")
+        w = FnWorker(work, parent=self)
+        w.ok.connect(lambda r: self._export_report_done(path, r))
+        w.failed.connect(self._export_report_failed)
+        self._export_worker = w
+        w.start()
+
+    def _export_report_done(self, path: str, result):
+        self.btn_export.setEnabled(True)
+        kind, payload = result
+        if kind == "xlsx":
+            info(self, f"体检整改清单已导出：\n{path}\n\n"
+                       f"共 {payload} 条，可直接在表中登记处理意见与备注。")
+            return
+        info(self, f"体检报告已导出：\n{path}\n\n结论：{payload}")
+
+    def _export_report_failed(self, msg: str):
+        self.btn_export.setEnabled(True)
+        self.lbl_stat.setText("体检报告导出未完成")
+        warn(self, f"导出失败：{msg}")
 
 
 # ================================================================ 批量替换
@@ -1308,12 +1375,47 @@ class SecurityDialog(QDialog):
              else f"当前没有已安装的{label}增强包。")
 
     def _rebuild_fts(self):
+        """重建全文索引（后台线程 + 阶段进度）。
+
+        老实现三处问题，一并在这里收口：
+        1. `dao.rebuild_fts()` 在主线程直调：万篇库要逐条分词，界面整窗冻结；
+        2. **整段没有 try/except**：失败时点按钮零提示，用户只知道"点了没反应"
+           （同文件的 `_sweep_attachments` 一直是有 try/warn 的）；
+        3. 重建结果为 0 条时静默显示"索引已重建"—— 与"索引坏了"无从区分。
+        """
         if not ask(self, "重建全文索引可能需要片刻（与资料库大小相关），继续？"):
             return
         from ..db import dao as dao_mod
-        counts = dao_mod.rebuild_fts()
-        self.lbl_fts.setText(
-            f"索引已重建：资料 {counts['documents']} 篇、句式 {counts['phrases']} 条。")
+        from .workers import FnWorker
+
+        worker = getattr(self, "_fts_worker", None)
+        if worker is not None and worker.isRunning():
+            warn(self, "重建仍在进行，请稍候。")
+            return
+        self.lbl_fts.setText("正在重建全文索引…")
+        w = FnWorker(dao_mod.rebuild_fts, parent=self, want_progress=True)
+        w.progress.connect(self.lbl_fts.setText)
+        w.ok.connect(self._rebuild_fts_done)
+        w.failed.connect(self._rebuild_fts_failed)
+        self._fts_worker = w
+        w.start()
+
+    def _rebuild_fts_done(self, counts):
+        docs = int((counts or {}).get("documents", 0) or 0)
+        phrases = int((counts or {}).get("phrases", 0) or 0)
+        self.lbl_fts.setText(f"索引已重建：资料 {docs} 篇、句式 {phrases} 条。")
+        if docs == 0 and phrases == 0:
+            # "重建成功"但一条都没有：必须说清是资料库本来就是空的，
+            # 否则用户会把"检索不到任何东西"当成检索功能坏了。
+            warn(self, "索引已重建，但当前**没有可索引的内容**"
+                       "（资料 0 篇、句式 0 条）。\n\n"
+                       "如果资料库并非空的，请生成诊断包反馈；"
+                       "否则请先通过「导入材料」把公文入库。")
+
+    def _rebuild_fts_failed(self, msg: str):
+        self.lbl_fts.setText("索引重建未完成")
+        log.warning("重建全文索引失败：%s", msg)
+        warn(self, f"重建索引失败：{msg}")
 
     def _sweep_attachments(self):
         """清掉彻底删除材料时残留（文件被占用没删掉）的孤儿附件。"""

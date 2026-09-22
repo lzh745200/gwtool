@@ -77,3 +77,41 @@ def qapp():
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture()
+def wait_bg(qapp):
+    """等后台 worker 收工，并驱动事件循环把结果信号投递给槽函数。
+
+    为什么不能只 `worker.wait()`：`ok`/`failed` 是**队列连接**，wait() 只
+    保证线程退出，槽函数仍排在事件队列里没执行 —— 断言会读到"什么都没
+    发生"的假失败。
+
+    N3 把备份/恢复、全库打包、数据库维护、体检与报告导出移入后台线程后，
+    "等后台任务"从个别用例的局部需求变成了通用需求，故上提到公共夹具：
+    各文件自己写一份 `_drain` 的写法已经出现分叉（有的只 wait 不 pump）。
+
+    用法：
+        win._do_backup()
+        assert wait_bg(getattr(win, "_backup_worker", None))
+        # 或带判定条件
+        wait_bg(worker, cond=lambda: shown)
+    """
+    import time
+
+    def _wait(worker, cond=None, timeout_ms=20000):
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            qapp.processEvents()
+            idle = worker is None or not worker.isRunning()
+            if idle and (cond is None or cond()):
+                for _ in range(3):      # 把队列里剩下的槽跑完再返回
+                    qapp.processEvents()
+                return True
+            if time.monotonic() > deadline:
+                return False
+            if worker is not None:
+                worker.wait(20)
+            time.sleep(0.01)
+
+    return _wait

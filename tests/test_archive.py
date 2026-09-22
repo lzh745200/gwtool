@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from gwtool.core import archive
 from gwtool.db import dao
 
@@ -95,6 +97,54 @@ class TestBatchArchive:
 
     def test_retention_choices_cover_regulation(self):
         assert set(archive.RETENTION_CHOICES) == {"永久", "30年", "10年"}
+
+    # ---- P3：整批单事务 ------------------------------------------------
+    def test_batch_archive_is_atomic_on_failure(self, tmp_db):
+        """中途失败必须**整批回滚**，不能留下"一半已归档"的台账。
+
+        归档语义是整批成立：移交清单写着 3 件、台账只落 2 件，比整批失败
+        难收拾得多（实物卷已经按清单装订）。逐行 commit 的旧实现下，前两行
+        会先落盘 —— 那时本用例为红。
+        """
+        ids = [dao.add_receive(_rec(title=f"第{i}件"))
+               for i in range(1, 4)]
+        rows = [dao.get_receive(i) for i in ids]
+        # 让第 3 行的某个字段无法绑定到 SQL 参数 → 触发 executemany 中途失败
+        rows[-1].pages = object()
+
+        with pytest.raises(Exception):
+            archive.batch_archive(rows, "XX局", "永久", year="2026")
+
+        for rid in ids:
+            got = dao.get_receive(rid)
+            assert got.archive_no == "", f"第 {rid} 件被落盘了，整批回滚失效"
+            assert got.status != "已归档"
+
+    def test_batch_archive_does_not_use_per_row_commit(self, tmp_db, monkeypatch):
+        """批量归档不得再走逐行提交的 `dao.update_receive`。
+
+        真正的原子性由 `test_batch_archive_is_atomic_on_failure` 断言；这里
+        守住"没有退回逐行接口"这条结构性回归 —— `update_receive` 自带
+        `conn.commit()`，N 次调用即 N 次提交。
+
+        （不用 SQLite trace 回调数 UPDATE 语句：executemany 同样会按参数
+        逐个回调，数出来仍是 N 条，区分不了两种实现。）
+        """
+        calls: list[int] = []
+        real = dao.update_receive
+
+        def spy(r):
+            calls.append(r.id)
+            return real(r)
+
+        monkeypatch.setattr(dao, "update_receive", spy)
+        ids = [dao.add_receive(_rec(title=f"第{i}件")) for i in range(1, 4)]
+        rows = [dao.get_receive(i) for i in ids]
+        rep = archive.batch_archive(rows, "XX局", "永久", year="2026")
+        assert rep["archived"] == 3 and rep["skipped"] == 0
+        assert calls == [], "批量归档仍在逐行调用 update_receive（每行一次提交）"
+        for rid in ids:
+            assert dao.get_receive(rid).status == "已归档"
 
 
 class TestSummary:

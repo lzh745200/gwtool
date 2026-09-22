@@ -112,8 +112,9 @@ def wait_for_threads(owner, timeout_ms: int = 10000) -> list:
     "QThread: Destroyed while thread is still running"）。
     触发场景很日常：纠错/查重/PDF 渲染还没跑完就关窗口或关对话框。
 
-    对支持的 worker 先调 stop()（协作式中断），再 wait()；超时也不强行终止
-    （terminate() 会留下半截文件），而是把线程名交给调用方去提示用户。
+    对支持的 worker 先调 stop()（协作式中断），再 wait()；超时的线程交给
+    调用方提示用户，并在 closeEvent 的退出路径上由调用方决定是否 terminate
+    （见下）。
     """
     from PySide6.QtCore import QThread
     stuck: list[str] = []

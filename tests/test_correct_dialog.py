@@ -89,7 +89,7 @@ def _drain(dlg):
         dlg._worker.wait(15000)
 
 
-def test_dialog_full_flow(tmp_db, qapp, monkeypatch):
+def test_dialog_full_flow(tmp_db, qapp, monkeypatch, wait_bg):
     from PySide6.QtWidgets import QDialog, QMessageBox
     monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
@@ -135,6 +135,7 @@ def test_dialog_full_flow(tmp_db, qapp, monkeypatch):
         "gwtool.ui.correct_dialog.QFileDialog.getSaveFileName",
         staticmethod(lambda *a, **k: (str(out), "")))
     dlg.export_txt()
+    assert wait_bg(dlg._export_worker), "TXT 导出任务未在限期内完成"
     assert out.exists()
     content = out.read_text(encoding="utf-8")
     assert "部署" in content and "布署" not in content
@@ -150,7 +151,7 @@ def test_dialog_full_flow(tmp_db, qapp, monkeypatch):
     _drain(dlg)
 
 
-def test_dialog_file_mode_preserves_structure(tmp_db, qapp, monkeypatch):
+def test_dialog_file_mode_preserves_structure(tmp_db, qapp, monkeypatch, wait_bg):
     """文件来源：标题/表格结构经树转换保留，修正后导出 DOCX 可重开。"""
     from PySide6.QtWidgets import QDialog, QMessageBox
     monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
@@ -205,6 +206,7 @@ def test_dialog_file_mode_preserves_structure(tmp_db, qapp, monkeypatch):
         "gwtool.ui.correct_dialog.QFileDialog.getSaveFileName",
         staticmethod(lambda *a, **k: (str(out), "")))
     dlg.export_docx()
+    assert wait_bg(dlg._export_worker), "导出任务未在限期内完成"
     assert out.exists() and out.stat().st_size > 5000
     dd = DX(str(out))
     cells = [c.text for tb in dd.tables for row in tb.rows for c in row.cells]

@@ -71,17 +71,20 @@ def batch_archive(rows: list, prefix: str, retention: str,
 
     只处理**尚无档号**的记录：已有档号的重复编目会让档案号错乱，
     而档案号一旦错乱，实物卷与台账就再也对不上了。
+
+    整批**单事务**提交（`dao.update_receive_many`）：归档是"这一批一起成立"
+    的语义 —— 移交清单写着 50 件、台账只落 30 件，比整批失败更难收拾。
+    逐行提交还会在千件级别退化成千次 fsync。
     """
     stamp = archive_date or date.today().isoformat()
-    done = 0
-    skipped = 0
+    pending = []
     for r, no in suggest_batch(rows, prefix, year=year):
         r.archive_no = no
         r.retention = retention
         r.archive_date = stamp
         r.status = "已归档"
-        dao.update_receive(r)
-        done += 1
+        pending.append(r)
+    done = dao.update_receive_many(pending)
     skipped = len(rows) - done
     return {"archived": done, "skipped": skipped, "date": stamp,
             "retention": retention}

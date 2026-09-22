@@ -49,17 +49,40 @@ class FnWorker(QThread):
 
     用于纠错检查、查重、对比、PDF 预览渲染等原本阻塞主线程的调用，
     结果经 ok 信号回到主线程（回调里只做 UI 更新）。
+
+    `want_progress=True` 时额外把 `progress_cb=<进度文本信号>` 注入给被调
+    函数：供「备份/恢复、全库打包、数据库维护、重建索引」这类**有阶段可报**
+    的长任务把"正在做什么"回传到状态栏 —— 它们实测秒级到十秒级，光有
+    结果信号，用户在整个过程中看到的仍是一个不动的窗口。
     """
     ok = Signal(object)
     failed = Signal(str)
+    progress = Signal(str)
 
-    def __init__(self, fn, *args, parent=None, **kwargs):
+    def __init__(self, fn, *args, parent=None, want_progress=False, **kwargs):
         super().__init__(parent)
         self._fn, self._args, self._kwargs = fn, args, kwargs
+        self._want_progress = bool(want_progress)
+
+    def stop(self):
+        """请求中断（协作式）。
+
+        Fn/Compile/PdfRender/Booklet 四类 worker 的 run() 都是**单次长调用**
+        （compile_docx / render_pdf / 任意 fn），没有可插入检查点的循环，
+        故这里只能表达中断意图（requestInterruption）；真正兜住"退出时
+        线程还活着"的是 closeEvent 里对超时线程的 terminate —— 两层合起来
+        才能避免 QThread 存活时进程退出触发 Qt qFatal（0xC0000409）。
+        """
+        self.requestInterruption()
 
     def run(self):
         try:
-            self.ok.emit(self._fn(*self._args, **self._kwargs))
+            if self._want_progress:
+                out = self._fn(*self._args, progress_cb=self.progress.emit,
+                               **self._kwargs)
+            else:
+                out = self._fn(*self._args, **self._kwargs)
+            self.ok.emit(out)
         except Exception as exc:
             _log_exc("后台任务")
             self.failed.emit(errmsg.friendly(exc, action="后台任务"))
@@ -148,6 +171,10 @@ class CompileWorker(QThread):
             material_titles=material_titles,
             include_sources=bool(include_sources))
 
+    def stop(self):
+        """请求中断（协作式）；单次长调用无检查点，说明见 FnWorker.stop。"""
+        self.requestInterruption()
+
     def run(self):
         try:
             self.progress.emit("正在合并材料并生成公文…")
@@ -172,6 +199,10 @@ class PdfRenderWorker(QThread):
         self.extra_paths = list(extra_paths)
         self.template = template
         self.out_pdf = out_pdf
+
+    def stop(self):
+        """请求中断（协作式）；单次长调用无检查点，说明见 FnWorker.stop。"""
+        self.requestInterruption()
 
     def run(self):
         try:
@@ -201,6 +232,10 @@ class BookletWorker(QThread):
         super().__init__(parent)
         self.src_pdf = src_pdf
         self.out_pdf = out_pdf
+
+    def stop(self):
+        """请求中断（协作式）；单次长调用无检查点，说明见 FnWorker.stop。"""
+        self.requestInterruption()
 
     def run(self):
         try:

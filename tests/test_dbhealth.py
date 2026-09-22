@@ -200,14 +200,23 @@ class TestWiring:
         assert "_db_check_started" in show_block[:900], (
             "showEvent 可能被多次触发（最小化恢复等），必须只启动一次")
 
-    def test_maintenance_cursor_always_restored(self):
-        """等待光标必须放在 try/finally 里复位，否则异常后界面永远转圈。"""
+    def test_maintenance_runs_in_background(self):
+        """VACUUM + 全库重分词必须交给后台线程，且结果有回调兜底。
+
+        老实现同步执行、用等待光标提示进度。问题是 VACUUM **不可中断**：
+        期间窗口完全无响应，用户会以为死机并强杀进程 —— 而库正写到一半，
+        那是真正可能损坏库的时刻。改后台线程后"光标复位"这条断言不再适用
+        （`setOverrideCursor` 是 GUI 线程专属 API，不再使用），换成断言真正的
+        不变量：重量级调用经 `_run_bg` 进线程，且成功/失败都有回调处理。
+        """
         src = (ROOT / "gwtool" / "ui" / "main_window.py").read_text(
             encoding="utf-8")
         idx = src.index("def open_db_maintenance")
-        block = src[idx:idx + 1400]
-        assert "setOverrideCursor" in block
-        assert "finally:" in block and "restoreOverrideCursor" in block
+        block = src[idx:idx + 1200]
+        assert "_run_bg(" in block, "维护仍在主线程同步执行"
+        assert "dbhealth.maintenance" in block
+        assert "def _maintenance_done" in src, "缺少维护结果回调"
+        assert "维护失败" in src, "失败路径没有用户可见提示"
 
     def test_maintenance_entry_in_menu(self):
         src = (ROOT / "gwtool" / "ui" / "main_window.py").read_text(

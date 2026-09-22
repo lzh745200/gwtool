@@ -12,6 +12,9 @@
   D4  xlsx 工作表名含 `"` 时全部 XML 部件仍须可解析
   S2  CSV 导出须中和公式注入，且不得误伤负数
   F3  设置写库失败必须能被调用方感知（返回 False）
+  N4  六类 worker 都具备 stop()；退出路径对超时线程 terminate 兜底
+  N3  备份/恢复、全库打包、数据库维护、体检与重建索引必须真在后台线程执行
+  P3  批量归档必须单事务提交（不得逐行 commit）
 """
 from __future__ import annotations
 
@@ -308,3 +311,286 @@ class TestSettingPersistVisibility:
         assert csc_gec.set_setting(True) is True
         assert reminder.set_enabled(True) is True
         assert reminder.set_due_soon_days(3) is True
+
+
+class TestWorkerStopCoverage:
+    """N4：六类 worker 都必须具备 stop()（协作式中断入口）。
+
+    此前 Compile/PdfRender/Booklet 三个 worker 没有 stop()，closeEvent 等
+    10 秒超时后既无法表达中断、也没有兜底，进程退出时 QThread 仍存活
+    会触发 Qt qFatal（0xC0000409）。
+    """
+
+    def test_all_workers_have_stop(self, qapp):
+        from gwtool.ui import workers as W
+        for cls in (W.FnWorker, W.ImportWorker, W.CompileWorker,
+                    W.PdfRenderWorker, W.BookletWorker, W.TTSWorker):
+            assert callable(getattr(cls, "stop", None)), f"{cls.__name__} 缺少 stop()"
+
+    def test_stop_requests_interruption(self, qapp):
+        """stop() 必须表达中断意图（requestInterruption）。
+
+        注：PySide6 6.11 下**未 start 的线程** isInterruptionRequested()
+        恒为 False（标志只在运行中的线程上可读），因此这里用真实运行的
+        长任务验证 stop() → 中断标志的链路。
+        """
+        import time
+        from gwtool.ui.workers import FnWorker
+
+        def long_task():
+            for _ in range(40):        # 40×20ms ≈ 0.8s，足以覆盖 stop 时机
+                time.sleep(0.02)
+            return "done"
+
+        w = FnWorker(long_task)
+        w.start()
+        time.sleep(0.2)               # 线程已进入任务循环
+        w.stop()
+        assert w.isInterruptionRequested() is True
+        assert w.wait(5000) is True   # 收尾：不留悬挂线程污染后续用例
+
+
+class TestTerminateStuckThreads:
+    """N4：closeEvent 退出路径对超时线程 terminate 兜底（防 qFatal 0xC0000409）。"""
+
+    def test_terminates_running_thread(self, qapp):
+        import time
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QWidget
+        from gwtool.ui.main_window import _terminate_stuck_threads
+
+        class Sleeper(QThread):
+            def run(self):
+                time.sleep(30)
+
+        win = QWidget()
+        th = Sleeper(win)          # parent 挂 win，findChildren 才能找到
+        th.start()
+        try:
+            assert th.wait(3000) is False   # 前置：线程确实还在跑
+            _terminate_stuck_threads(win)
+            assert not th.isRunning()
+        finally:
+            if th.isRunning():
+                th.terminate()
+                th.wait(1500)
+
+    def test_stub_without_findchildren_is_safe(self):
+        """轻量替身没有 findChildren 时不得抛 AttributeError（退出路径禁抛）。"""
+        from gwtool.ui.main_window import _terminate_stuck_threads
+
+        class Stub:
+            pass
+
+        _terminate_stuck_threads(Stub())
+
+    def test_findchildren_runtimeerror_swallowed(self):
+        """owner 的 C++ 对象已销毁（RuntimeError）时同样安全返回。"""
+        from gwtool.ui.main_window import _terminate_stuck_threads
+
+        class Stub:
+            def findChildren(self, *_a, **_k):
+                raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        _terminate_stuck_threads(Stub())
+
+
+# ------------------------------------------------------------------ N3
+@pytest.fixture()
+def main_win(tmp_db, qapp, monkeypatch):
+    """真主窗口 + 屏蔽全部模态弹窗。
+
+    N3 的判据是"重型操作有没有真在后台线程跑"，必须以**真主窗口**为对象：
+    用轻量替身会把 `_run_bg` 的 parent 传递、worker 引用持有这些细节一并
+    绕过去，而这些恰恰是"线程被 GC 掉"这类缺陷的所在。
+    """
+    from PySide6.QtWidgets import (QDialog, QFileDialog, QInputDialog,
+                                   QMessageBox)
+
+    from gwtool import app
+    app.ensure_database_seeded()
+    import gwtool.ui.main_window as mw
+
+    monkeypatch.setattr(mw, "missing_official_fonts", lambda: [])
+    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(
+        lambda *a, **k: QMessageBox.StandardButton.Yes))
+    monkeypatch.setattr(QInputDialog, "getItem",
+                        staticmethod(lambda *a, **k: ("全部资料", True)))
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(mw, "info", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "warn", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "ask", lambda *a, **k: True)
+
+    w = mw.MainWindow()
+    yield w
+    w.close()
+
+
+class TestHeavyOpsRunOffMainThread:
+    """N3：重型操作必须**真的**在后台线程里执行。
+
+    判据取"被调函数运行时所在线程"，而不是"源码里有没有出现 FnWorker" ——
+    后者对"改成 worker 但仍在槽里同步调用"这种半吊子实现照样成立。
+    """
+
+    @staticmethod
+    def _spy(real, seen):
+        def wrapper(*a, **k):
+            import threading
+            seen["thread"] = threading.current_thread().name
+            return real(*a, **k)
+        return wrapper
+
+    def test_db_maintenance_runs_in_worker_thread(self, main_win, monkeypatch,
+                                                  wait_bg):
+        from gwtool.core import dbhealth
+        seen: dict = {}
+        monkeypatch.setattr(dbhealth, "maintenance",
+                            self._spy(dbhealth.maintenance, seen))
+        main_win.open_db_maintenance()
+        assert wait_bg(main_win._maintenance_worker, cond=lambda: "thread" in seen), \
+            "维护任务未在限期内执行"
+        assert seen["thread"] != "MainThread", \
+            f"数据库维护仍在主线程执行（{seen['thread']}）"
+
+    def test_backup_runs_in_worker_thread(self, main_win, monkeypatch, wait_bg):
+        import gwtool.ui.main_window as mw
+        seen: dict = {}
+        monkeypatch.setattr(mw, "create_backup_detailed",
+                            self._spy(mw.create_backup_detailed, seen))
+        main_win._do_backup()
+        assert wait_bg(main_win._backup_worker, cond=lambda: "thread" in seen)
+        assert seen["thread"] != "MainThread", f"备份仍在主线程执行（{seen['thread']}）"
+
+    def test_export_handover_runs_in_worker_thread(self, main_win, monkeypatch,
+                                                   wait_bg, tmp_path):
+        from PySide6.QtWidgets import QFileDialog
+
+        from gwtool.core import exporter
+        out = tmp_path / "handover.zip"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (str(out), "")))
+        seen: dict = {}
+        monkeypatch.setattr(exporter, "build", self._spy(
+            lambda req: {"documents": 0, "attachments": 0, "excluded": 0}, seen))
+        main_win.export_handover()
+        assert wait_bg(main_win._handover_worker, cond=lambda: "thread" in seen)
+        assert seen["thread"] != "MainThread", f"全库打包仍在主线程（{seen['thread']}）"
+
+    def test_scheduled_backup_runs_in_worker_thread(self, main_win, monkeypatch,
+                                                    wait_bg):
+        """定时备份由定时器触发，更不能卡住用户此刻正在进行的输入。"""
+        import gwtool.ui.main_window as mw
+        seen: dict = {}
+        monkeypatch.setattr(mw, "create_backup_detailed",
+                            self._spy(mw.create_backup_detailed, seen))
+        main_win._scheduled_backup()
+        assert wait_bg(main_win._scheduled_backup_worker,
+                       cond=lambda: "thread" in seen)
+        assert seen["thread"] != "MainThread"
+
+
+class TestInspectorAndFtsOffMainThread:
+    """N3：体检与索引重建同样要在后台线程，且失败/空结果必须说到界面上。"""
+
+    @staticmethod
+    def _spy(real, seen):
+        def wrapper(*a, **k):
+            import threading
+            seen["thread"] = threading.current_thread().name
+            return real(*a, **k)
+        return wrapper
+
+    def test_inspector_runs_in_worker_thread(self, qapp, tmp_db, monkeypatch,
+                                             wait_bg):
+        from gwtool.ui import feature_dialogs as fd
+        seen: dict = {}
+        monkeypatch.setattr(fd.inspector, "inspect_text",
+                            self._spy(lambda _t: [], seen))
+        dlg = fd.InspectorDialog(lambda: "全市安全生产形势总体平稳。")
+        try:
+            dlg._run()
+            assert wait_bg(dlg._inspect_worker, cond=lambda: "thread" in seen)
+            assert seen["thread"] != "MainThread", "体检仍在主线程执行"
+            assert dlg.lbl_stat.text().startswith("体检完成")
+        finally:
+            dlg.deleteLater()
+
+    def test_inspector_failure_reports_and_unlocks(self, qapp, tmp_db, monkeypatch,
+                                                   wait_bg):
+        """失败必须解锁按钮并把原因说到界面上（老实现无异常通路 = 点了没反应）。"""
+        from gwtool.ui import feature_dialogs as fd
+        warns: list[str] = []
+
+        def boom(_text):
+            raise RuntimeError("模拟体检失败")
+
+        monkeypatch.setattr(fd.inspector, "inspect_text", boom)
+        monkeypatch.setattr(fd, "warn", lambda parent, msg: warns.append(msg))
+        dlg = fd.InspectorDialog(lambda: "正文")
+        try:
+            dlg._run()
+            assert wait_bg(dlg._inspect_worker, cond=lambda: warns), "失败未反馈到界面"
+            assert "RuntimeError" not in warns[0], "界面出现了英文异常类名"
+            assert dlg.btn_run.isEnabled() and dlg.btn_export.isEnabled(), \
+                "按钮卡在禁用态，用户无法重试"
+            assert "未完成" in dlg.lbl_stat.text()
+        finally:
+            dlg.deleteLater()
+
+    def test_rebuild_fts_reports_stage_progress(self, tmp_db):
+        """dao.rebuild_fts 必须接受并调用 progress_cb（后台进度显示的前提）。"""
+        from gwtool.db import dao as dao_mod
+        msgs: list[str] = []
+        counts = dao_mod.rebuild_fts(progress_cb=msgs.append)
+        assert set(counts) == {"documents", "phrases"}
+        assert msgs, "重建过程没有回报任何阶段进度"
+
+    def test_rebuild_fts_empty_result_is_explained(self, qapp, tmp_db, monkeypatch,
+                                                   wait_bg):
+        """0 条结果不得只说"索引已重建"——必须说清没有可索引的内容。"""
+        from gwtool.db import dao as dao_mod
+        from gwtool.ui import feature_dialogs as fd
+        warns: list[str] = []
+
+        monkeypatch.setattr(fd, "ask", lambda *a, **k: True)
+        monkeypatch.setattr(fd, "warn", lambda parent, msg: warns.append(msg))
+        monkeypatch.setattr(dao_mod, "rebuild_fts",
+                            lambda progress_cb=None: {"documents": 0, "phrases": 0})
+        dlg = fd.SecurityDialog()
+        try:
+            dlg._rebuild_fts()
+            assert wait_bg(dlg._fts_worker, cond=lambda: warns), "0 条结果未给任何说明"
+            assert "没有可索引的内容" in warns[0]
+        finally:
+            dlg.deleteLater()
+
+    def test_rebuild_fts_failure_is_reported(self, qapp, tmp_db, monkeypatch, wait_bg):
+        """重建失败必须有提示（老实现整段没有 try/except，点按钮零反馈）。"""
+        from gwtool.db import dao as dao_mod
+        from gwtool.ui import feature_dialogs as fd
+        warns: list[str] = []
+
+        def boom(progress_cb=None):
+            raise RuntimeError("索引表被占用")
+
+        monkeypatch.setattr(fd, "ask", lambda *a, **k: True)
+        monkeypatch.setattr(fd, "warn", lambda parent, msg: warns.append(msg))
+        monkeypatch.setattr(dao_mod, "rebuild_fts", boom)
+        dlg = fd.SecurityDialog()
+        try:
+            dlg._rebuild_fts()
+            assert wait_bg(dlg._fts_worker, cond=lambda: warns), "失败未反馈"
+            assert "重建索引失败" in warns[0]
+            assert "索引重建未完成" in dlg.lbl_fts.text()
+        finally:
+            dlg.deleteLater()

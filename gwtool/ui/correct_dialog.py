@@ -395,6 +395,23 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
             self._loading = False
 
     # ------------------------------------------------------------ 导出
+    def _start_export(self, work, done_text: str) -> None:
+        """把导出任务丢进后台线程（DOCX 排版/逐块拼接都是秒级操作）。
+
+        完成后写状态文本；失败也写状态文本 —— 这个对话框没有模态提示，
+        `lbl_stat` 就是用户唯一的结果反馈通道，静默失败等于"点了没反应"。
+        """
+        worker = getattr(self, "_export_worker", None)
+        if worker is not None and worker.isRunning():
+            self.lbl_stat.setText("上一次导出仍在进行，请稍候。")
+            return
+        self.lbl_stat.setText("正在导出…")
+        w = FnWorker(work, parent=self)
+        w.ok.connect(lambda _r: self.lbl_stat.setText(done_text))
+        w.failed.connect(lambda msg: self.lbl_stat.setText(f"导出失败：{msg}"))
+        self._export_worker = w
+        w.start()
+
     def export_docx(self) -> None:
         if not self._blocks:
             return
@@ -402,11 +419,16 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
                                              "纠错后文档.docx", "Word (*.docx)")
         if not out:
             return
-        from ..core.docxgen import generate_docx
-        from ..core.template import default_template
-        tree = corrector.blocks_to_tree(self._title, self._blocks)
-        generate_docx([tree], default_template(), out)
-        self.lbl_stat.setText(f"已导出：{out}")
+        # 快照后交给后台：worker 里不能再读 self._blocks（主线程可能正在改）
+        blocks, title = list(self._blocks), self._title
+
+        def work():
+            from ..core.docxgen import generate_docx
+            from ..core.template import default_template
+            tree = corrector.blocks_to_tree(title, blocks)
+            generate_docx([tree], default_template(), out)
+
+        self._start_export(work, f"已导出：{out}")
 
     def export_txt(self) -> None:
         if not self._blocks:
@@ -415,14 +437,18 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
                                              "纠错后文档.txt", "文本 (*.txt)")
         if not out:
             return
-        parts = [self._title] if self._title else []
-        for b in self._blocks:
-            if b["kind"] == "table":
-                parts.extend(" ｜ ".join(row) for row in (b.get("rows") or []))
-            else:
-                parts.append(b["text"])
-        Path(out).write_text("\n".join(parts), encoding="utf-8")
-        self.lbl_stat.setText(f"已导出：{out}")
+        blocks, title = list(self._blocks), self._title
+
+        def work():
+            parts = [title] if title else []
+            for b in blocks:
+                if b["kind"] == "table":
+                    parts.extend(" ｜ ".join(row) for row in (b.get("rows") or []))
+                else:
+                    parts.append(b["text"])
+            Path(out).write_text("\n".join(parts), encoding="utf-8")
+
+        self._start_export(work, f"已导出：{out}")
 
 
 def _scan_blocks(blocks):

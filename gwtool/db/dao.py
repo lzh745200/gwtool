@@ -490,26 +490,44 @@ def iter_documents_content(category_id: int | None = None,
         yield dict(row)
 
 
-def rebuild_fts() -> dict[str, int]:
+def rebuild_fts(progress_cb=None) -> dict[str, int]:
     """全量重建 FTS 索引（documents/phrases）。
 
     FTS 行由 DAO 在写入时同步维护，任何绕过 DAO 的写入（如种子 ATTACH 直插、
     手工改库）都会造成索引静默失配；此函数是用户可见的自救入口。
     返回各源重建条数。
+
+    `progress_cb(text)` 为可选阶段进度回调：万篇库重建要逐条分词，放在 UI
+    线程上会整窗冻结。回调**只作观测**——它自己抛错绝不能中断重建
+    （重建失败才是真故障，进度显示失败不是）。
     """
+    def _tick(msg: str) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(msg)
+        except Exception:
+            pass
+
     conn = dbconn.get_conn()
     from . import tokenize as tok
     counts: dict[str, int] = {}
+    _tick("正在清空旧索引…")
     conn.execute("DELETE FROM documents_fts")
     # 回收站里的文档不进索引：否则重建一次就把软删除的材料全部变回可检索
     rows = conn.execute(
         "SELECT id, title, content_text FROM documents WHERE deleted_time=''"
     ).fetchall()
-    for r in rows:
+    total = len(rows)
+    _tick(f"正在重建资料索引（0/{total}）…")
+    for i, r in enumerate(rows, 1):
         conn.execute(
             "INSERT INTO documents_fts(title,tokenized,ref_id) VALUES(?,?,?)",
             (tok.tokenize(r["title"]), tok.tokenize(r["content_text"]), int(r["id"])))
-    counts["documents"] = len(rows)
+        if i % 50 == 0 or i == total:
+            _tick(f"正在重建资料索引（{i}/{total}）…")
+    counts["documents"] = total
+    _tick("正在重建句式索引…")
     conn.execute("DELETE FROM phrases_fts")
     rows = conn.execute("SELECT id, phrase, context FROM user_phrases").fetchall()
     for r in rows:
@@ -1258,6 +1276,35 @@ def update_receive(r: Receive) -> None:
         f"updated_time=datetime('now','localtime') WHERE id=?",
         [getattr(r, c) for c in _RECEIVE_COLUMNS] + [r.id])
     conn.commit()
+
+
+def update_receive_many(rows: list[Receive]) -> int:
+    """批量更新收文登记：**单事务**提交，返回更新条数。
+
+    与 `update_receive` 的差别只在提交粒度。逐行 commit 有两个实际问题：
+
+      1. 千件级别退化成千次 fsync（归档动辄几百上千件）；
+      2. 中途失败会留下"一半已归档"的台账 —— 而归档是**整批成立**的语义，
+         移交清单上写着 50 件、台账却只落了 30 件，比整批失败难收拾得多。
+
+    失败时显式回滚后再抛：调用方拿到异常就知道"一件都没归档"，而不是
+    "不知道落了多少"。注意本函数只在**同一线程**的连接上工作（与
+    `dbconn.get_conn()` 的 thread-local 语义一致）。
+    """
+    if not rows:
+        return 0
+    conn = dbconn.get_conn()
+    assigns = ",".join(f"{c}=?" for c in _RECEIVE_COLUMNS)
+    sql = (f"UPDATE receive_register SET {assigns},"
+           f"updated_time=datetime('now','localtime') WHERE id=?")
+    params = [[getattr(r, c) for c in _RECEIVE_COLUMNS] + [r.id] for r in rows]
+    try:
+        conn.executemany(sql, params)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(rows)
 
 
 def delete_receive(receive_id: int) -> None:

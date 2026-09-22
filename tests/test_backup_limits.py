@@ -403,9 +403,18 @@ def ui(tmp_db, qapp, data_dir, monkeypatch):
 
     class _Win:
         """只借用主窗口的备份/恢复回调，不构造整窗（PySide6 不允许空壳实例，
-        且真窗口要先跑一遍整库种子导入，与本文件要验的提示文字无关）。"""
+        且真窗口要先跑一遍整库种子导入，与本文件要验的提示文字无关）。
+
+        N3 起备份/恢复在**后台线程**执行：入口方法只收集参数并起 worker，
+        结果处理在 `_backup_done` / `_restore_done` 回调里，故这两个也要一并
+        借来。等待由 `wait_bg` 夹具完成（worker 的信号是队列连接，只 wait()
+        不会执行槽函数）。
+        """
         _do_backup = mw.MainWindow._do_backup
         _do_restore = mw.MainWindow._do_restore
+        _backup_done = mw.MainWindow._backup_done
+        _restore_done = mw.MainWindow._restore_done
+        _restore_failure_text = staticmethod(mw.MainWindow._restore_failure_text)
         _format_backup_items = staticmethod(mw.MainWindow._format_backup_items)
         _guarded = staticmethod(mw.MainWindow._guarded)
 
@@ -413,13 +422,14 @@ def ui(tmp_db, qapp, data_dir, monkeypatch):
 
 
 def test_manual_backup_ui_warns_listing_excluded_attachments(ui, doc, tmp_path,
-                                                             monkeypatch):
+                                                             monkeypatch, wait_bg):
     """手动备份超限时必须当场弹提示，列出被排除的附件与去哪儿改上限。"""
     win, shown = ui
     dao.set_setting(backup.SETTING_LIMIT_MB, "1")
     _, p = _add_attachment(doc, tmp_path, "四兆附件.pdf", 4)
 
     win._do_backup()
+    assert wait_bg(win._backup_worker, cond=lambda: shown), "备份任务未在限期内回报结果"
     assert len(shown) == 1 and shown[0][0] == "warn", "超限却只给了普通成功提示"
     text = shown[0][1]
     assert p.name in text and "未随本备份包备份" in text
@@ -427,19 +437,25 @@ def test_manual_backup_ui_warns_listing_excluded_attachments(ui, doc, tmp_path,
     assert "备份成功" in text and "attachments" in text
 
 
-def test_manual_backup_ui_plain_success_when_within_limit(ui, doc, tmp_path):
+def test_manual_backup_ui_plain_success_when_within_limit(ui, doc, tmp_path, wait_bg):
     """上限内不打扰用户：普通成功提示里说明附件已随包。"""
     win, shown = ui
     dao.set_setting(backup.SETTING_LIMIT_MB, "50")
     _add_attachment(doc, tmp_path, "小附件.pdf", 1)
 
     win._do_backup()
+    assert wait_bg(win._backup_worker, cond=lambda: shown), "备份任务未在限期内回报结果"
     assert [k for k, _ in shown] == ["info"]
     assert "附件 1 个已随包备份" in shown[0][1]
 
 
-def test_backup_failure_warns_and_restores_cursor(ui, monkeypatch):
-    """备份出错（磁盘满等）只提示不裸奔，且等待光标必须复位。"""
+def test_backup_failure_warns_without_leaving_busy_state(ui, monkeypatch, wait_bg):
+    """备份出错（磁盘满等）只提示不裸奔，且界面不停留在"备份中"。
+
+    N3 起备份在后台线程执行、不再使用等待光标（`setOverrideCursor` 是 GUI
+    线程专属操作，跨线程调用未定义），断言换成同一件事的另一面：
+    **失败必须被用户看见，且不留下任何"还在忙"的残留状态**。
+    """
     import gwtool.ui.main_window as mw
     from PySide6.QtWidgets import QApplication
 
@@ -450,12 +466,15 @@ def test_backup_failure_warns_and_restores_cursor(ui, monkeypatch):
 
     monkeypatch.setattr(mw, "create_backup_detailed", boom)
     win._do_backup()                            # 不许抛异常到 Qt 事件循环
+    assert wait_bg(win._backup_worker, cond=lambda: shown), "备份失败未回报到界面"
     assert [k for k, _ in shown] == ["warn"]
-    assert "磁盘空间不足" in shown[0][1]
-    assert QApplication.overrideCursor() is None, "等待光标没有复位，界面会一直是沙漏"
+    assert "磁盘空间不足" in shown[0][1], "失败原因被吞掉了"
+    assert QApplication.overrideCursor() is None, "残留等待光标，界面会一直是沙漏"
+    assert not win._backup_worker.isRunning()
 
 
-def test_restore_ui_reports_missing_attachments(ui, doc, tmp_path, monkeypatch):
+def test_restore_ui_reports_missing_attachments(ui, doc, tmp_path, monkeypatch,
+                                                wait_bg):
     """恢复时要明确告知哪些附件不在此备份中、从哪里补（不能只说"恢复成功"）。"""
     from PySide6.QtWidgets import QFileDialog
 
@@ -468,6 +487,7 @@ def test_restore_ui_reports_missing_attachments(ui, doc, tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getOpenFileName",
                         staticmethod(lambda *a, **k: (rep.path, "")))
     win._do_restore()
+    assert wait_bg(win._restore_worker, cond=lambda: shown), "恢复任务未在限期内回报"
     warns = [t for k, t in shown if k == "warn"]
     assert len(warns) == 1, f"恢复后应给出一次缺附件提醒，实际：{shown}"
     text = warns[0]

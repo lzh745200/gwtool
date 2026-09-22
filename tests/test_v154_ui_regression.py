@@ -83,7 +83,13 @@ class TestReferencePanelRendersCorrections:
         monkeypatch.setattr(panel, "_fill_corr_list", boom)
         panel._on_check_done(corrector.check_text(text))
         assert emitted, "渲染失败不能连累波浪线"
-        assert "渲染失败" in panel.lbl_count.text()
+        # B3 起 lbl_count 走 errmsg.friendly()：未知异常（RuntimeError）给
+        # 标准话术"…未完成：发生内部错误…"。这里断言三点：反馈可见、
+        # 不是"检查中"占位、界面不出现英文类名（errmsg 设计原则 2）。
+        count_text = panel.lbl_count.text()
+        assert count_text and count_text != "检查中…", "渲染异常必须反馈到界面"
+        assert ("失败" in count_text) or ("未完成" in count_text)
+        assert "RuntimeError" not in count_text
         panel.deleteLater()
 
 
