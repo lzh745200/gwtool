@@ -7,13 +7,14 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPlainTextEdit,
                                QProgressBar, QPushButton, QRadioButton,
-                               QSpinBox, QSplitter, QTextBrowser, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QScrollArea, QSpinBox, QSplitter, QTextBrowser,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from .. import logs
 from ..core import inspector, simhash
@@ -26,6 +27,21 @@ from .widgets import ThreadSafeDialog, ask, info, warn
 from .workers import _close_thread_conn
 
 log = logs.get_logger("ui.pack")
+
+
+def _fit_dialog(dlg, want_w: int, want_h: int) -> None:
+    """按目标尺寸开对话框，但**绝不超出屏幕可用区域**。
+
+    与 main_window._fit_to_screen 同源的问题：硬编码高度在 1366×768 笔记本上
+    会超出屏幕。屏幕过小（离屏测试 800×800）时以屏幕为准。
+    """
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        dlg.resize(want_w, want_h)
+        return
+    avail = screen.availableGeometry()
+    dlg.resize(min(want_w, max(320, avail.width() - 40)),
+               min(want_h, max(240, avail.height() - 60)))
 
 # ================================================================ 骨架向导
 class SkeletonDialog(QDialog):
@@ -876,8 +892,19 @@ class SecurityDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置 —— 系统与安全")
-        self.resize(640, 720)
-        v = QVBoxLayout(self)
+        _fit_dialog(self, 640, 720)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # 内容 sizeHint 实测需 982×798，远超 1366×768 笔记本的可用高度；
+        # 不套滚动区时底部的「清理附件」「关闭」按钮会落在屏幕外且无法触及。
+        # 与 receive_dialog.ReceiveForm 的写法保持一致。
+        holder = QWidget()
+        v = QVBoxLayout(holder)
+        scroll = QScrollArea()
+        scroll.setWidget(holder)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        outer.addWidget(scroll, 1)
 
         g1 = QLabel("口令锁（启动程序时需输入口令）")
         g1.setStyleSheet("font-weight:bold;")
@@ -1069,9 +1096,13 @@ class SecurityDialog(QDialog):
         v.addWidget(btn_sweep, 0, Qt.AlignLeft)
 
         v.addStretch(1)
+        # 「关闭」放在滚动区**外**：内容再长也始终可见，不必滚到底才能关窗。
+        btn_bar = QHBoxLayout()
+        btn_bar.addStretch(1)
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.accept)
-        v.addWidget(btn_close, 0, Qt.AlignRight)
+        btn_bar.addWidget(btn_close)
+        outer.addLayout(btn_bar)
         self._check_tess()
 
     @staticmethod
@@ -1185,10 +1216,16 @@ class SecurityDialog(QDialog):
         if mod is None:
             return
         try:
-            mod.set_setting(bool(on))
+            saved = mod.set_setting(bool(on))
             mod.reset()                 # 下次纠错时按需（重新）加载
         except Exception as exc:
             warn(self, f"保存设置失败：{exc}")
+        else:
+            if not saved:
+                # 本次会话已生效，但没写进库 → 必须说清"重启后会变回去"
+                warn(self, "开关已在本次运行中生效，但**未能保存到数据库**，"
+                           "重启程序后会恢复为原来的设置。\n\n"
+                           "请检查数据目录是否可写、磁盘是否已满。")
         self._refresh_pack_group(kind)
 
     def _import_pack(self, kind: str = "csc"):

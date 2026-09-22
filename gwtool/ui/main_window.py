@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, QThread, QTimer, Qt
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextCursor
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
                                QMainWindow, QPushButton, QSplitter, QStatusBar)
 
@@ -27,6 +27,33 @@ from .receive_dialog import ReceiveDialog
 from .registry_dialog import RegistryDialog
 from .template_editor import TemplateEditor
 from .widgets import (ask, info, missing_official_fonts, wait_for_threads, warn)
+
+
+def _fit_to_screen(win, want_w: int, want_h: int) -> None:
+    """按目标尺寸开窗，但**绝不超出屏幕可用区域**。
+
+    为什么需要夹取：本产品目标环境是 1366×768 办公笔记本，扣掉任务栏与
+    标题栏后可用高度约 700–730px。原先硬编码 resize(1360, 820) 会让底部
+    状态栏与编辑器底边在**第一次启动时就被裁掉**，且用户不知道还能调高。
+
+    最小尺寸护栏**让位于不超屏**：屏幕比最小尺寸还小（离屏测试 800×800、
+    极端小屏）时，把窗口压到屏幕内比保住布局更重要。
+    """
+    MIN_W, MIN_H = 1024, 640
+    screen = QGuiApplication.primaryScreen()
+    if screen is not None:
+        avail = screen.availableGeometry()
+        # 留余量：部分 WM 会在可用区域内再扣一层
+        avail_w = max(320, avail.width() - 40)
+        avail_h = max(240, avail.height() - 40)
+        min_w = min(MIN_W, avail_w)
+        min_h = min(MIN_H, avail_h)
+        win.setMinimumSize(min_w, min_h)
+        win.resize(max(min(want_w, avail_w), min_w),
+                   max(min(want_h, avail_h), min_h))
+        return
+    win.setMinimumSize(MIN_W, MIN_H)
+    win.resize(want_w, want_h)
 
 
 def _wait_all_threads(win) -> list[str]:
@@ -67,7 +94,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{__version__}（单机离线版）")
-        self.resize(1360, 820)
+        _fit_to_screen(self, 1360, 820)
         from . import icons
         self.setWindowIcon(icons.icon("new_doc"))
         self._tts_worker = None

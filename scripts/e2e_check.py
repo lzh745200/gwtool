@@ -219,10 +219,49 @@ def main() -> int:
         except Exception:
             pass
 
-    # 10) 备份
-    from gwtool.core.backup import create_backup
+    # 10) 备份 —— 并且**验证它真能用**
+    #
+    # 为什么必须做往返断言：此前这一项只判 `Path(bz).exists()`。实测注入
+    # "备份内容为空库"的缺陷后，pytest 有 11 条报错，而 e2e **仍然通过** ——
+    # 也就是说发布前的最后一道人工可读门禁，会对"备份不可用"给出绿灯。
+    # 备份是这个产品唯一的数据退路，必须断言"备份 → 恢复 → 内容一致"。
+    from gwtool.core.backup import create_backup, restore_backup_detailed
+
+    # ⚠ 恢复会**整库替换**，绝不能在用户真实数据目录上做。
+    # 先把数据目录切到临时目录，恢复验完再切回来（用户库分毫不动）。
+    import gwtool.paths as _paths
+    _real_data_dir = _paths.app_data_dir()
+    _sandbox = Path(tempfile.mkdtemp(prefix="gwtool_e2e_restore_"))
+
     bz = create_backup(note="E2E自检")
-    step("一键备份", Path(bz).exists(), str(Path(bz).name))
+    step("一键备份", Path(bz).exists() and Path(bz).stat().st_size > 0,
+         f"{Path(bz).name}（{Path(bz).stat().st_size // 1024 if Path(bz).exists() else 0} KB）")
+
+    try:
+        _before = sorted(d.title for d in dao.list_documents())
+        _before_n = len(_before)
+
+        _paths.set_app_data_dir(_sandbox)
+        dbconn.configure(_paths.db_path())
+        app.ensure_database_seeded()
+        _before_sandbox = len(dao.list_documents())
+
+        _rep = restore_backup_detailed(str(bz))
+        _after = sorted(d.title for d in dao.list_documents())
+
+        step("备份→恢复 内容一致",
+             bool(_rep.ok) and _after == _before,
+             f"{_before_sandbox} 篇(沙箱) → 恢复后 {len(_after)} 篇；"
+             f"标题集合{'一致' if _after == _before else '不一致'}")
+        step("恢复报告无降级项",
+             not getattr(_rep, "warnings", None),
+             "；".join(getattr(_rep, "warnings", []) or []) or "无")
+    except Exception as _exc:                       # 自检失败要报出来，不吞
+        step("备份→恢复 内容一致", False, f"{type(_exc).__name__}: {_exc}")
+    finally:
+        # 无论成败都要切回真实目录，否则后续步骤写进沙箱
+        _paths.set_app_data_dir(_real_data_dir)
+        dbconn.configure(_paths.db_path())
 
     print(f"\n===== E2E 自检结果：{ok} 项通过，{len(fail)} 项失败 =====")
     if fail:
