@@ -178,6 +178,7 @@ class ImportDialog(ThreadSafeDialog, QDialog):
             lambda i, total, p: (self.progress.setValue(i),
                                  self.setWindowTitle(f"导入中 {i}/{total}")))
         self._worker.finished_ok.connect(self._done)
+        self._worker.finished_detail.connect(self._done_detail)
         self._worker.failed.connect(self._failed)
         self._worker.start()
 
@@ -188,8 +189,46 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         info(self, f"导入出错：{msg}")
 
     def _done(self, ok: int, skip: int):
+        # 简版回调（无明细信号时兜底）：与 _done_detail 二选一触发，
+        # 后者覆盖前者后，这里靠 last_detail 标记避免重复弹窗。
+        if getattr(self, "_detail_shown", False):
+            return
+        self._finish_common(ok, skip, None)
+
+    def _done_detail(self, ok: int, skip: int, failures: list):
+        self._detail_shown = True
+        self._finish_common(ok, skip, failures)
+
+    def _finish_common(self, ok: int, skip: int, failures):
         self.btn_start.setEnabled(True)
         self.progress.setVisible(False)
-        info(self, f"导入完成：成功 {ok} 篇；重复/失败/扫描版跳过 {skip} 篇。")
+        text = f"导入完成：成功 {ok} 篇；重复/失败/扫描版跳过 {skip} 篇。"
+        real_failures = [f for f in (failures or []) if "重复" not in f[1]]
+        overflow = 0
+        if real_failures:
+            # 失败清单：让用户知道**哪几份没进、为什么、接下来做什么**。
+            # 逐条列出（至多 8 条），超出部分写入导出目录的文本文件留档。
+            preview = real_failures[:8]
+            overflow = len(real_failures) - len(preview)
+            lines = "\n".join(f"  · {name}：{why}" for name, why in preview)
+            if overflow > 0:
+                lines += f"\n  …另有 {overflow} 份，完整清单见导出目录"
+            text += "\n\n以下文件未能导入：\n" + lines
+        info(self, text)
+        if overflow > 0:
+            self._export_failure_list(real_failures)
         self.file_list.clear()
         self.accept()
+
+    def _export_failure_list(self, failures: list) -> None:
+        """失败清单落盘：条目多时弹窗列不全，给一份可留存的 TXT。"""
+        try:
+            from ..paths import export_dir
+            out = export_dir() / "导入失败清单.txt"
+            with open(out, "w", encoding="utf-8-sig") as fh:
+                fh.write("以下文件未能导入：\n")
+                for name, why in failures:
+                    fh.write(f"{name}\t{why}\n")
+            info(self, f"完整失败清单已保存：\n{out}")
+        except Exception:
+            pass  # 清单落盘失败不影响导入结果展示

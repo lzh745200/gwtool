@@ -491,11 +491,19 @@ class MainWindow(QMainWindow):
             warn(self, rep.get("reason", "维护失败"))
             return
         fts = rep.get("fts_rows", -1)
-        info(self, f"维护完成。\n\n"
-                   f"占用：{dbhealth.human_size(rep['before'])} → "
-                   f"{dbhealth.human_size(rep['after'])}\n"
-                   f"回收：{dbhealth.human_size(rep['saved'])}\n"
-                   f"检索索引：{'未重建' if fts < 0 else f'{fts} 条'}")
+        text = (f"维护完成。\n\n"
+                f"占用：{dbhealth.human_size(rep['before'])} → "
+                f"{dbhealth.human_size(rep['after'])}\n"
+                f"回收：{dbhealth.human_size(rep['saved'])}\n"
+                f"检索索引：{'未重建' if fts < 0 else f'{fts} 条'}")
+        # 维护后的交叉一致性结果：有问题必须点名，不能让用户以为
+        # "点了维护 = 一切正常"。空白表示三项检查全部通过。
+        problems = rep.get("consistency_problems") or []
+        if problems:
+            text += "\n\n⚠ 一致性检查发现以下问题：\n  · " + "\n  · ".join(problems)
+        else:
+            text += "\n\n一致性检查：正常。"
+        info(self, text)
 
     def new_skeleton_doc(self):
         dlg = SkeletonDialog(self)
@@ -721,7 +729,7 @@ class MainWindow(QMainWindow):
                     att = f"  附件 {x['attachments_included']} 个"
                 else:
                     att = ""
-                lines.append(f"{x['created']}  {x['note']}{att}\n    {x['file']}")
+                lines.append(f"{x['created'] or '????-??-??'}  {x['note']}{att}\n    {x['file']}")
             info(self, "\n".join(lines) or "暂无备份。")
 
     @staticmethod

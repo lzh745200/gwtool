@@ -13,6 +13,7 @@ from . import APP_NAME, __version__
 # 诊断日志：全包零日志是此前的重大缺口——用户机上的故障完全不可诊断。
 # 必须在其他初始化之前 install，才能捕获启动期的异常。
 from . import logs
+from . import paths
 # 顶层导入：这两个模块平时只在 UI 回调里延迟导入（classify 用于分类建议、
 # report 用于体检报告导出），冻结包若漏收它们，用户点到才会崩。放到启动路径上，
 # CI 每次构建的启动冒烟即可覆盖。
@@ -152,13 +153,31 @@ def run(import_path: str = "") -> int:
     from .db import connection as dbconn
     # 启动防护（第 20 轮）：库文件损坏（磁盘故障/异常断电）时不带栈崩溃，
     # 指向最近的备份让用户自救；绝不静默、也绝不自动覆盖用户数据。
+    # N11 补充：数据目录**不可写/不可建**（只读挂载、企业策略、磁盘满）时，
+    # 旧代码在最早期就裸抛 OSError —— --windowed 下无控制台，用户看到的是
+    # "双击没反应"。这里与 sqlite 诊断同构：可读指引 + 落诊断日志。
+    def _startup_fatal(text: str) -> int:
+        nl = chr(10)
+        print(text, file=sys.stderr)
+        try:
+            (Path.home() / "gwtool_启动诊断.log").write_text(text + nl,
+                                                             encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            box = QMessageBox(QMessageBox.Critical, "无法启动", text)
+            box.exec()
+        except Exception:
+            pass  # 连弹窗都不可用时就只剩 stderr 与日志文件了
+        return 2
+
     try:
         dbconn.configure(db_path())
         ensure_database_seeded()
     except sqlite3.DatabaseError as exc:
         logs.get_logger("app").exception("数据库文件损坏，无法打开")
         from .paths import backup_dir
-        nl = chr(10)
         lines = [f"数据库文件损坏，无法打开：{exc}"]
         backups = sorted(backup_dir().glob("*.zip"))
         if backups:
@@ -167,14 +186,15 @@ def run(import_path: str = "") -> int:
                          "gwtool.db 覆盖到数据目录后重启。")
         else:
             lines.append("未找到历史备份。数据目录：" + str(db_path()))
-        text = nl.join(lines)
-        print(text, file=sys.stderr)
-        try:
-            (Path.home() / "gwtool_启动诊断.log").write_text(text + nl,
-                                                             encoding="utf-8")
-        except OSError:
-            pass
-        return 2
+        return _startup_fatal(chr(10).join(lines))
+    except paths.DataDirError as exc:
+        logs.get_logger("app").exception("数据目录不可用")
+        lines = [str(exc),
+                 "可能原因：目录被设为只读、被安全软件锁定、或磁盘已满。",
+                 "可尝试：① 检查目录权限；② 用便携模式（--portable）把数据"
+                 "放到 U 盘或其他可写位置；③ 清理磁盘空间。",
+                 "数据目录：" + str(exc.path)]
+        return _startup_fatal(chr(10).join(lines))
 
     from .ui.main_window import MainWindow
     # 口令锁（启用后启动先解锁）

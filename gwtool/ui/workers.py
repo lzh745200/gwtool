@@ -12,6 +12,7 @@ from ..core import compiler, importer
 from ..core.booklet import make_booklet
 from ..db import connection as dbconn
 from ..db import dao
+from . import errmsg
 
 log = logs.get_logger("workers")
 
@@ -70,6 +71,8 @@ class ImportWorker(QThread):
     """批量导入：解析 -> 入库（去重）。"""
     progress = Signal(int, int, str)      # i, total, path
     finished_ok = Signal(int, int)        # 成功数, 重复/失败数
+    # 完整明细：成功数, 跳过数, [(文件名, 原因), ...]
+    finished_detail = Signal(int, int, list)
     failed = Signal(str)
 
     def __init__(self, files: list[str], category_id: int, parent=None):
@@ -84,10 +87,12 @@ class ImportWorker(QThread):
     def run(self):
         try:
             ok = skip = 0
+            failures: list = []
             total = len(self.files)
             for i, path in enumerate(self.files, 1):
                 if self._stop:
-                    break
+                    failures.append((Path(path).name, "已手动停止，未处理"))
+                    continue
                 self.progress.emit(i, total, path)
 
                 def ocr_progress(page, n_pages, _i=i, _path=path):
@@ -97,6 +102,13 @@ class ImportWorker(QThread):
                 r = importer.parse_any(path, ocr_progress_cb=ocr_progress)
                 if not r.ok or r.tree is None:
                     skip += 1
+                    # 失败原因必须随清单回传：此前这里 `continue` 把 r.error
+                    # 直接丢弃，导 200 份后用户只知道"跳过 N 篇"，
+                    # 不知道**哪几份、为什么、接下来做什么**。
+                    # r.error 可能含异常类名/英文（importer 保留原文供日志），
+                    # 交给 errmsg 统一翻成可执行文案。
+                    reason = errmsg.friendly_parse_error(r.error)
+                    failures.append((Path(path).name, reason))
                     continue
                 doc = dao.Document(
                     title=r.tree.title or Path(path).stem,
@@ -108,12 +120,15 @@ class ImportWorker(QThread):
                 )
                 if dao.add_document(doc) < 0:
                     skip += 1  # 内容重复
+                    failures.append((Path(path).name,
+                                     "内容与已有材料重复，未重复入库"))
                 else:
                     ok += 1
             self.finished_ok.emit(ok, skip)
+            self.finished_detail.emit(ok, skip, failures)
         except Exception as exc:
             _log_exc("批量导入")
-            self.failed.emit(str(exc))
+            self.failed.emit(errmsg.friendly(exc, action="批量导入"))
         finally:
             _close_thread_conn()
 

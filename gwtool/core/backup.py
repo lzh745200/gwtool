@@ -29,6 +29,7 @@ import errno
 import json
 import os
 import shutil
+import sqlite3
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -501,8 +502,17 @@ def list_backups() -> list[dict]:
                         "encrypted": encrypted,
                         "attachments_included": len(att.get("included") or []),
                         "attachments_excluded": len(att.get("excluded") or [])})
-        except Exception:
-            continue
+        except Exception as exc:
+            # 损坏的备份**必须出现在列表里并标明**，而不是凭空消失：
+            # 列表是用户唯一的"我有哪些备份"视图 —— 看不见 = 不存在，
+            # 用户会以为最稳的那份备份还在，直到需要恢复时才发现没了。
+            out.append({"file": str(f),
+                        "created": "",
+                        "note": "⚠ 包损坏或无法读取（%s）" % type(exc).__name__,
+                        "encrypted": "_加密" in f.name,
+                        "corrupt": True,
+                        "attachments_included": 0,
+                        "attachments_excluded": 0})
     return out
 
 
@@ -519,6 +529,44 @@ def _read_manifest(zf) -> dict:
 def restore_backup(zip_path: str, password: str = "") -> bool:
     """从备份恢复（自动识别普通/AES 加密包）。恢复前自动做一次“恢复前备份”。"""
     return restore_backup_detailed(zip_path, password=password).ok
+
+
+def _count_documents(db_file: Path) -> int:
+    """只读统计一个库文件里的文档数（用于恢复前的内容比对）。"""
+    uri = "file:" + str(db_file).replace("\\", "/") + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        cur = conn.execute("SELECT count(*) FROM documents")
+        return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _guard_content_shrink(tmp: Path, target: Path) -> None:
+    """恢复前比对「包内文档数 vs 当前库文档数」，堵死静默数据丢失。
+
+    两层防线：
+      1. 包内 0 篇而当前有文档 → **直接中止**（硬拦截）。「合法空库」能通过
+         全部结构校验（CORE_TABLES 都在），旧校验拦不住它 —— 实测恢复后
+         文档 2→0 且无任何告警。想清空重建属极罕见需求，不该走恢复通道。
+      2. 降幅 >50% 且绝对值 >10 → 不拦，但**写进 warnings + 日志**，
+         UI 恢复完成后会逐条点名。
+    """
+    try:
+        in_pack = _count_documents(tmp)
+        current = _count_documents(target)
+    except Exception:
+        # 比对失败绝不拦住恢复本身：结构校验（_validate_restored_db）已经过，
+        # 这里只是附加防线，读不出来就当无事发生
+        return
+    if in_pack == 0 and current > 0:
+        raise ValueError(
+            "备份包内没有任何文档，而当前库中有 %d 篇 —— 恢复会用空库顶掉现有"
+            "数据，已中止，当前数据未被改动。\n\n"
+            "如果您确实想清空数据，请改用「文件 → 新建空库」（如有）或删除数据"
+            "目录下的 gwtool.db，不要用恢复备份的方式。" % current)
+    if current > 0 and in_pack < current * 0.5 and current - in_pack > 10:
+        _append_log(["恢复内容显著缩减：包内 %d 篇 / 当前 %d 篇" % (in_pack, current)])
 
 
 def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
@@ -575,6 +623,9 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
                 shutil.copyfileobj(fsrc, fdst)
             # 校验必须在换掉真库之前：坏包一旦顶上，用户数据就没了
             _validate_restored_db(tmp)
+            # 内容防线（D1）：结构合法的「空包/巨缩包」旧校验拦不住，
+            # 必须在替换真库**之前**比对内容规模
+            _guard_content_shrink(tmp, target)
             _replace_with_retry(tmp, target)
             # 换上"新库"之后，必须清掉旧库遗留的 -wal/-shm。它们是**被替换掉的
             # 那个旧库**的日志与共享内存文件，文件名却仍与 target 匹配：SQLite

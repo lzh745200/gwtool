@@ -119,6 +119,56 @@ def should_check(today: str = "") -> bool:
         return True
 
 
+def consistency_check() -> "tuple[list[str], dict]":
+    """交叉一致性自检（**全部只读**），返回 (问题清单, 统计)。
+
+    为什么 quick_check 不够：它只查页级损坏。实测删掉某文档的 FTS 行后
+    `quick_check` 仍返回 ok，而该文档检索从 1 变 0 ——「数据在却搜不到」
+    是用户最困惑的故障之一，必须让自检能发现并指路。
+
+    三条只读查询，成本都是毫秒级：
+      1. FTS 行数 vs documents 行数（失配 = 有文档搜不到 / 索引有鬼影）
+      2. 附件 doc_id 悬空（指向已不存在的文档）
+      3. 快照 doc_id 悬空（「历史版本」里挂着已删除的文档）
+    """
+    problems: list[str] = []
+    stats: dict = {}
+    try:
+        conn = dbconn.get_conn()
+        docs = int(conn.execute("SELECT count(*) FROM documents").fetchone()[0])
+        fts = int(conn.execute(
+            "SELECT count(*) FROM documents_fts").fetchone()[0])
+        orphan_att = int(conn.execute(
+            "SELECT count(*) FROM attachments a "
+            "WHERE a.doc_id > 0 AND NOT EXISTS "
+            "(SELECT 1 FROM documents d WHERE d.id = a.doc_id)").fetchone()[0])
+        orphan_snap = int(conn.execute(
+            "SELECT count(*) FROM snapshots s "
+            "WHERE s.doc_id > 0 AND NOT EXISTS "
+            "(SELECT 1 FROM documents d WHERE d.id = s.doc_id)").fetchone()[0])
+        stats = {"documents": docs, "fts_rows": fts,
+                 "orphan_attachments": orphan_att,
+                 "orphan_snapshots": orphan_snap}
+        if fts != docs:
+            problems.append(
+                f"全文索引与文档数不一致（文档 {docs} 篇 / 索引 {fts} 行）——"
+                "部分文档可能搜不到。可在「工具 → 数据库维护」中重建全文索引。")
+        if orphan_att:
+            problems.append(
+                f"{orphan_att} 个附件记录指向已不存在的文档"
+                "——可在「工具 → 数据库维护」中清理无引用的附件文件。")
+        if orphan_snap:
+            problems.append(
+                f"{orphan_snap} 条历史快照指向已不存在的文档"
+                "——不影响使用，重建索引后仍会保留。")
+    except sqlite3.DatabaseError as exc:
+        problems.append(f"交叉一致性查询失败：{exc}")
+    except Exception as exc:
+        # 自检自己出错不能装作"没问题"，也不该拖垮调用方
+        problems.append(f"交叉一致性自检无法完成：{type(exc).__name__}")
+    return problems, stats
+
+
 def run_scheduled_check(today: str = "") -> "str | None":
     """启动时调用的低频自检。
 
@@ -203,8 +253,12 @@ def maintenance(rebuild_fts: bool = True) -> dict:
         pass
 
     after = _all_file_size()
+    # 维护收尾跑一次交叉一致性（全部只读、毫秒级）：重建索引后 FTS 失配
+    # 应当归零；仍在的问题项会让用户知道"维护没治好全部"。
+    problems, stats = consistency_check()
     return {"ok": True, "before": before, "after": after,
-            "saved": max(0, before - after), "fts_rows": fts_rows}
+            "saved": max(0, before - after), "fts_rows": fts_rows,
+            "consistency_problems": problems, "consistency_stats": stats}
 
 
 def human_size(size: int) -> str:
