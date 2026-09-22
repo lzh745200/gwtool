@@ -64,6 +64,12 @@ def friendly(exc: BaseException, action: str = "操作") -> str:
     """
     log.warning("%s 失败：%s: %s", action, type(exc).__name__, exc)
 
+    # ValueError 是本仓约定俗成的「业务失败」载体：raise 处写的已是面向
+    # 用户的完整中文（"没有可汇编的材料"、"备份包不完整…"），透传即可，
+    # 翻译反而会把可懂消息变成"内部错误"。
+    if isinstance(exc, ValueError):
+        return str(exc)
+
     if isinstance(exc, ModuleNotFoundError):
         # importer 依赖（如 OCR 的 Tesseract 缺失）会以它表达
         name = getattr(exc, "name", "") or ""

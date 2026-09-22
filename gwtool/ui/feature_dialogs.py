@@ -23,6 +23,7 @@ from ..core import backup as backup_core
 from ..core.security import clear_password, has_password, set_password
 from ..db import dao
 from . import theme
+from . import errmsg
 from .widgets import ThreadSafeDialog, ask, info, warn
 from .workers import _close_thread_conn
 
@@ -255,7 +256,7 @@ class _BulkReplaceWorker(QThread):
         except Exception as exc:
             import traceback
             traceback.print_exc()
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.failed.emit(errmsg.friendly(exc, action="批量替换"))
         finally:
             try:
                 from ..db import connection as _dbconn
@@ -279,7 +280,8 @@ class _BulkReplaceWorker(QThread):
                     n = text.count(self.find)
                     new_text = text.replace(self.find, self.repl) if n else text
             except _re.error as exc:
-                self.done.emit([("正则错误", str(exc), 0)])
+                # 完整中文文案（含下一步指引）随结果表回传
+                self.done.emit([("正则错误", errmsg.friendly(exc, action="批量替换"), 0)])
                 return
             if n:
                 # 写回前快照 + 结构保全（第 23 轮修复）：不传 blocks_json 会把
@@ -291,13 +293,12 @@ class _BulkReplaceWorker(QThread):
                 try:
                     dao.add_snapshot(did, d.title, d.content_text,
                                      reason="批量替换前")
-                except Exception as exc:
+                except Exception:
                     # 与批量纠错同型（batch.py）：快照失败不拦住替换，
                     # 但必须出现在结果里 —— 结果元组第二项就是「说明」位，
                     # 空串表示一切正常，非空会被对话框列出来。
-                    snap_note = ("正文已替换，但改动前的回滚快照未保存（%s）："
-                                 "这篇无法用「历史版本」退回改前状态"
-                                 % type(exc).__name__)
+                    snap_note = ("正文已替换，但改动前的回滚快照未保存："
+                                 "这篇无法用「历史版本」退回改前状态")
                 from ..core.importer import _text_to_tree
                 blocks = _text_to_tree(new_text).to_json()
                 dao.update_document_content(did, d.title, new_text, blocks_json=blocks)
@@ -401,7 +402,7 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
                         rows.append((did, d.title, n, ctx))
                         total += n
                 except _re.error as exc:
-                    regex_error = str(exc)
+                    regex_error = errmsg.friendly(exc, action="批量替换预览")
                     break
             return rows, total, regex_error
 
@@ -417,7 +418,8 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
     def _on_preview_done(self, result):
         rows, total, regex_error = result
         if regex_error:
-            warn(self, f"正则错误：{regex_error}")
+            # errmsg.friendly 已给出完整中文可执行文案，不再叠加"正则错误"前缀
+            warn(self, regex_error)
             return
         for did, title, n, ctx in rows:
             item = QListWidgetItem(f"{title}（{n} 处）：…{ctx}…")
@@ -506,7 +508,7 @@ class _BatchScanWorker(QThread):
             self.done.emit(res)
         except Exception as exc:
             traceback.print_exc()
-            self.failed.emit(str(exc))
+            self.failed.emit(errmsg.friendly(exc, action="批量纠错"))
         finally:
             # 本线程走了 dao（thread-local 连接）：不关会连同 -wal/-shm 句柄
             # 随线程一起泄漏，反复"预览/纠错"在麒麟上触发 too many open files；
@@ -533,7 +535,7 @@ class _BatchApplyWorker(QThread):
             self.done.emit(res)
         except Exception as exc:
             traceback.print_exc()
-            self.failed.emit(str(exc))
+            self.failed.emit(errmsg.friendly(exc, action="批量纠错"))
         finally:
             _close_thread_conn()
 

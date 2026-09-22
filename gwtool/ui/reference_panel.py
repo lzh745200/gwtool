@@ -130,7 +130,8 @@ class ReferencePanel(QWidget):
         try:
             self._fill_corr_list()
         except Exception as exc:
-            self.lbl_count.setText(f"结果渲染失败：{type(exc).__name__}: {exc}")
+            from .errmsg import friendly
+            self.lbl_count.setText(friendly(exc, action="结果渲染"))
         # 通知编辑器把结果画成波浪线。这里发的坐标是**全文坐标**
         # （_checked_text 取自编辑器全文），与编辑器文档坐标天然对齐，
         # 无需任何换算。

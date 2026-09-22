@@ -62,7 +62,7 @@ class FnWorker(QThread):
             self.ok.emit(self._fn(*self._args, **self._kwargs))
         except Exception as exc:
             _log_exc("后台任务")
-            self.failed.emit(str(exc))
+            self.failed.emit(errmsg.friendly(exc, action="后台任务"))
         finally:
             _close_thread_conn()
 
@@ -155,7 +155,7 @@ class CompileWorker(QThread):
             self.done.emit(out)
         except Exception as exc:
             _log_exc("一键汇编")
-            self.error.emit(str(exc))
+            self.error.emit(errmsg.friendly(exc, action="汇编"))
         finally:
             _close_thread_conn()
 
@@ -186,7 +186,7 @@ class PdfRenderWorker(QThread):
             self.done.emit(self.out_pdf)
         except Exception as exc:
             _log_exc("PDF 渲染")
-            self.error.emit(str(exc))
+            self.error.emit(errmsg.friendly(exc, action="生成 PDF"))
         finally:
             _close_thread_conn()
 
@@ -209,7 +209,7 @@ class BookletWorker(QThread):
             self.done.emit(f"{self.out_pdf}\n共 {n} 页（A3横向，骑马钉）")
         except Exception as exc:
             _log_exc("小册子重排")
-            self.error.emit(str(exc))
+            self.error.emit(errmsg.friendly(exc, action="生成小册子"))
         finally:
             _close_thread_conn()
 
@@ -240,7 +240,7 @@ class TTSWorker(QThread):
             self._engine = tts_core.TTSEngine()
         except Exception as exc:
             _log_exc("朗读引擎初始化")
-            self.failed.emit(str(exc))
+            self.failed.emit(errmsg.friendly(exc, action="初始化朗读"))
             return
         try:
             sentences = tts_core.split_sentences(self.text)

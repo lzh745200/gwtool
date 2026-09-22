@@ -8,6 +8,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import logs
 from ..db import dao
 from .model import DocTree
 from .template import DocTemplate
@@ -114,6 +115,18 @@ def compile_docx(req: CompileRequest) -> str:
         # 无材料时不追加空清单（否则会凭空多出一个只有表头的附录）
         if sources:
             trees.append(build_sources_tree(sources))
+    # 字体可观测性（N9）：缺字体时 Word/WPS 会静默替换字体，版心规格
+    # 实际不成立而成品不合规。这里不改变生成行为，只把风险写进日志；
+    # 用户可见的提示由 UI 层（汇编完成对话框）调 fontcheck.missing_note()。
+    try:
+        from .fontcheck import missing_fonts
+        _missing = missing_fonts()
+        if _missing:
+            logs.get_logger("compile").warning(
+                "本机缺失公文标准字体，生成的 docx 可能被替换字体渲染：%s",
+                "、".join(_missing))
+    except Exception:
+        pass  # 探测失败绝不拦住汇编
     return docxgen.generate_docx(trees, tpl, req.out_docx)
 
 

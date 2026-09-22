@@ -345,6 +345,12 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             msg.append(f"A4 PDF：{self.last_pdf}")
         if booklet_path:
             msg.append(f"小册子：{booklet_path}")
+        # 字体可观测性：缺字体时 Word/WPS 静默替换，成品排版可能不合规。
+        # 首启弹窗已改为状态栏常驻（N7），这里是**每次生成**都给的一次性核对机会。
+        from ..core.fontcheck import missing_note
+        note = missing_note()
+        if note:
+            msg.append(note)
         self.lbl_result.setText("生成完成！\n" + "\n".join(msg))
         info(self, "生成完成！\n" + "\n".join(msg))
 

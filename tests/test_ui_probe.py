@@ -85,7 +85,9 @@ class TestWorkersProbe:
         failed2 = _collect(w2.failed)
         w2.run()
         assert ok2 == [] and len(failed2) == 1
-        assert "division" in failed2[0][0] or "除" in failed2[0][0]
+        # errmsg.friendly 接管后：文案为中文可执行话术（原文只进日志），
+        # 不再携带英文异常名。这里断言"非空中文文案"即信号链完好。
+        assert failed2[0][0] and not failed2[0][0].isascii()
 
     def test_import_worker_real_files(self, tmp_db, tmp_path, qapp):
         """ImportWorker：真实 txt 文件导入（进度信号 + 成功计数 + 去重）。"""

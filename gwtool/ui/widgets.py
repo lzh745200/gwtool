@@ -2,6 +2,7 @@
 """UI 公共组件与工具函数。"""
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QDoubleSpinBox, QMessageBox, QPushButton, QWidget)
 
@@ -28,6 +29,17 @@ def make_font_combo(current: str = "") -> QComboBox:
     cb = QComboBox()
     fams = font_families_official_first()
     cb.addItems(fams)
+    # 缺失的公文标准字体在悬浮提示里标明（**不能**改显示文本加后缀——
+    # currentText() 会被直接写进模板字体名，污染生成的 docx）
+    try:
+        from ..core.fontcheck import missing_fonts
+        _missing = set(missing_fonts())
+        for i in range(cb.count()):
+            if cb.itemText(i) in _missing:
+                cb.setItemData(i, "本机未安装该字体，生成公文时会被替换字体",
+                               Qt.ToolTipRole)
+    except Exception:
+        pass
     if current:
         idx = cb.findText(current)
         if idx >= 0:
