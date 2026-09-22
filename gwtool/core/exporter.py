@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,7 +74,9 @@ def _document_payload(doc) -> "tuple[str, bytes, str]":
     """
     stem = safe_filename(doc.title or f"文档{doc.id}") or f"文档{doc.id}"
     src = Path(doc.file_path) if doc.file_path else None
-    if src is not None and src.exists() and src.is_file():
+    # exists()+is_file() 会各发一次 stat（3000 篇实测 nt.stat 占 0.5s）；
+    # 合并成一次 stat().st_mode 判定（S_ISREG），失败即视为不可用。
+    if src is not None and _is_regular_file(src):
         try:
             return f"documents/{stem}{src.suffix}", src.read_bytes(), "原文件"
         except OSError as exc:
@@ -112,6 +115,18 @@ def _plan_attachments(doc_ids: list[int], limit_bytes: int) -> "tuple[list, list
 
 def _sha256(blob: bytes) -> str:
     return hashlib.sha256(blob).hexdigest()
+
+
+def _is_regular_file(path: Path) -> bool:
+    """一次 stat 判定「存在且是普通文件」。
+
+    `path.exists() and path.is_file()` 是两次系统调用；3000 篇导出实测
+    nt.stat 累计 0.5s。这里合并为一次 `stat()`，失败（不存在/无权限）即 False。
+    """
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except OSError:
+        return False
 
 
 def build(req: ExportRequest) -> dict:

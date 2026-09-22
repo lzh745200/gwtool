@@ -36,12 +36,15 @@ def enabled() -> bool:
         return False
 
 
-def set_enabled(flag: bool) -> None:
+def set_enabled(flag: bool) -> bool:
+    """写入提醒开关。返回**是否真的落库成功**（理由同 csc_gec.set_setting）。"""
     try:
         dao.set_setting(SETTING_ENABLED, "1" if flag else "0")
+        return True
     except Exception as exc:
         # 与 L4/L5 开关同型：写不进去 = 重启后回到旧值，用户会认为"设了不生效"
         log.warning("督办提醒开关未能持久化（%s），重启后将回到原值", exc)
+        return False
 
 
 def due_soon_days() -> int:
@@ -53,11 +56,18 @@ def due_soon_days() -> int:
     return max(0, min(30, value))
 
 
-def set_due_soon_days(days: int) -> None:
+def set_due_soon_days(days: int) -> bool:
+    """写入「即将到期」提前量。返回**是否真的落库成功**。"""
     try:
-        dao.set_setting(SETTING_DUE_SOON, str(max(0, min(30, int(days)))))
+        value = str(max(0, min(30, int(days))))
     except (TypeError, ValueError):
-        pass
+        return False
+    try:
+        dao.set_setting(SETTING_DUE_SOON, value)
+        return True
+    except Exception as exc:
+        log.warning("督办提前量未能持久化（%s），重启后将回到原值", exc)
+        return False
 
 
 def pending(today: str = "") -> list:

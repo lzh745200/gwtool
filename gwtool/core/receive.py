@@ -22,7 +22,7 @@ from dataclasses import asdict
 from datetime import date
 
 from ..db import dao
-from .registry import SECRET_LEVELS, URGENCY_LEVELS, doc_types
+from .registry import SECRET_LEVELS, URGENCY_LEVELS, csvsafe, doc_types
 
 # 收文办理流程：签收 → 拟办 → 批办 → 承办 → 办结 → 归档。
 # 与发文的（拟稿/核稿/签发/已印发/已归档）是两条不同的流程，不可混用。
@@ -200,7 +200,7 @@ def export_csv(rows: list, out_path: str) -> int:
         writer.writerow([label for _key, label in EXPORT_COLUMNS])
         for r in rows:
             data = asdict(r)
-            writer.writerow([data.get(key, "") for key, _label in EXPORT_COLUMNS])
+            writer.writerow([csvsafe(data.get(key, "")) for key, _label in EXPORT_COLUMNS])
     return len(rows)
 
 

@@ -32,14 +32,17 @@ from __future__ import annotations
 import re
 import zipfile
 from dataclasses import dataclass, field
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 # XML 1.0 允许的字符：\t \n \r 与 >= 0x20 的合法码位。
 # 其余（\x00-\x08、\x0b、\x0c、\x0e-\x1f）会直接让 Excel 判定文件损坏。
 _ILLEGAL_XML = re.compile(
     "[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
-# sheet 名禁止字符（Excel 规定），并限长 31
-_BAD_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
+# sheet 名禁止字符（Excel 规定），并限长 31。
+# ⚠ 必须包含 `"`：sheet 名来自用户文件名（含 `"` 在 Linux/麒麟上完全合法），
+# 而它被写进 XML **属性值**，`escape()` 默认**不转义引号** → workbook.xml
+# 变成非良构 XML → Excel 报"文件已损坏"。这是实打实复现过的缺陷。
+_BAD_SHEET_CHARS = re.compile(r"[\"\[\]:*?/\\]")
 
 _MAX_COL_WIDTH = 60
 _MIN_COL_WIDTH = 8
@@ -67,7 +70,11 @@ def _col_name(index: int) -> str:
 
 
 def _sheet_name(name: str, used: set) -> str:
-    """规范化 sheet 名：去非法字符、限长 31、去重。"""
+    """规范化 sheet 名：去非法字符（含 `"`）、限长 31、去重。
+
+    这里剔除 `"` 是**双保险**：`quoteattr` 已能安全处理引号，但 Excel 自身的
+    工作表名规则本就不允许引号，剔除后名字更符合用户预期。
+    """
     clean = _BAD_SHEET_CHARS.sub("", (name or "Sheet")).strip() or "Sheet"
     clean = clean[:31]
     candidate = clean
@@ -240,7 +247,7 @@ def write_xlsx(path, sheets) -> int:
         parts[f"xl/worksheets/sheet{idx}.xml"] = _sheet_xml(sheet)
         sheet_overrides.append(_CONTENT_TYPES_SHEET.format(n=idx))
         workbook_sheets.append(
-            f'<sheet name="{_clean(name)}" sheetId="{idx}" r:id="rId{idx}"/>')
+            f'<sheet name={quoteattr(name)} sheetId="{idx}" r:id="rId{idx}"/>')
         workbook_rels.append(
             f'<Relationship Id="rId{idx}" '
             f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '

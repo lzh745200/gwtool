@@ -161,16 +161,24 @@ def _setting_on() -> bool:
     return _SETTING_CACHE
 
 
-def set_setting(on: bool) -> None:
+def set_setting(on: bool) -> bool:
+    """写入 L5 开关。返回**是否真的落库成功**。
+
+    为什么返回布尔而不是吞掉异常：异常被咽在函数内部时，调用方的
+    `try/except` 永远不会触发 —— 用户看到"已保存"，重启后开关却回到旧值，
+    而界面在本次会话内是生效的，属最难排查的一类不一致。
+    返回值让 UI 能如实告知"本次生效、但重启后会恢复"。
+    """
     global _SETTING_CACHE
     _SETTING_CACHE = bool(on)
     try:
         from ..db import dao
         dao.set_setting(SETTING_KEY, "1" if on else "0")
+        return True
     except Exception as exc:
-        # 开关没写进库 = 重启后回到旧值。用户会看到"我明明开了又关了"，
-        # 而界面在本次会话内是生效的，属于最难排查的一类不一致。
+        # 开关没写进库 = 重启后回到旧值。用户会看到"我明明开了又关了"。
         log.warning("L5 开关未能持久化（%s），重启后将回到原值", exc)
+        return False
 
 
 def available() -> bool:

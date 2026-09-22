@@ -112,6 +112,32 @@ def summarize(rows: list[dao.Dispatch]) -> dict[str, object]:
     }
 
 
+# CSV 公式注入防御：Excel/WPS/LibreOffice 会把以这四个字符起首的单元格内容
+# 当作**公式**执行。台账里的标题、备注来自用户输入（或来文原样），一旦有人
+# 把 `=cmd|'/c calc'!A1` 之类写进备注，导出文件在别人机器上打开就会触发。
+# 前置一个单引号是 CSV/Excel 通行的中和写法：Excel 会显示为文本，值本身不变。
+# 只在**导出时**加，库里的原值不动，往返导入后仍是原值。
+_CSV_FORMULA_PREFIX = ("=", "+", "-", "@")
+
+
+def csvsafe(value):
+    """把单元格值中和为不会被 Excel 当公式执行的文本。
+
+    ⚠ 只对**以危险字符起首**的字符串生效：`-5` 这种负数如果被加引号会变成
+    文本，破坏数值列。故纯数字/纯日期等常规值原样返回。
+    """
+    if not isinstance(value, str):
+        return value
+    if not value or value[0] not in _CSV_FORMULA_PREFIX:
+        return value
+    # 纯数值（含负数、小数、科学计数）保持原样：它不是攻击载荷
+    try:
+        float(value)
+    except ValueError:
+        return "'" + value
+    return value
+
+
 def export_csv(rows: list[dao.Dispatch], out_path: str) -> int:
     """导出台账为 CSV（UTF-8-BOM），返回写出的行数。
 
@@ -123,7 +149,7 @@ def export_csv(rows: list[dao.Dispatch], out_path: str) -> int:
         writer.writerow([label for _key, label in EXPORT_COLUMNS])
         for r in rows:
             data = asdict(r)
-            writer.writerow([data.get(key, "") for key, _label in EXPORT_COLUMNS])
+            writer.writerow([csvsafe(data.get(key, "")) for key, _label in EXPORT_COLUMNS])
     return len(rows)
 
 
