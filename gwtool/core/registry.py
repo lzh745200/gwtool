@@ -91,6 +91,100 @@ def year_of(d: dao.Dispatch) -> str:
     return year
 
 
+# 封面上的落款日期是给**人看**的，写法五花八门：`2026年8月`、`2026年8月15日`、
+# `2026-08-15`、`2026.8.5`。台账要的是 `YYYY-MM-DD`，两边都不该妥协 —— 用户
+# 不该为了登记台账去改封面写法，台账也不该存一个日期列里塞不进去的字符串
+# （`year_of` 与逐月统计都按 `YYYY-MM-DD` 取前 4/前 2 位切分）。
+_DATE_RE = re.compile(r"(?P<y>\d{4})\s*[年\-/.]\s*(?P<m>\d{1,2})"
+                      r"(?:\s*[月\-/.]\s*(?P<d>\d{1,2}))?\s*日?")
+# 只认年份的情况（"2026年"）：按年初归一，而不是丢弃 —— 丢了会让整条记录
+# 落不进任何年度分组，用户会觉得"登记了却统计不到"。
+_YEAR_ONLY_RE = re.compile(r"^\s*(?P<y>\d{4})\s*年?\s*$")
+
+
+def normalize_date(raw: str) -> str:
+    """把中文/点号分隔的日期归一为 `YYYY-MM-DD`；识别不了返回空串。"""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    m = _DATE_RE.search(text)
+    if m:
+        y, mo, d = m.group("y"), int(m.group("m")), m.group("d")
+        if not (1 <= mo <= 12):
+            return ""
+        day = int(d) if d else 1
+        if not (1 <= day <= 31):
+            return ""
+        return f"{y}-{mo:02d}-{day:02d}"
+    m2 = _YEAR_ONLY_RE.match(text)
+    if m2:
+        return f"{m2.group('y')}-01-01"
+    return ""
+
+
+# 从标题尾部推断文种（"关于开展XX的通知" → 通知）。只认**完全匹配后缀**的
+# 情形，不做模糊包含判断：标题里出现"通知"二字不代表它是通知（"关于印发
+# 《通知管理办法》的通知"只有最后一个才是文种）。
+def _guess_doc_type(title: str) -> str:
+    text = (title or "").strip().rstrip("。.·")
+    for kind in sorted(doc_types(), key=len, reverse=True):
+        if text.endswith(kind):
+            return kind
+    if text.endswith("会议纪要"):
+        return "纪要"
+    return ""
+
+
+def from_compile(title: str, cover=None, doc_id: int = 0,
+                 status: str = "拟稿") -> dao.Dispatch:
+    """把一次汇编的封面信息转成一条待登记的台账记录。
+
+    只做**映射与归一**，不写库 —— 落库时机由调用方决定（用户确认后再写）。
+    三条宽容原则，都是为了避免"登记失败反噬生成成功"：
+      1. 文种留空时从标题后缀推断，推不出就留空（不硬塞一个错文种）；
+      2. 发文字号格式不合规时**丢弃**而不是原样写入 —— 原样写进去会被
+         `validate` 判为异常，把可用记录变成不可保存记录；
+      3. 日期识别不了时留空（`validate` 允许成文日期为空）。
+    最后**必须**过一遍 `validate`，返回值若有问题说明调用方给了异常输入，
+    由它决定提示还是放弃；本函数不吞错也不抛错。
+    """
+    cover = cover if cover is not None else _EMPTY_COVER
+
+    def _get(name: str) -> str:
+        return (getattr(cover, name, "") or "").strip()
+
+    text = (title or "").strip() or _get("title") or "汇编成果"
+    doc_no = _get("doc_no")
+    if doc_no and not parse_doc_no(doc_no)[0]:
+        doc_no = ""                     # 见上述原则 2
+    secret = _get("secret_level")
+    urgency = _get("urgency")
+    kind = _get("doc_type") or _guess_doc_type(text)
+
+    return dao.Dispatch(
+        doc_no=doc_no,
+        title=text,
+        doc_type=kind if kind in doc_types() else "",
+        org=_get("org"),
+        secret_level=secret if secret in SECRET_LEVELS else "公开",
+        urgency=urgency if urgency in URGENCY_LEVELS else "",
+        sign_date=normalize_date(_get("date")),
+        status=status if status in STATUSES else "拟稿",
+        doc_id=int(doc_id or 0),
+        remark="由「一键汇编」生成后登记",
+    )
+
+
+class _EmptyCover:
+    """`from_compile` 的缺省封面：全空，让所有 `.xxx` 取值都回落为 ""。"""
+
+    def __getattr__(self, _name):
+        return ""
+
+
+_EMPTY_COVER = _EmptyCover()
+
+
 def summarize(rows: list[dao.Dispatch]) -> dict[str, object]:
     """台账概览：总件数、总印数、各状态与各文种件数、涉及年度。"""
     by_status: dict[str, int] = {}

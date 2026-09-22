@@ -174,6 +174,23 @@ class LibraryPanel(QWidget):
             self._add_empty_hint()
         self.count_label.setText(f"{len(docs)} 篇")
 
+    def select_document(self, doc_id: int) -> bool:
+        """在材料列表里选中并滚动到指定文档；找不到返回 False。
+
+        供「发文登记台账 → 打开原文」跳转使用：编辑器已经加载了内容，
+        若资料库列表还停在别处，用户看到的是"编辑区换了、左栏没动"的错位感。
+        找不到时不报错也不清空选择 —— 目标可能被分类/关键词筛选挡住了，
+        此时保持现状比把用户的选择清掉更好。
+        """
+        for i in range(self.doc_list.count()):
+            item = self.doc_list.item(i)
+            if item is None or item.data(Qt.UserRole) != int(doc_id):
+                continue
+            self.doc_list.setCurrentItem(item)
+            self.doc_list.scrollToItem(item)
+            return True
+        return False
+
     def _add_empty_hint(self, searching: bool = False):
         """空列表也要告诉用户下一步做什么。
 

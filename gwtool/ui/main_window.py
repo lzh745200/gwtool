@@ -523,9 +523,26 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------ 功能入口
     def open_registry(self):
-        """发文登记台账：登记、查询、统计、导出。"""
+        """发文登记台账：登记、查询、统计、导出。
+
+        台账里「打开原文」走 `open_document` 信号，接到主窗口的编辑器加载通路
+        （与资料库双击同一条），这样"未保存改动确认"与资料库刷新都不会被绕过。
+        对话框关闭后再刷一次资料库：登记过程中可能新增了产物条目。
+        """
         dlg = RegistryDialog(self)
+        dlg.open_document.connect(self._open_from_registry)
         dlg.exec()
+        self.library.reload()
+
+    def _open_from_registry(self, doc_id: int):
+        """从台账跳到资料库原文：复用编辑器的加载通路。"""
+        try:
+            self.editor.load_document(int(doc_id))
+            self.library.select_document(int(doc_id))
+        except Exception:
+            # 跳转不该因为"资料库面板没有 select_document"之类的差异而报错
+            from .. import logs
+            logs.get_logger("registry").warning("台账跳转原文失败", exc_info=True)
 
     def open_receive(self):
         """收文登记台账：来文签收、拟办、批示、承办、办结与归档。"""

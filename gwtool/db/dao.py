@@ -1240,6 +1240,26 @@ def list_dispatch(keyword: str = "", org: str = "", doc_type: str = "",
     return [Dispatch(**dict(r)) for r in rows]
 
 
+def find_dispatch_by_document(document_id: int) -> Dispatch | None:
+    """按关联的资料库文档找登记记录；无关联时返回 None。
+
+    「汇编产物 → 台账」的**幂等判据**：同一份产物重复登记必须更新既有记录
+    而不是新增一行，否则用户点两次"登记到台账"就多出一条重复件。
+
+    刻意不实现"按发文字号查重"：`doc_no` 上的 `idx_dispatch_no` 是**普通
+    索引**（不是唯一索引），历史库里的重复字号不该在本函数被隐式改写；
+    字号查重放在应用层显式做，由调用方决定是提示还是覆盖。
+    `document_id<=0` 一律返回 None —— 0 是"未关联"哨兵值，不参与匹配。
+    """
+    if int(document_id or 0) <= 0:
+        return None
+    conn = dbconn.get_conn()
+    row = conn.execute(
+        "SELECT * FROM dispatch_register WHERE doc_id=?"
+        " ORDER BY id DESC LIMIT 1", (int(document_id),)).fetchone()
+    return Dispatch(**dict(row)) if row else None
+
+
 def count_dispatch() -> int:
     conn = dbconn.get_conn()
     return int(conn.execute("SELECT count(*) FROM dispatch_register").fetchone()[0])

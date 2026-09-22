@@ -142,14 +142,22 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
     has_front = False
 
     # ---- 封面 ----
+    # 封面文字全部来自用户输入（标题、单位、落款，以及 P1-6 新增的文种/密级/
+    # 发文字号），**必须逐项 `_esc`**：Qt 的 `setHtml` 会把 `<b>` 当标签渲染，
+    # 用户本想打「<试行>」结果整段被吞掉；更糟的是内容里若带 `<img src=...>`
+    # 之类的标签，就成了一个可被外部文本触发的本地渲染面。
     if tpl.cover.enabled:
-        parts.append(f"<p class='cover-title'>{tpl.cover.title or tpl.name}</p>")
+        parts.append(f"<p class='cover-title'>{_esc(tpl.cover.title or tpl.name)}</p>")
         if tpl.cover.subtitle:
-            parts.append(f"<p style='text-align:center;text-indent:0'>{tpl.cover.subtitle}</p>")
+            parts.append("<p style='text-align:center;text-indent:0'>"
+                         f"{_esc(tpl.cover.subtitle)}</p>")
         parts.append("<p style='margin-top:170pt'></p>")
         for line in [tpl.cover.org, tpl.cover.date, *tpl.cover.extra_lines]:
-            if line:
-                parts.append(f"<p style='text-align:center;text-indent:0'>{line}</p>")
+            # `strip()` 而非直接判真：只含空格的行会被渲染成一个空段落，
+            # 悄悄把封面下沿往下顶（P1-6 的"留空行为不变"要求连这种情况也一致）。
+            if (line or "").strip():
+                parts.append("<p style='text-align:center;text-indent:0'>"
+                             f"{_esc(line)}</p>")
         has_front = True
 
     # ---- 目录（独立页；行数超一页时按 _toc_chunks 分页） ----

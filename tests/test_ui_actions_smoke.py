@@ -155,6 +155,7 @@ DIALOG_SPECS = [
     ("reference_panel", "ReferencePanel"),
     ("registry_dialog", "RegistryDialog"),
     ("registry_dialog", "DispatchForm"),
+    ("registry_dialog", "RegisterFromCompileDialog"),
 ]
 
 

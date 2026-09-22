@@ -240,7 +240,11 @@ def _build_cover(doc, tpl: DocTemplate) -> None:
     for _ in range(4):
         _spacer(doc, tpl)
     for line in [cover.org, cover.date, *cover.extra_lines]:
-        if not line:
+        # P1-6 的硬契约：封面要素**留空时产物与改动前逐字节一致**。
+        # 这里用 `strip()` 判空而非直接判真：只含空格的行会生成一个空段落，
+        # 把落款整体往下顶一行的位置。docx 与 pdf 两侧必须用同一判据，
+        # 否则同一份内容导出两个格式的封面行数不一致。
+        if not (line or "").strip():
             continue
         p3 = doc.add_paragraph()
         p3.alignment = WD_ALIGN_PARAGRAPH.CENTER

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
                                QFormLayout, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QPushButton,
@@ -164,8 +164,61 @@ class DispatchForm(QDialog):
         return self.record
 
 
-class RegistryDialog(QDialog):
+class RegisterFromCompileDialog(DispatchForm):
+    """「汇编 → 台账」的确认表单：在 `DispatchForm` 基础上换标题与说明。
+
+    继承而不是复制一份表单，是因为两者字段完全一致（台账要填的要素就是
+    发文要素）。差异只在**语义与提示**：这里的标题、主送等多半还是空的，
+    用户要补的是"发文字号"和"签批人"这两项汇编阶段拿不到的要素。
+
+    为什么直接复用 `DispatchForm` 的 `_auto_number`（自动取号）：取号依赖
+    库内既有序号，这一点与手工新增完全同构，没有理由两套实现。
+    """
+
+    def __init__(self, parent=None, record: dao.Dispatch | None = None):
+        super().__init__(parent, record)
+        self.setWindowTitle("登记汇编产物到发文台账")
+        self.setMinimumWidth(560)
+        # 顶部说明：告诉用户"这是从哪来的、要我补什么"，否则面对一堆空字段
+        # 会以为是新增登记而重复填写标题
+        note = QLabel(
+            "下列信息取自本次汇编的封面。请补充发文字号与签批信息后保存；"
+            "标题已自动填好，不必重填。\n"
+            "保存后可在台账中随时修改或删除。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#555;")
+        layout = self.layout()
+        if layout is not None:
+            layout.insertWidget(0, note)
+
+
+class SourceOpenMixin:
+    """台账「打开原文」的公共实现（主台账与未来的收文台账共用）。
+
+    抽出来是因为"查一条 doc_id 是否还活着"这个判断很容易写错成
+    `if rec.doc_id:` —— 0 是"未关联"哨兵值，非 0 也可能指向**已删除**的
+    条目。用户点开一个死链后什么都没发生，比按钮置灰更让人困惑。
+    """
+
+    def _live_document_id(self, rec: dao.Dispatch | None) -> int:
+        """返回可打开的 doc_id；未关联 / 已删除 / 在回收站里 都返回 0。"""
+        if rec is None or not int(rec.doc_id or 0):
+            return 0
+        try:
+            doc = dao.get_document(int(rec.doc_id))
+        except Exception:
+            return 0
+        if doc is None:
+            return 0
+        if getattr(doc, "deleted_time", ""):
+            return 0        # 在回收站里：资料库列表已看不到它，跳过去也是空
+        return int(rec.doc_id)
+
+
+class RegistryDialog(QDialog, SourceOpenMixin):
     """发文登记台账主对话框。"""
+
+    open_document = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -225,12 +278,20 @@ class RegistryDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemDoubleClicked.connect(lambda _i: self.edit_selected())
+        self.table.itemSelectionChanged.connect(self._update_source_button)
         layout.addWidget(self.table, 1)
 
         ops = QHBoxLayout()
         self.lbl_count = QLabel("")
         ops.addWidget(self.lbl_count)
         ops.addStretch(1)
+        # 「打开原文」：台账只记要素，但用户核对时想看的是**原文件**。
+        # 没有这条通路，就得自己去资料库里按标题再搜一遍。
+        self.btn_open_source = QPushButton("打开原文")
+        self.btn_open_source.setToolTip("在资料库中打开该登记记录关联的汇编产物")
+        self.btn_open_source.setEnabled(False)
+        self.btn_open_source.clicked.connect(self.open_selected_source)
+        ops.addWidget(self.btn_open_source)
         for text, slot in (("新增登记", self.add_record),
                            ("编辑", self.edit_selected),
                            ("删除", self.delete_selected),
@@ -293,6 +354,7 @@ class RegistryDialog(QDialog):
         self._render_table()
         self._refresh_filter_options()
         self.refresh_stats()
+        self._update_source_button()
 
     def _refresh_filter_options(self) -> None:
         """筛选项来自库内真实数据，避免出现永远查不到结果的空选项。"""
@@ -328,6 +390,47 @@ class RegistryDialog(QDialog):
                 if rid:
                     ids.append(int(rid))
         return ids
+
+    # ------------------------------------------------ 打开原文
+    def _selected_record(self) -> dao.Dispatch | None:
+        idxs = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if len(idxs) != 1:
+            return None
+        rid = self.table.item(idxs[0].row(), 0).data(Qt.UserRole)
+        return dao.get_dispatch(int(rid)) if rid else None
+
+    def _update_source_button(self) -> None:
+        """按钮可用性随选中行变化：无关联/悬空时置灰并说明原因。
+
+        置灰而非隐藏：用户看不到按钮就不知道"原来台账能跳到原文"；
+        置灰 + tooltip 讲清为什么不能点，才是一次有效的功能发现。
+        """
+        rec = self._selected_record()
+        ok = bool(self._live_document_id(rec))
+        self.btn_open_source.setEnabled(ok)
+        if ok:
+            self.btn_open_source.setToolTip("在资料库中打开该登记记录关联的汇编产物")
+        elif rec is not None and int(rec.doc_id or 0):
+            self.btn_open_source.setToolTip(
+                "关联的资料条目已被删除或移入回收站，无法打开")
+        else:
+            self.btn_open_source.setToolTip(
+                "该登记记录未关联资料库条目（只有由「一键汇编」登记的记录才有）")
+
+    def open_selected_source(self) -> None:
+        """打开关联产物：把 doc_id 抛给主窗口，由它切换编辑区。
+
+        本对话框**不自己打开文件**：那会绕开主窗口的资料库刷新与"未保存
+        改动"确认（`editor.confirm_discard_changes`），用户可能在编辑器里
+        丢了正在改的内容。
+        """
+        rec = self._selected_record()
+        doc_id = self._live_document_id(rec)
+        if not doc_id:
+            self._update_source_button()
+            info(self, "该登记记录没有可打开的原文件。")
+            return
+        self.open_document.emit(doc_id)
 
     # ------------------------------------------------ 操作
     def add_record(self) -> None:

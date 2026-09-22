@@ -25,6 +25,20 @@ if not sys.platform.startswith("win"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+class _E2ECover:
+    """自检用的最小封面对象。
+
+    与 `registry.from_compile` 期望的"有属性"对象同形，缺的字段统一返回 ""，
+    这样自检不必为了填一个字段而构造整个 `DocTemplate`（那会把 UI 层拖进来）。
+    """
+
+    def __init__(self, **kw):
+        self._map = dict(kw)
+
+    def __getattr__(self, name):
+        return self._map.get(name, "")
+
+
 def main() -> int:
     ok = 0
     fail = []
@@ -145,6 +159,54 @@ def main() -> int:
     # 6) 全文检索
     res = dao.search_documents("安全生产")
     step("FTS5 检索『安全生产』", len(res) >= 1, f"{len(res)} 条")
+
+    # 6b) 汇编产物落库 + 汇编→台账回填（P0-1 端到端链路）
+    #
+    # 为什么要在这里单独验一遍：这条链路的三个环节各自都有 pytest 覆盖，
+    # 但"三个环节接起来是否真的通"只有端到端能答。改动前向导里**根本没有**
+    # `dao.add_document` 调用，产物只落在导出目录，资料库与台账都查不到它 ——
+    # 而那时全部单元测试是绿的（没有一条用例跨过"生成→入库→回填"的边界）。
+    try:
+        from gwtool.core import registry
+
+        _prod = dao.add_document(dao.Document(
+            title="汇编成果", content_text="汇编产物的正文内容",
+            file_path=str(out_docx), file_type="docx",
+            tags="汇编成果，DOCX", category_id=0))
+        _ok_save = _prod > 0
+        # 同内容重复入库必须被识别为重复（返回 -1），而不是插出第二条
+        _dup = dao.add_document(dao.Document(
+            title="汇编成果", content_text="汇编产物的正文内容",
+            file_path=str(out_docx), file_type="docx", tags="汇编成果，DOCX"))
+        _ok_dup = _dup < 0
+        step("汇编产物入库+重复识别", _ok_save and _ok_dup,
+             f"新入库 id={_prod}；重复入库返回 {_dup}")
+
+        _rec = registry.from_compile(
+            "关于汇编年度要点的通知",
+            cover=_E2ECover(org="××市人民政府办公室", date="2026年8月",
+                            doc_type="通知", secret_level="内部",
+                            doc_no="×政办发〔2026〕13号"),
+            doc_id=_prod)
+        _problems = registry.validate(_rec)
+        step("汇编封面→台账记录", not _problems,
+             "；".join(_problems) or
+             f"{_rec.doc_type}／{_rec.secret_level}／{_rec.sign_date}")
+
+        _rid = dao.add_dispatch(_rec)
+        _back = dao.find_dispatch_by_document(_prod)
+        step("台账回填 doc_id", _back is not None and _back.id == _rid,
+             f"台账 id={_rid}，按 doc_id={_prod} 可反查")
+
+        # 幂等：同一 doc_id 再登记一次应当走"更新"而非新增
+        _n_before = dao.count_dispatch()
+        _rec.id = _rid
+        _rec.remark = "E2E 二次登记"
+        dao.update_dispatch(_rec)
+        step("同产物二次登记幂等", dao.count_dispatch() == _n_before,
+             f"{_n_before} → {dao.count_dispatch()} 条")
+    except Exception as _exc:                       # 自检失败要报出来，不吞
+        step("汇编产物入库+重复识别", False, f"{type(_exc).__name__}: {_exc}")
 
     # 7) 写作参考
     from gwtool.core import reference
