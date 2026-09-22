@@ -128,11 +128,26 @@ def _setting_on() -> bool:
     return _SETTING_CACHE
 
 
-def set_setting(on: bool) -> None:
+def set_setting(on: bool) -> bool:
+    """写入 L4 开关。返回**是否真的落库成功**（契约与 csc_gec.set_setting 一致）。
+
+    为什么必须返回布尔：设置页按 `if not saved:` 区分"已保存"与"本次生效、
+    重启后回退"。此前本函数返回 `None`（恒为假），于是**每次**拨动「拼写纠错
+    增强」开关都会弹出"未能保存到数据库，重启程序后会恢复为原来的设置" ——
+    而设置其实写成功了。用户会据此怀疑数据目录权限或磁盘，白白排查一场。
+
+    （同族的 csc_gec / reminder 已按此契约返回布尔；只有本函数被漏掉。）
+    """
     global _SETTING_CACHE
-    from ..db import dao
-    dao.set_setting(SETTING_KEY, "1" if on else "0")
     _SETTING_CACHE = bool(on)
+    try:
+        from ..db import dao
+        dao.set_setting(SETTING_KEY, "1" if on else "0")
+        return True
+    except Exception as exc:
+        # 没写进库 = 重启后回到旧值，必须留痕（内存态已在本次会话生效）
+        log.warning("L4 开关未能持久化（%s），重启后将回到原值", exc)
+        return False
 
 
 def status_text() -> str:

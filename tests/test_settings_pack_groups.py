@@ -15,7 +15,18 @@ from gwtool.db import dao
 
 
 @pytest.fixture
-def dlg(qapp, tmp_db):
+def dlg(qapp, tmp_db, monkeypatch):
+    """SecurityDialog + **屏蔽模态提示**。
+
+    本文件有真会走到 `warn()` 的路径（开关写库失败提示、导入校验提示）。
+    PySide6 的 `QMessageBox.warning` 是**静态方法、C++ 侧实现**，不 mock 就会
+    弹出真实模态框，把无人值守的测试永久挂住（实测：全量跑到本文件停住不返回、
+    日志十几分钟不增一行、无任何报错）。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     from gwtool.ui.feature_dialogs import SecurityDialog
     d = SecurityDialog(None)
     yield d
@@ -63,6 +74,35 @@ def test_setting_keys_are_distinct():
     assert csc_neural.SETTING_KEY != csc_gec.SETTING_KEY
     assert csc_neural.SETTING_KEY == "corrector_neural_enabled"
     assert csc_gec.SETTING_KEY == "corrector_gec_enabled"
+
+
+def test_toggle_does_not_raise_false_alarm(dlg, monkeypatch):
+    """拨动开关**不得**弹出"未能保存到数据库"。
+
+    回归（本轮全量门禁抓到）：`csc_neural.set_setting` 曾返回 `None`，而设置页
+    按 `if not saved:` 判定 —— 于是每次拨动 L4 开关都弹"未能保存到数据库，
+    重启后会恢复"，而设置其实写成功了。用户会据此白排查一遍磁盘与权限。
+    """
+    import gwtool.ui.feature_dialogs as fd
+    warns: list[str] = []
+    monkeypatch.setattr(fd, "warn", lambda parent, msg: warns.append(msg))
+    dlg._pack_ui["csc"]["syncing"] = False
+    dlg._on_pack_toggled("csc", True)
+    assert warns == [], f"写入成功却弹了告警：{warns}"
+    assert str(dao.get_setting(csc_neural.SETTING_KEY, "0")) == "1"
+
+
+def test_neural_set_setting_returns_false_on_db_error(tmp_db, monkeypatch):
+    """L4 开关写库失败必须返回 False（与 csc_gec / reminder 同契约）。
+
+    此前 F3 只给 csc_gec / reminder 补了返回值契约，L4 这一处被漏掉 ——
+    漏掉的代价不是"少一个返回值"，而是上面那条**假告警**。
+    """
+    from gwtool.db import dao as dao_mod
+
+    monkeypatch.setattr(dao_mod, "set_setting",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("库不可写")))
+    assert csc_neural.set_setting(True) is False
 
 
 def test_refresh_handles_broken_module_gracefully(dlg, monkeypatch):

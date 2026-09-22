@@ -181,7 +181,13 @@ class TestWorkerConnectionHygiene:
         assert src.count("finally:") >= 6
 
     def test_fn_worker_closes_on_exception(self, tmp_db):
-        """worker 抛异常时也要关连接（finally 生效），且 failed 正常发出。"""
+        """worker 抛异常时也要关连接（finally 生效），且 failed 正常发出。
+
+        B3 起 `failed` 携带的是**面向用户的中文话术**（`errmsg.friendly`），
+        原始异常文本只进日志 —— 本用例原先断言 `"boom" in err`，那是在断言
+        一条已被刻意取消的契约（文书岗用户不该在界面上看到英文异常）。
+        这里改断言新契约的两条硬要求：**信号必须发出**、**界面不得出现英文类名**。
+        """
         from gwtool.ui.workers import FnWorker
         got = {}
 
@@ -193,6 +199,8 @@ class TestWorkerConnectionHygiene:
         w = FnWorker(boom)
         w.failed.connect(lambda m: got.__setitem__("err", m))
         w.run()                        # 同步直接跑，避免 QThread 时序问题
-        assert "boom" in got.get("err", "")
+        assert got.get("err"), "worker 异常必须经 failed 信号上报，不能静默"
+        assert "RuntimeError" not in got["err"], "界面文案不得含英文异常类名"
+        assert "未完成" in got["err"] or "失败" in got["err"]
         from gwtool.db import connection as dbconn
         assert getattr(dbconn._local, "conn", None) is None, "线程连接应已关闭"

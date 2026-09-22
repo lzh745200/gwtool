@@ -10,10 +10,22 @@ from gwtool.db import connection as dbconn
 from gwtool.db import dao
 
 
-def test_corrupted_db_startup_guard(tmp_db, qapp, monkeypatch):
-    """库文件损坏时 run() 返回 2 并落诊断日志，绝不带栈崩溃、不自动覆盖。"""
+def test_corrupted_db_startup_guard(tmp_db, qapp, monkeypatch, tmp_path):
+    """库文件损坏时 run() 返回 2 并落诊断日志，绝不带栈崩溃、不自动覆盖。
+
+    两个"测试自身制造的不确定性"，都在这里消除（均实测踩到过）：
+      · `_startup_fatal` 会弹**真实模态框** `QMessageBox.exec()` —— 无人值守
+        环境下永久阻塞：全量跑停在本用例，日志十几分钟不增一行、无任何报错；
+      · 诊断日志写在**用户主目录** —— 探针不得污染真实环境，重定向到 tmp_path。
+    """
     import gwtool.app as appmod
     from gwtool import paths
+    from PySide6.QtWidgets import QMessageBox
+
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox, "exec",
+                        lambda self: shown.append(self.text()) or 0)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
     # 把当前数据目录的库文件破坏（魔数对、内容烂）
     db_file = paths.db_path()
@@ -28,6 +40,7 @@ def test_corrupted_db_startup_guard(tmp_db, qapp, monkeypatch):
 
     rc = appmod.run()
     assert rc == 2
+    assert shown, "损坏库必须给用户一次可读提示，而不是静默退出"
     log = Path.home() / "gwtool_启动诊断.log"
     assert log.exists()
     text = log.read_text(encoding="utf-8")
