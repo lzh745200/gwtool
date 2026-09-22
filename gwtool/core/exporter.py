@@ -229,5 +229,68 @@ def read_manifest(zip_path) -> dict:
         return json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
 
 
+def _check_entry(zf, names: set, entry: dict, label: str) -> list[str]:
+    """校验单个条目：在包内 + 字节数一致 + sha256 一致。"""
+    path = entry.get("path") or ""
+    if not path:
+        return [f"{label}「{entry.get('title') or '（无标题）'}」"
+                "在 manifest 里没有路径记录"]
+    if path not in names:
+        return [f"{label}缺失：{path}"]
+    raw = zf.read(path)
+    out: list[str] = []
+    want_len = entry.get("bytes")
+    if isinstance(want_len, int) and len(raw) != want_len:
+        out.append(f"{label}字节数不符：{path}"
+                   f"（包内 {len(raw)}，manifest 记录 {want_len}）")
+    want = (entry.get("sha256") or "").lower()
+    if want and _sha256(raw) != want:
+        out.append(f"{label}内容校验失败：{path}（sha256 与 manifest 不符）")
+    return out
+
+
+def verify_package(zip_path) -> dict:
+    """只读校验移交包，返回 `{ok, documents, attachments, problems}`。
+
+    为什么要能回读（D6）：`build()` 只负责写，此前没有任何校验入口 ——
+    而"移交"是**责任转移**：包交出去之后原件往往就被清理了，一旦包在传输
+    环节坏掉（U 盘坏块、网盘截断、邮件网关重编码），只能等对方用到时才发现，
+    那时数据可能已经在别处删了。交付前自己能验一遍是刚需，不是锦上添花。
+
+    校验三件事：条目在包内、字节数与 manifest 记录一致、sha256 与 manifest
+    记录一致。**不校验** manifest 本身是否被改（它随包一起走，没有可信锚点）。
+    """
+    empty = {"ok": False, "documents": 0, "attachments": 0, "problems": []}
+    try:
+        with zipfile.ZipFile(str(zip_path)) as zf:
+            names = set(zf.namelist())
+            if MANIFEST_NAME not in names:
+                return {**empty, "problems": [
+                    f"包内缺少 {MANIFEST_NAME} —— 这可能不是本程序导出的移交包，"
+                    "或者包在生成/传输中被破坏。"]}
+            try:
+                manifest = json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
+            except Exception as exc:
+                return {**empty, "problems": [
+                    f"{MANIFEST_NAME} 无法解析（{type(exc).__name__}）："
+                    "包已损坏，无法核对内容清单。"]}
+            problems: list[str] = []
+            docs = 0
+            for entry in manifest.get("documents") or []:
+                docs += 1
+                problems += _check_entry(zf, names, entry, "文档")
+            atts = 0
+            included = ((manifest.get("attachments") or {}).get("included")) or []
+            for entry in included:
+                atts += 1
+                problems += _check_entry(zf, names, entry, "附件")
+    except zipfile.BadZipFile as exc:
+        return {**empty, "problems": [f"不是有效的 ZIP 包：{exc}"]}
+    except OSError as exc:
+        return {**empty, "problems": [f"无法读取该文件：{exc}"]}
+    return {"ok": not problems, "documents": docs, "attachments": atts,
+            "problems": problems}
+
+
 def default_filename() -> str:
     return f"gwtool_资料移交包_{datetime.now():%Y%m%d_%H%M%S}.zip"

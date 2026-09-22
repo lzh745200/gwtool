@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QPushButton, QSplitter,
@@ -169,7 +170,32 @@ class LibraryPanel(QWidget):
             item.setData(Qt.UserRole, d.id)
             item.setToolTip(f"{d.title}\n标签：{d.tags or '无'}")
             self.doc_list.addItem(item)
+        if not docs:
+            self._add_empty_hint()
         self.count_label.setText(f"{len(docs)} 篇")
+
+    def _add_empty_hint(self, searching: bool = False):
+        """空列表也要告诉用户下一步做什么。
+
+        空库是**每个新用户的第一屏**：老实现只把 count_label 写成"0 篇"，
+        列表区一片空白 —— 用户分不清是"自己没导入"、"被筛掉了"还是"程序坏了"。
+        两种空给两种话：库确实是空的（引导导入）／检索没命中（提示换关键词）。
+
+        注：**不存在"被类型筛选筛空"这一种**——类型下拉的候选项就是按当前
+        分类下的材料重建的（`_reload_docs` 内），选中的类型若已无对应材料，
+        下拉会自动落回「全部类型」。为此加分支只会得到一段永不执行的代码。
+        """
+        text = ("没有匹配的材料。换个关键词试试？"
+                if searching else
+                "还没有材料。\n"
+                "① 点上方「导入」把公文/Word/PDF 导入资料库\n"
+                "② 双击材料打开编辑\n"
+                "③ 用「一键汇编」生成正式公文")
+        item = QListWidgetItem(text)
+        item.setFlags(Qt.NoItemFlags)
+        item.setForeground(QColor("#8a8a8a"))
+        item.setToolTip("这是空状态提示，不是一条材料")
+        self.doc_list.addItem(item)
 
     def _show_all(self):
         self.cat_tree.setCurrentItem(self.cat_tree.topLevelItem(0))
@@ -185,6 +211,9 @@ class LibraryPanel(QWidget):
             item = QListWidgetItem(f"{r.title}\n    {r.snippet}")
             item.setData(Qt.UserRole, r.ref_id)
             self.doc_list.addItem(item)
+        if not results:
+            # 检索无命中与"库是空的"是两回事，提示要能区分开
+            self._add_empty_hint(searching=True)
         self.count_label.setText(f"检索到 {len(results)} 处")
 
     # ------------------------------------------------ 右键菜单

@@ -38,44 +38,200 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         page.setTitle("选择材料与顺序")
         page.setSubTitle("勾选要汇编的材料；拖拽或“上移/下移”调整先后顺序（汇编按此顺序合并）。")
         v = QVBoxLayout(page)
+
+        # U6：材料一多，"在长列表里逐条找要编的"很费劲，而"默认全勾"又容易
+        # 把无关材料编进正式公文。分类/标签筛选 + 全选/全不选/反选，让用户
+        # 先缩小范围再一次性勾对。
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("筛选："))
+        self.filt_cat = QComboBox()
+        # 全部分类必须用 None（dao.list_documents(None) 才是"全部"；
+        # 传 0 表示"仅默认分类"，会把有分类的材料整批筛掉）
+        self.filt_cat.addItem("全部分类", None)
+        for c in dao.list_categories():
+            self.filt_cat.addItem(c.name, c.id)
+        self.filt_cat.setToolTip("只显示该分类下的材料；勾选状态与汇编顺序不受筛选影响")
+        self.filt_cat.currentIndexChanged.connect(self._reload_materials)
+        bar.addWidget(self.filt_cat)
+        self.filt_tag = QLineEdit()
+        self.filt_tag.setPlaceholderText("按标签/标题关键字筛选")
+        self.filt_tag.setToolTip("按标签或标题关键字过滤；清空即显示全部材料")
+        self.filt_tag.textChanged.connect(self._reload_materials)
+        bar.addWidget(self.filt_tag, 1)
+        v.addLayout(bar)
+
         self.material_list = QListWidget()
         self.material_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.material_list.setDragDropMode(QListWidget.InternalMove)
-        for d in dao.list_documents():
-            item = QListWidgetItem(f"{d.title}  [{d.file_type or '文本'}]")
-            item.setData(Qt.UserRole, d.id)
-            item.setCheckState(Qt.Checked)
-            self.material_list.addItem(item)
+        # U5：向导三步的关键控件都配一句悬停说明 —— 目标用户在离线内网，
+        # 没有在线帮助可查，"勾选是什么意思、顺序怎么定"只能靠提示。
+        self.material_list.setToolTip(
+            "勾选要汇编的材料；拖动条目或用下方「上移/下移」调整顺序，\n"
+            "汇编按列表顺序合并（把主件放最前，附件紧跟其后）")
+        self._order: list[int] = [d.id for d in dao.list_documents()]
+        self._checked: set[int] = set(self._order)      # 默认全勾（可一键取消）
+        self._labels: dict[int, str] = {
+            d.id: f"{d.title}  [{d.file_type or '文本'}]"
+            for d in dao.list_documents()}
+        self._render_materials()
+        self.material_list.itemChanged.connect(self._on_item_changed)
+        self.material_list.model().rowsMoved.connect(self._on_rows_moved)
         v.addWidget(self.material_list, 1)
         row = QHBoxLayout()
+        btn_all = QPushButton("全选")
+        btn_all.setToolTip("勾选**当前筛选出的**全部材料（不影响被筛掉的那些）")
+        btn_all.clicked.connect(lambda: self._check_visible(Qt.Checked))
+        btn_none = QPushButton("全不选")
+        btn_none.setToolTip("取消勾选**当前筛选出的**全部材料（不影响被筛掉的那些）")
+        btn_none.clicked.connect(lambda: self._check_visible(Qt.Unchecked))
+        btn_inv = QPushButton("反选")
+        btn_inv.setToolTip("把当前筛选出的材料的勾选状态逐条取反")
+        btn_inv.clicked.connect(self._invert_visible)
         btn_up = QPushButton("上移")
+        btn_up.setToolTip("把选中的材料在汇编顺序里前移一位")
         btn_up.clicked.connect(lambda: self._move(-1))
         btn_down = QPushButton("下移")
+        btn_down.setToolTip("把选中的材料在汇编顺序里后移一位")
         btn_down.clicked.connect(lambda: self._move(1))
+        for b in (btn_all, btn_none, btn_inv):
+            row.addWidget(b)
+        row.addSpacing(12)
         row.addWidget(btn_up)
         row.addWidget(btn_down)
         row.addStretch(1)
         v.addLayout(row)
         self.chk_titles = QCheckBox("将每份材料的标题作为一级标题")
+        self.chk_titles.setToolTip(
+            "勾选后每份材料的标题会成为正式公文的章标题（便于自动生成目录）")
         self.chk_titles.setChecked(True)
         v.addWidget(self.chk_titles)
         return page
 
+    # ---- 选材筛选与勾选（U6）----
+    def _visible_ids(self) -> list[int]:
+        """当前筛选（分类 + 关键字）下应当显示的材料 id，保持完整顺序。
+
+        `currentData()` 为 None 即"全部分类"——必须原样传给 dao，
+        传 0 会变成"仅默认分类"（有分类的材料会被整批隐藏）。
+        """
+        cat = self.filt_cat.currentData()
+        kw = self.filt_tag.text().strip().lower()
+        keep = {d.id for d in dao.list_documents(cat)}
+        out = []
+        for did in self._order:
+            if did not in keep:
+                continue
+            if kw and kw not in self._labels.get(did, "").lower():
+                continue
+            out.append(did)
+        return out
+
+    def _render_materials(self) -> None:
+        """按当前筛选重建列表视图；**勾选状态与顺序都取自 `_order`/`_checked`**。"""
+        self.material_list.blockSignals(True)
+        self.material_list.clear()
+        for did in self._visible_ids():
+            item = QListWidgetItem(self._labels.get(did, str(did)))
+            item.setData(Qt.UserRole, did)
+            item.setCheckState(Qt.Checked if did in self._checked else Qt.Unchecked)
+            self.material_list.addItem(item)
+        self.material_list.blockSignals(False)
+
+    def _reload_materials(self, *_a) -> None:
+        """筛选条件变化：只重画视图，不动勾选与汇编顺序。"""
+        self._render_materials()
+
+    def _on_item_changed(self, item) -> None:
+        did = item.data(Qt.UserRole)
+        if did is None:
+            return
+        if item.checkState() == Qt.Checked:
+            self._checked.add(did)
+        else:
+            self._checked.discard(did)
+
+    def _check_visible(self, state) -> None:
+        """全选/全不选：只作用于**当前可见**条目。
+
+        用户先筛出一批再"全不选"，不该把别的分类里已勾好的选择一起清掉。
+        """
+        self.material_list.blockSignals(True)
+        for i in range(self.material_list.count()):
+            self.material_list.item(i).setCheckState(state)
+        self.material_list.blockSignals(False)
+        for did in self._visible_ids():
+            if state == Qt.Checked:
+                self._checked.add(did)
+            else:
+                self._checked.discard(did)
+
+    def _invert_visible(self) -> None:
+        self.material_list.blockSignals(True)
+        for i in range(self.material_list.count()):
+            item = self.material_list.item(i)
+            item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked
+                               else Qt.Checked)
+        self.material_list.blockSignals(False)
+        for did in self._visible_ids():
+            if did in self._checked:
+                self._checked.discard(did)
+            else:
+                self._checked.add(did)
+
+    def _on_rows_moved(self, *_a) -> None:
+        """拖拽排序后，把可见段的新顺序"并回"完整顺序。
+
+        为什么不能直接以可见列表为新顺序：筛选时看不见的材料也占着位置，
+        直接覆盖会把它们的相对位置丢掉 —— 取消筛选后顺序就乱了，而汇编
+        顺序是用户一篇篇拖出来的。
+        """
+        visible_now = [self.material_list.item(i).data(Qt.UserRole)
+                       for i in range(self.material_list.count())]
+        if len(visible_now) != len(set(visible_now)):
+            return                      # 异常视图（重复项）不动顺序，宁可保守
+        vis = set(visible_now)
+        it = iter(visible_now)
+        merged = [next(it) if did in vis else did for did in self._order]
+        if sorted(merged) == sorted(self._order):
+            self._order = merged
+
+    def _current_id(self):
+        item = self.material_list.currentItem()
+        return item.data(Qt.UserRole) if item is not None else None
+
+    def _select_id(self, did) -> None:
+        for i in range(self.material_list.count()):
+            if self.material_list.item(i).data(Qt.UserRole) == did:
+                self.material_list.setCurrentRow(i)
+                return
+
     def _move(self, delta: int):
-        row = self.material_list.currentRow()
-        if row < 0:
+        """上移/下移：在**完整顺序**里移动，然后重画视图。
+
+        直接在可见列表里换位，会在筛选状态下把材料移到"看不见的邻居"之外 ——
+        统一改 `_order`（汇编顺序的唯一依据）再重画，筛选前后顺序才一致。
+        """
+        did = self._current_id()
+        if did is None:
             return
-        target = row + delta
-        if not (0 <= target < self.material_list.count()):
+        try:
+            idx = self._order.index(did)
+        except ValueError:
             return
-        item = self.material_list.takeItem(row)
-        self.material_list.insertItem(target, item)
-        self.material_list.setCurrentRow(target)
+        target = idx + delta
+        if not (0 <= target < len(self._order)):
+            return
+        self._order.insert(target, self._order.pop(idx))
+        self._render_materials()
+        self._select_id(did)
 
     def selected_doc_ids(self) -> list[int]:
-        return [self.material_list.item(i).data(Qt.UserRole)
-                for i in range(self.material_list.count())
-                if self.material_list.item(i).checkState() == Qt.Checked]
+        """已勾选材料的 id，按**汇编顺序**返回。
+
+        顺序取自 `_order` 而不是当前视图：筛选只影响可见性，不该改变汇编次序，
+        也不该让被筛掉的材料悄悄掉出汇编清单（用户勾过的就是勾过的）。
+        """
+        return [did for did in self._order if did in self._checked]
 
     # ------------------------------------------------ 第2步：模板与封面
     def _page_template(self):
@@ -87,6 +243,8 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         row = QHBoxLayout()
         row.addWidget(QLabel("模板："))
         self.tpl_combo = QComboBox()
+        self.tpl_combo.setToolTip(
+            "选用哪套版式（字体/字号/行距/页边距）。缺字体的模板会在生成结果里提示")
         self._fill_templates()
         row.addWidget(self.tpl_combo, 1)
         btn_edit = QPushButton("打开模板管理…")
@@ -137,10 +295,13 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         page.setSubTitle("选择输出内容，点击开始。")
         v = QVBoxLayout(page)
         self.chk_docx = QCheckBox("生成规范 Word 文档（.docx，WPS 兼容）")
+        self.chk_docx.setToolTip("生成可直接编辑、打印的 Word 文档（推荐）")
         self.chk_docx.setChecked(True)
         self.chk_pdf = QCheckBox("生成 A4 PDF（内置渲染器，含目录页码与外侧页码）")
+        self.chk_pdf.setToolTip("用内置渲染器生成固定版式的 PDF（不依赖本机 Office）")
         self.chk_pdf.setChecked(False)
         self.chk_booklet = QCheckBox("生成 A3 横向小册子 PDF（骑马钉，需先选 A4 PDF）")
+        self.chk_booklet.setToolTip("把 A4 双面打印后对折成 A3 骑马钉小册子")
         self.chk_booklet.setChecked(False)
         self.chk_batch = QCheckBox("批量模式：每份材料单独生成一份规范公文")
         self.chk_batch.setToolTip("勾选后按第1步顺序，对每份材料独立输出一份 docx")

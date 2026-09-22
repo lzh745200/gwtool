@@ -76,7 +76,9 @@ class EditorPanel(QWidget):
         self.outline.itemClicked.connect(self._jump_to_heading)
         self.editor = QTextEdit()
         self.editor.setPlaceholderText(
-            "双击左侧材料打开编辑；或直接粘贴文字。\n"
+            "还没有内容：先在左侧点「导入」把公文/Word/PDF 导入资料库，"
+            "再双击材料打开编辑。\n"
+            "也可以直接在这里粘贴文字。\n"
             "支持：Ctrl+S 保存到资料库；选中文字后右键可用文秘工具箱"
             "（金额大写/简繁转换等）；每 3 分钟自动保存快照。")
         font = QFont("仿宋_GB2312", 13)

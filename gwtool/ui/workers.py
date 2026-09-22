@@ -287,4 +287,11 @@ class TTSWorker(QThread):
                 self._engine.speak(s)
             self.finished_ok.emit()
         finally:
+            # N5：显式释放 SAPI COM 对象（详见 TTSEngine.close）。
+            # 放在 finally 里：朗读中途 stop()/异常都不能把 COM 引用漏在后台。
+            if self._engine is not None:
+                try:
+                    self._engine.close()
+                except Exception:
+                    pass
             _close_thread_conn()

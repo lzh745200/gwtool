@@ -37,6 +37,19 @@ _COLUMNS = (
 )
 
 
+def _attach_tip(widget, tip: str) -> None:
+    """给表单控件挂上悬停说明（tooltip + 状态栏提示各一份）。
+
+    U5：收文表单有 24 个字段，其中几对极易混淆（拟办意见 vs 领导批示、
+    紧急程度 vs 应办结日期）。填错位置不会报错，只会让台账失真 —— 而目标
+    用户在离线内网里没有任何在线帮助可查，悬停提示就是唯一的说明来源。
+    """
+    if not tip:
+        return
+    widget.setToolTip(tip)
+    widget.setStatusTip(tip)
+
+
 class ReceiveForm(QDialog):
     """单条收文登记的新增/编辑表单。"""
 
@@ -66,7 +79,8 @@ class ReceiveForm(QDialog):
         form.addRow("收文登记号：", no_row)
 
         self._add_text(form, "incoming_no", "来文字号：", self.record.incoming_no,
-                       "如 ×政发〔2026〕12号（可留空）")
+                       "如 ×政发〔2026〕12号（可留空）",
+                       tip="来文原件上的发文字号，照抄即可；用于检索与引用")
         self._add_text(form, "title", "标题：", self.record.title, "来文标题")
         self._add_combo(form, "doc_type", "文种：", receive.doc_types_available(),
                         self.record.doc_type, editable=True)
@@ -75,28 +89,40 @@ class ReceiveForm(QDialog):
         self._add_text(form, "main_send", "主送：", self.record.main_send)
         self._add_text(form, "cc", "抄送：", self.record.cc)
         self._add_combo(form, "secret_level", "密级：", list(receive.SECRET_LEVELS),
-                        self.record.secret_level)
+                        self.record.secret_level,
+                        tip="按来文标注填写（绝密/机密/秘密）；无标注留空。"
+                            "填错会影响台账的密级统计与借阅管理")
         self._add_combo(form, "urgency", "紧急程度：", list(receive.URGENCY_LEVELS),
-                        self.record.urgency)
+                        self.record.urgency,
+                        tip="公文标注的紧急程度：平急/急件/特急/特提。"
+                            "它决定办理优先级，与「应办结日期」共同驱动督办提醒")
         self._add_text(form, "doc_date", "来文成文日期：", self.record.doc_date,
                        "YYYY-MM-DD")
         self._add_text(form, "receive_date", "收到日期：", self.record.receive_date,
                        "YYYY-MM-DD")
         self._add_int(form, "pages", "页数：", self.record.pages)
         self._add_int(form, "copies", "份数：", self.record.copies)
-        self._add_text(form, "propose", "拟办意见：", self.record.propose)
-        self._add_text(form, "instruction", "领导批示：", self.record.instruction)
+        self._add_text(form, "propose", "拟办意见：", self.record.propose,
+                       tip="由拟办人员/办公室填写：建议交谁办、怎么办。"
+                           "（与下方「领导批示」不同——批示是领导的决定）")
+        self._add_text(form, "instruction", "领导批示：", self.record.instruction,
+                       tip="领导对拟办意见的批示原文（同意/另办/请××阅处…）。"
+                           "与「拟办意见」分开填，便于事后追溯决策过程")
         self._add_text(form, "handler_dept", "承办部门：", self.record.handler_dept)
         self._add_text(form, "handler", "承办人：", self.record.handler)
         self._add_text(form, "due_date", "应办结日期：", self.record.due_date,
-                       "YYYY-MM-DD（填了才会进督办提醒）")
+                       "YYYY-MM-DD（填了才会进督办提醒）",
+                       tip="填了才会进入督办提醒：到期未办结会在主窗口角标提示")
         self._add_text(form, "done_date", "办结日期：", self.record.done_date,
                        "YYYY-MM-DD")
         self._add_text(form, "result", "办理结果：", self.record.result)
         self._add_combo(form, "status", "状态：", list(receive.STATUSES),
                         self.record.status)
         self._add_combo(form, "retention", "保管期限：",
-                        list(receive.RETENTION_LEVELS), self.record.retention)
+                        list(receive.RETENTION_LEVELS), self.record.retention,
+                        tip="按《机关文件材料归档范围和文书档案保管期限规定》"
+                            "鉴定：永久 / 30 年 / 10 年；未鉴定可留空，"
+                            "归档时会写进移交清单")
         self._add_text(form, "archive_no", "档号：", self.record.archive_no)
         self._add_text(form, "archive_date", "归档日期：", self.record.archive_date,
                        "YYYY-MM-DD")
@@ -125,23 +151,28 @@ class ReceiveForm(QDialog):
 
     # ------------------------------------------------ 表单构件
     def _add_text(self, form: QFormLayout, key: str, label: str,
-                  value: str, placeholder: str = "") -> None:
+                  value: str, placeholder: str = "", tip: str = "") -> None:
         ed = QLineEdit(value or "")
         if placeholder:
             ed.setPlaceholderText(placeholder)
+        _attach_tip(ed, tip)
         self._fields[key] = ed
         form.addRow(label, ed)
 
-    def _add_int(self, form: QFormLayout, key: str, label: str, value: int) -> None:
+    def _add_int(self, form: QFormLayout, key: str, label: str, value: int,
+                 tip: str = "") -> None:
         ed = QLineEdit(str(value or 0))
         ed.setPlaceholderText("0")
+        _attach_tip(ed, tip)
         self._fields[key] = ed
         form.addRow(label, ed)
 
     def _add_combo(self, form: QFormLayout, key: str, label: str,
-                   options: list[str], value: str, editable: bool = False) -> None:
+                   options: list[str], value: str, editable: bool = False,
+                   tip: str = "") -> None:
         cb = QComboBox()
         cb.setEditable(editable)
+        _attach_tip(cb, tip)
         cb.addItems([o for o in options if o != ""])
         if value:
             idx = cb.findText(value)

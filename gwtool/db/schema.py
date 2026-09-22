@@ -26,7 +26,10 @@ from .. import logs
 #   会让常见二字词（如"会在"）成为 ⑤/cXc 的证据，把**原本放行的正常语句
 #   翻成 0.85/0.5 误报**。wordlist_sources 记录"哪些 source 是用户导入的"，
 #   供 repeat_rules 把证据集与用户词集**分开取用**。
-SCHEMA_VERSION = 5
+#
+# 版本 6：新增 fts_index_state（增量重建全文索引的状态表，P4）。
+# 同样由 TABLES 建立（老库自动补上），故 MIGRATIONS[6] 也为空。
+SCHEMA_VERSION = 6
 
 # 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级。
 #
@@ -224,6 +227,16 @@ TABLES = [
         remark TEXT DEFAULT '',
         created_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         updated_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
+    # v6：增量重建索引用的状态表（P4）。记"某个 ref_id 上次是按哪份内容
+    # （documents.text_hash）分词的"，重建时据此跳过未改动的文档。
+    # 只由 dao.rebuild_fts 维护；DAO 的日常写入不更新它 —— 那正是"改过的文档
+    # 哈希对不上、必须重分词"的判据来源。
+    """CREATE TABLE IF NOT EXISTS fts_index_state(
+        kind TEXT NOT NULL DEFAULT 'documents',
+        ref_id INTEGER NOT NULL,
+        text_hash TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(kind, ref_id)
     )""",
 ]
 

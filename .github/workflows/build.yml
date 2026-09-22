@@ -23,6 +23,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 记录依赖快照（N12）
+        shell: pwsh
+        run: |
+          # 直接依赖已分档（PySide6 按平台、其余按 Python 版本），但**传递依赖**
+          # 仍由各平台各自解析：同一份 requirements.txt 在 Windows/py3.11 与
+          # Debian11/py3.9 上装到的小版本并不相同，而全仓此前没有任何 lock 文件。
+          # 这里把"实际装成的版本集合"随构建产物存档：出问题时能追溯当时到底
+          # 装了什么，复查时再对比两平台差异并在 requirements.txt 里按需加约束。
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          pip freeze | Out-File -Encoding utf8 artifacts/requirements-locked-windows.txt
+          Write-Output "依赖快照行数：$((Get-Content artifacts/requirements-locked-windows.txt).Count)"
+
       - name: 静态检查（ruff：语法错误/未定义名称）
         run: |
           # 锁死 ruff 版本：不锁的话 CI 每次装 latest，而 ruff 的规则默认集合与
@@ -122,6 +134,13 @@ jobs:
           name: gwtool-windows-installer
           path: dist/gwtool_setup_win64.exe
 
+      - name: 上传依赖快照（N12）
+        uses: actions/upload-artifact@v4
+        with:
+          name: requirements-locked-windows
+          path: artifacts/requirements-locked-windows.txt
+          if-no-files-found: error
+
   # ------------------------------------------------------------
   # Linux ARM64 构建（麒麟 V10 主目标）：Debian 11 容器（glibc 2.31）。
   # Tesseract 4.1 + chi_sim 从容器系统集成进安装包（glibc 与麒麟桌面一致，
@@ -182,6 +201,15 @@ jobs:
         run: |
           "$PYBIN" -m pip install --upgrade pip
           "$PYBIN" -m pip install "PySide6==6.8.0.2" -r requirements.txt ruff==0.16.5
+
+      - name: 记录依赖快照（N12）
+        run: |
+          # 与 Windows job 对称：两平台各存一份实际依赖集，便于对比传递依赖漂移。
+          # 特意放在 pkgsrc **之外** —— 那个目录是 .deb 的载荷树，塞进去会把
+          # 一份开发用清单打进安装包。
+          mkdir -p artifacts
+          "$PYBIN" -m pip freeze > artifacts/requirements-locked-linux-arm64.txt
+          echo "依赖快照行数：$(wc -l < artifacts/requirements-locked-linux-arm64.txt)"
 
       - name: 静态检查（ruff）
         run: ruff check gwtool/ scripts/ tests/ main.py
@@ -289,6 +317,13 @@ jobs:
         with:
           name: gwtool-linux-arm64
           path: pkgsrc
+
+      - name: 上传依赖快照（N12）
+        uses: actions/upload-artifact@v4
+        with:
+          name: requirements-locked-linux-arm64
+          path: artifacts/requirements-locked-linux-arm64.txt
+          if-no-files-found: error
 
   # ------------------------------------------------------------
   # .deb 组装（宿主机 dpkg-deb）：唯一 Linux 安装包

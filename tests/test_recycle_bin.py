@@ -316,6 +316,7 @@ def test_recycle_bin_dialog_restore_and_purge(tmp_db, qapp):
 
 def test_library_panel_delete_goes_to_bin(tmp_db, qapp, monkeypatch, wait_bg):
     """资料库右键删除 = 移入回收站，面板上随即消失。"""
+    from PySide6.QtCore import Qt
     from gwtool.ui.library_panel import LibraryPanel
 
     did = _mk(title="面板材料", text="安全生产人人有责。")
@@ -324,9 +325,16 @@ def test_library_panel_delete_goes_to_bin(tmp_db, qapp, monkeypatch, wait_bg):
         assert panel.doc_list.count() == 1
         panel.doc_list.item(0).setSelected(True)
         panel._delete_selected()
-        assert wait_bg(panel._delete_worker, cond=lambda: panel.doc_list.count() == 0), \
+        assert wait_bg(panel._delete_worker,
+                       cond=lambda: panel.doc_list.count() == 1
+                       and panel.doc_list.item(0).data(Qt.UserRole) is None), \
             "删除任务未在限期内完成并刷新列表"
-        assert panel.doc_list.count() == 0, "删除后仍显示在列表里"
+        # N8 起空库会显示一条**不可选中**的引导项，所以"删空"不等于"列表为 0 项"。
+        # 真正要断言的是：那篇材料确实不在列表里了，剩下的只是引导文案。
+        item = panel.doc_list.item(0)
+        assert item.data(Qt.UserRole) is None, "被删除的材料仍在列表中"
+        assert "还没有材料" in item.text()
+        assert panel.count_label.text() == "0 篇"
         assert dao.count_deleted_documents() == 1
         assert dao.get_document(did) is not None
         panel.open_recycle_bin()          # 入口可用（exec 已屏蔽）

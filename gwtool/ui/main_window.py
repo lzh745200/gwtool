@@ -199,7 +199,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._wire()
-        self._first_run_checks()
         self._setup_backup_timer()
         self._update_status()
         self.refresh_reminders()
@@ -208,6 +207,11 @@ class MainWindow(QMainWindow):
         # CI 上实测为 `Windows fatal exception: access violation`（后台线程在
         # dbhealth.run_scheduled_check 里访问数据库，主线程同时在跑事件循环）。
         # 改由 showEvent 触发：语义上也更合理（窗口真的显示出来再做后台检查）。
+        #
+        # 字体检同理（N7）：老实现是在构造期同步弹**模态** QMessageBox，
+        # 用户第一次启动时窗口还没画出来就被一个技术性警告拦住；且带"只弹一次"
+        # 开关，恰恰只在最需要好印象的首启出现。现改为状态栏常驻角标，
+        # 在 showEvent 里刷新（见 _refresh_font_notice）。
 
     def _setup_backup_timer(self):
         """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。
@@ -322,22 +326,40 @@ class MainWindow(QMainWindow):
         act_anydoc.setShortcut("Ctrl+Shift+F7")
         act_anydoc.setToolTip("任意文档纠错：任意格式文档或粘贴文本，标记视图逐处修正，保结构导出")
         act_anydoc.triggered.connect(self.open_anydoc_correct)
-        for a, ic in ((act_new, "new_doc"), (act_import, "import"),
-                      (act_compile, "compile"), (act_tpl, "template"),
-                      ("SEP", ""), (act_check, "check"), (act_anydoc, "anydoc"),
-                      (act_inspect, "inspect"), ("SEP", ""),
-                      (act_tts, "tts"), (act_clip, "clipboard"),
-                      (act_fmt, "cleanup"), ("SEP", ""),
-                      (act_compare, "compare"), (act_dict, "book"),
-                      (act_registry, "registry"), (act_receive, "registry"),
-                      ("SEP", ""),
-                      (act_backup, "backup")):
+        # tooltip 是离线内网里唯一的"这是什么"来源（没有在线文档、没有客服）：
+        # 用户只能靠悬停判断该点哪个按钮。18 个动作此前只有 3 个有提示。
+        for a, ic, tip in (
+                (act_new, "new_doc", "新建公文：按文种骨架（通知/请示/报告…）起稿"),
+                (act_import, "import", "导入材料：Word/PDF/图片扫描件等，可批量"),
+                (act_compile, "compile", "一键汇编：勾选材料合并成一份正式公文（Ctrl+N）"),
+                (act_tpl, "template", "模板管理：自定义字体、字号、页边距与版式"),
+                ("SEP", "", ""),
+                (act_check, "check", "文字纠错：查错别字、标点、数字用法（F7）"),
+                (act_anydoc, "anydoc",
+                 "任意文档纠错：任意格式或粘贴文本，标记视图逐处修正（Ctrl+Shift+F7）"),
+                (act_inspect, "inspect", "格式体检：按 GB/T 9704 检查版式与要素（F8）"),
+                ("SEP", "", ""),
+                (act_tts, "tts", "朗读/停止：逐句朗读便于听校（F9）"),
+                (act_clip, "clipboard", "剪贴板入库：把刚复制的内容直接存进资料库"),
+                (act_fmt, "cleanup", "排版微调：清理多余空格、空行与全半角混排"),
+                ("SEP", "", ""),
+                (act_compare, "compare", "文档对比：查看两篇材料的差异"),
+                (act_dict, "book", "词典与词库：维护自定义词、行业术语与保护词"),
+                (act_registry, "registry",
+                 "发文登记台账：登记、查询、统计、导出（Ctrl+R）"),
+                (act_receive, "registry",
+                 "收文登记台账：来文签收、拟办、批示、承办、办结与归档（Ctrl+Shift+R）"),
+                ("SEP", "", ""),
+                (act_backup, "backup", "备份/恢复：整库打包或从备份包还原")):
             if a == "SEP":
                 tb.addSeparator()
                 continue
             ic_obj = icons.icon(ic)
             if not ic_obj.isNull():
                 a.setIcon(ic_obj)
+            if tip:
+                a.setToolTip(tip)
+                a.setStatusTip(tip)
             tb.addAction(a)
         tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
 
@@ -355,53 +377,120 @@ class MainWindow(QMainWindow):
         self._reminder_btn.clicked.connect(self.open_reminders)
         self._reminder_btn.hide()
         self.status.addPermanentWidget(self._reminder_btn)
+        # 缺字体角标（N7）：公文字体缺失会让 Word/WPS 静默替换字体，版心
+        # （22 行×28 字、固定行距 28 磅）实际不成立 —— 属"成品不合规"级别的事，
+        # 必须让用户看得见；但**不能**用模态框在启动时拦住他。常驻状态栏 + 可点开详情。
+        self._font_btn = QPushButton()
+        self._font_btn.setFlat(True)
+        self._font_btn.setCursor(Qt.PointingHandCursor)
+        self._font_btn.setToolTip("本机缺少公文标准字体：点击查看影响与解决办法")
+        self._font_btn.clicked.connect(self.show_font_notice)
+        self._font_btn.hide()
+        self.status.addPermanentWidget(self._font_btn)
+
+    def _menu_action(self, menu, text: str, slot, tip: str, shortcut=None):
+        """菜单项 + 悬停说明（tooltip 与状态栏提示各设一份）。
+
+        为什么要专门给菜单补提示：目标用户是文书岗人员，且运行在**离线内网**
+        —— 没有在线文档、没有客服，鼠标悬停是唯一能问"这是干什么的"的地方。
+        此前全库 32 个菜单项**一个提示都没有**，只有名称。
+        """
+        act = (menu.addAction(text, slot, shortcut) if shortcut
+               else menu.addAction(text, slot))
+        if tip:
+            act.setToolTip(tip)
+            act.setStatusTip(tip)
+        return act
 
     def _build_menu(self):
         m_file = self.menuBar().addMenu("文件(&F)")
-        m_file.addAction("新建公文（文种骨架）…", self.new_skeleton_doc, "Ctrl+Shift+N")
-        m_file.addAction("导入材料…", self.import_materials, "Ctrl+O")
-        m_file.addAction("剪贴板入库", self.import_clipboard, "Ctrl+Shift+B")
-        m_file.addAction("一键汇编…", self.open_compile_wizard, "Ctrl+N")
-        m_file.addAction("保存到资料库", lambda: self.editor.save_to_db(), "Ctrl+S")
-        m_file.addAction("发文登记台账…", self.open_registry, "Ctrl+R")
-        m_file.addAction("收文登记台账…", self.open_receive, "Ctrl+Shift+R")
+        m_file.menuAction().setStatusTip("新建、导入、保存与退出")
+        self._menu_action(m_file, "新建公文（文种骨架）…", self.new_skeleton_doc,
+                          "按文种（通知/请示/报告…）套用规范骨架起稿",
+                          "Ctrl+Shift+N")
+        self._menu_action(m_file, "导入材料…", self.import_materials,
+                          "把 Word/PDF/图片扫描件导入资料库（可批量、扫描件自动 OCR）",
+                          "Ctrl+O")
+        self._menu_action(m_file, "剪贴板入库", self.import_clipboard,
+                          "把刚复制的内容直接存进资料库，不必先存成文件",
+                          "Ctrl+Shift+B")
+        self._menu_action(m_file, "一键汇编…", self.open_compile_wizard,
+                          "勾选材料合并成一份正式公文（含封面、目录与页码）", "Ctrl+N")
+        self._menu_action(m_file, "保存到资料库",
+                          lambda: self.editor.save_to_db(),
+                          "把编辑器里的当前内容存成一篇材料", "Ctrl+S")
+        self._menu_action(m_file, "发文登记台账…", self.open_registry,
+                          "本单位发文的登记、查询、统计与导出（含发文字号）", "Ctrl+R")
+        self._menu_action(m_file, "收文登记台账…", self.open_receive,
+                          "来文签收、拟办、批示、承办、办结与归档（含办理时限催办）",
+                          "Ctrl+Shift+R")
         m_file.addSeparator()
-        m_file.addAction("退出", self.close, "Ctrl+Q")
+        self._menu_action(m_file, "退出", self.close,
+                          "关闭程序（有任务在跑时会先等它收工）", "Ctrl+Q")
 
         m_tool = self.menuBar().addMenu("工具(&T)")
-        m_tool.addAction("文字纠错", lambda: self.reference.run_check(), "F7")
-        m_tool.addAction("任意文档纠错…", self.open_anydoc_correct, "Ctrl+Shift+F7")
-        m_tool.addAction("公文格式体检…", self.open_inspector, "F8")
-        m_tool.addAction("朗读校对 开/停", self.toggle_tts, "F9")
-        m_tool.addAction("一键排版微调", lambda: self.editor.run_formatter())
+        m_tool.menuAction().setStatusTip("纠错、体检、朗读、批量处理与备份")
+        self._menu_action(m_tool, "文字纠错", lambda: self.reference.run_check(),
+                          "对当前文档做文字纠错（错别字、标点、数字用法）", "F7")
+        self._menu_action(m_tool, "任意文档纠错…", self.open_anydoc_correct,
+                          "任意格式文档或粘贴文本，标记视图逐处修正后保结构导出",
+                          "Ctrl+Shift+F7")
+        self._menu_action(m_tool, "公文格式体检…", self.open_inspector,
+                          "按 GB/T 9704 检查版式与要素（标题、字号、行距、页码…）",
+                          "F8")
+        self._menu_action(m_tool, "朗读校对 开/停", self.toggle_tts,
+                          "逐句朗读当前文档便于听校，再点一次停止", "F9")
+        self._menu_action(m_tool, "一键排版微调", lambda: self.editor.run_formatter(),
+                          "清理多余空格、空行、全半角混排并统一标点")
         m_tool.addSeparator()
-        m_tool.addAction("跨文档批量查找替换…", self.open_bulk_replace)
-        m_tool.addAction("按分类批量纠错…", self.open_batch_correct)
-        m_tool.addAction("相似文档查重…", self.open_similarity)
-        m_tool.addAction("文档对比…", self.open_compare)
+        self._menu_action(m_tool, "跨文档批量查找替换…", self.open_bulk_replace,
+                          "在多篇材料里统一替换（支持正则与逐条确认）")
+        self._menu_action(m_tool, "按分类批量纠错…", self.open_batch_correct,
+                          "对某个分类下的全部材料批量纠错，改前自动留快照")
+        self._menu_action(m_tool, "相似文档查重…", self.open_similarity,
+                          "找出内容高度重复的材料，避免重复归档")
+        self._menu_action(m_tool, "文档对比…", self.open_compare,
+                          "逐行对比两篇材料的差异")
         m_tool.addSeparator()
-        m_tool.addAction("历史版本（快照）…", self.open_snapshots)
-        m_tool.addAction("词典与词库管理…", self.open_dict_manager)
-        m_tool.addAction("备份…", self._do_backup)
-        m_tool.addAction("恢复…", self._do_restore)
-        m_tool.addAction("批量导出与移交包…", self.export_handover)
+        self._menu_action(m_tool, "历史版本（快照）…", self.open_snapshots,
+                          "查看并回退到某次修改前的版本（批量纠错/替换前会自动留）")
+        self._menu_action(m_tool, "词典与词库管理…", self.open_dict_manager,
+                          "维护自定义词、行业术语、保护词与纠错对")
+        self._menu_action(m_tool, "备份…", self._do_backup,
+                          "把整库（含附件）打包成备份包，用于灾难恢复")
+        self._menu_action(m_tool, "恢复…", self._do_restore,
+                          "从备份包还原数据（恢复前会自动再备份一次）")
+        self._menu_action(m_tool, "批量导出与移交包…", self.export_handover,
+                          "按范围导出资料与清单，用于交接或专题归档")
+        self._menu_action(m_tool, "校验移交包…", self.verify_handover,
+                          "逐条核对包内文件与 manifest 的 sha256，交付前先验一遍")
         m_tool.addSeparator()
-        m_tool.addAction("回收站…", self.open_recycle_bin)
+        self._menu_action(m_tool, "回收站…", self.open_recycle_bin,
+                          "查看、恢复或彻底删除已移除的材料")
 
         m_tpl = self.menuBar().addMenu("模板(&P)")
-        m_tpl.addAction("模板管理…", self.open_template_editor)
-        m_tpl.addAction("一键汇编…", self.open_compile_wizard)
+        m_tpl.menuAction().setStatusTip("公文模板与版式")
+        self._menu_action(m_tpl, "模板管理…", self.open_template_editor,
+                          "自定义字体、字号、行距、页边距与封面要素")
+        self._menu_action(m_tpl, "一键汇编…", self.open_compile_wizard,
+                          "用当前模板把选中的材料合并成正式公文")
 
         m_set = self.menuBar().addMenu("设置(&S)")
-        m_set.addAction("系统与安全…", self.open_security)
-        m_set.addAction("数据库维护…", self.open_db_maintenance)
+        m_set.menuAction().setStatusTip("安全设置与数据库维护")
+        self._menu_action(m_set, "系统与安全…", self.open_security,
+                          "口令锁、附件体积上限、精度增强包与索引维护")
+        self._menu_action(m_set, "数据库维护…", self.open_db_maintenance,
+                          "碎片整理、重建索引与交叉一致性自检（需约 2 倍库体积空间）")
 
         m_help = self.menuBar().addMenu("帮助(&H)")
-        m_help.addAction("生成诊断包…", self.export_diagpack)
+        m_help.menuAction().setStatusTip("诊断包与版本信息")
+        self._menu_action(m_help, "生成诊断包…", self.export_diagpack,
+                          "导出环境信息与运行日志（不含任何公文正文），供反馈问题")
         m_help.addSeparator()
-        m_help.addAction("关于", lambda: info(
+        self._menu_action(m_help, "关于", lambda: info(
             self, f"{APP_NAME} v{__version__}\n\n单机离线版智能公文汇编与写作辅助工具\n"
-                  f"数据目录：{db_path().parent}\n全程无网络请求。"))
+                  f"数据目录：{db_path().parent}\n全程无网络请求。"),
+            "版本号与数据目录位置")
 
     # ------------------------------------------------ 信号接线
     def _wire(self):
@@ -550,6 +639,45 @@ class MainWindow(QMainWindow):
                    f"文档 {rep['documents']} 篇、附件 {rep['attachments']} 个"
                    f"{tail}。\n"
                    f"包内 manifest.json 含每份文档的原文件名与 sha256 校验值。")
+
+    def verify_handover(self):
+        """校验移交包（D6）：交付前自己验一遍，别等对方用到时才发现包坏了。
+
+        移交是责任转移 —— 包交出去后原件常被清理，传输环节（U 盘坏块、网盘
+        截断）造成的问题必须在**交付前**暴露。
+        """
+        from ..core import exporter
+
+        path, _sel = QFileDialog.getOpenFileName(
+            self, "选择要校验的移交包", str(export_dir()),
+            "ZIP 压缩包 (*.zip)")
+        if not path:
+            return
+        _status_msg(self, "正在校验移交包…")
+        self._verify_worker = _run_bg(
+            lambda: self._guarded(lambda: exporter.verify_package(path)),
+            on_ok=lambda result: self._verify_done(path, result), parent=self)
+
+    def _verify_done(self, path: str, result):
+        rep, err = result
+        if rep is None:
+            log.warning("移交包校验失败：%s", err)
+            _status_msg(self, "校验未完成", 8000)
+            warn(self, f"校验失败：{err}")
+            return
+        if rep["ok"]:
+            _status_msg(self, "移交包校验通过", 5000)
+            info(self, f"移交包校验通过：\n{path}\n\n"
+                       f"文档 {rep['documents']} 篇、附件 {rep['attachments']} 个，"
+                       "逐条 sha256 与包内 manifest 记录一致。")
+            return
+        log.warning("移交包校验未通过：%s", rep["problems"])
+        _status_msg(self, "移交包校验未通过", 10000)
+        shown = rep["problems"][:20]
+        warn(self, "移交包校验未通过：\n\n· " + "\n· ".join(shown)
+                   + (f"\n\n（共 {len(rep['problems'])} 项问题）"
+                      if len(rep["problems"]) > len(shown) else "")
+                   + "\n\n请不要把它当作正式移交件使用，建议重新生成一份。")
 
     def _on_db_check_done(self, problem):
         """自检回调：只有发现问题才提示。"""
@@ -1027,14 +1155,45 @@ class MainWindow(QMainWindow):
                        "请重启程序使数据完全生效。")
 
     # ------------------------------------------------ 启动检查
-    def _first_run_checks(self):
-        missing = missing_official_fonts()
-        if missing:
-            if dao.get_setting("font_warning_shown") != "1":
-                warn(self, "未检测到以下公文字体，汇编出的 Word 仍会按名称引用，"
-                           "在安装了这些字体的电脑上可正常显示：\n"
-                           + "\n".join(missing))
-                dao.set_setting("font_warning_shown", "1")
+    def _refresh_font_notice(self):
+        """公文字体缺失 -> 状态栏常驻角标（**不阻塞启动**、不再"只提示一次"）。
+
+        老实现：在 `__init__` 里同步弹模态 `QMessageBox`，并靠 settings 里的
+        `font_warning_shown` 只弹一次。两个问题：
+          1. 用户第一次启动时窗口还没显示就被技术性警告拦住；
+          2. 那份提示只在**最需要好印象的首启**出现，之后再也不提 —— 用户
+             装没装字体、排版是否合规，界面上一概看不出来。
+        现在：状态栏角标常驻（缺几种就写几种），点击展开影响与解决办法；
+        另外每次生成公文时，汇编结果提示里也会带上字体说明
+        （`core/fontcheck.missing_note`，见 N9）。
+        """
+        btn = getattr(self, "_font_btn", None)
+        if btn is None:
+            return
+        try:
+            missing = missing_official_fonts()
+        except Exception:
+            btn.hide()
+            return
+        if not missing:
+            btn.hide()
+            return
+        btn.setText(f"⚠ 缺少公文字体 {len(missing)} 种")
+        btn.setToolTip("本机未安装：" + "、".join(missing)
+                       + "\n点击查看影响与解决办法")
+        btn.show()
+
+    def show_font_notice(self):
+        """点开字体角标：说清后果与下一步（不给用户一个没有出路的警告）。"""
+        from ..core.fontcheck import missing_note
+
+        try:
+            note = missing_note()
+        except Exception:
+            note = ""
+        if not note:
+            note = "本机公文标准字体齐全。"
+        info(self, note + "\n\n安装字体后重启本程序，状态栏角标会自动消失。")
 
     def _update_status(self):
         n = dao.count_documents()
@@ -1062,6 +1221,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_db_check_started", False):
             return
         self._db_check_started = True
+        try:
+            self._refresh_font_notice()
+        except Exception:
+            pass
         try:
             self._maybe_db_health_check()
         except Exception:

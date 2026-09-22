@@ -490,16 +490,27 @@ def iter_documents_content(category_id: int | None = None,
         yield dict(row)
 
 
-def rebuild_fts(progress_cb=None) -> dict[str, int]:
-    """全量重建 FTS 索引（documents/phrases）。
+def rebuild_fts(progress_cb=None, incremental: bool = True) -> dict[str, int]:
+    """重建 FTS 索引（documents/phrases）；默认**增量**。
 
     FTS 行由 DAO 在写入时同步维护，任何绕过 DAO 的写入（如种子 ATTACH 直插、
     手工改库）都会造成索引静默失配；此函数是用户可见的自救入口。
-    返回各源重建条数。
+    返回各源重建条数（`documents` 为索引内文档总数）。
 
     `progress_cb(text)` 为可选阶段进度回调：万篇库重建要逐条分词，放在 UI
     线程上会整窗冻结。回调**只作观测**——它自己抛错绝不能中断重建
     （重建失败才是真故障，进度显示失败不是）。
+
+    为什么是增量（P4）：全量重建要**整库重新分词**，而绝大多数文档自上次
+    重建以来并没有改动。判据用 `documents.text_hash` 与 `fts_index_state`
+    里记的上次分词依据比对：只有"新增/内容变了/索引里缺行"的文档才重新分词。
+
+    ⚠ 为什么必须比对**内容哈希**、而不是"FTS 行是否存在"：文档改过之后 FTS
+    行依然在（DAO 会就地替换），只查存在性会把改过的文档当成"已索引"——
+    检索命中的仍是旧词，而这正是 rebuild 本该修好的问题。
+
+    `incremental=False` 退化为全量重建（先清空两张索引表与状态表）：状态表被
+    外部改坏时用它兜底 —— 自助入口必须能真的自救，不能只会增量。
     """
     def _tick(msg: str) -> None:
         if progress_cb is None:
@@ -512,21 +523,55 @@ def rebuild_fts(progress_cb=None) -> dict[str, int]:
     conn = dbconn.get_conn()
     from . import tokenize as tok
     counts: dict[str, int] = {}
-    _tick("正在清空旧索引…")
-    conn.execute("DELETE FROM documents_fts")
     # 回收站里的文档不进索引：否则重建一次就把软删除的材料全部变回可检索
     rows = conn.execute(
-        "SELECT id, title, content_text FROM documents WHERE deleted_time=''"
+        "SELECT id, title, content_text, text_hash FROM documents"
+        " WHERE deleted_time=''"
     ).fetchall()
     total = len(rows)
+
+    if incremental:
+        indexed = {int(r["ref_id"]) for r in conn.execute(
+            "SELECT ref_id FROM documents_fts").fetchall()}
+        state = {int(r["ref_id"]): (r["text_hash"] or "") for r in conn.execute(
+            "SELECT ref_id, text_hash FROM fts_index_state"
+            " WHERE kind='documents'").fetchall()}
+    else:
+        _tick("正在清空旧索引…")
+        indexed, state = set(), {}
+        conn.execute("DELETE FROM documents_fts")
+        conn.execute("DELETE FROM fts_index_state WHERE kind='documents'")
+
+    keep: set[int] = set()
+    reused = 0
     _tick(f"正在重建资料索引（0/{total}）…")
     for i, r in enumerate(rows, 1):
-        conn.execute(
-            "INSERT INTO documents_fts(title,tokenized,ref_id) VALUES(?,?,?)",
-            (tok.tokenize(r["title"]), tok.tokenize(r["content_text"]), int(r["id"])))
+        did = int(r["id"])
+        keep.add(did)
+        digest = r["text_hash"] or ""
+        if digest and did in indexed and state.get(did) == digest:
+            reused += 1          # 内容未变且索引在位：跳过——这就是"第二次很快"的来源
+        else:
+            conn.execute("DELETE FROM documents_fts WHERE ref_id=?", (did,))
+            conn.execute(
+                "INSERT INTO documents_fts(title,tokenized,ref_id) VALUES(?,?,?)",
+                (tok.tokenize(r["title"]), tok.tokenize(r["content_text"]), did))
+            conn.execute(
+                "INSERT INTO fts_index_state(kind,ref_id,text_hash)"
+                " VALUES('documents',?,?)"
+                " ON CONFLICT(kind,ref_id) DO UPDATE SET text_hash=excluded.text_hash",
+                (did, digest))
         if i % 50 == 0 or i == total:
             _tick(f"正在重建资料索引（{i}/{total}）…")
-    counts["documents"] = total
+    # 清掉"已不在库中"（含被移入回收站）的文档残留行与状态
+    for did in (indexed | set(state)) - keep:
+        conn.execute("DELETE FROM documents_fts WHERE ref_id=?", (did,))
+        conn.execute("DELETE FROM fts_index_state WHERE kind='documents' AND ref_id=?",
+                     (did,))
+    counts["documents"] = len(keep)
+    counts["rescanned"] = total - reused
+
+    # 句式索引条数少（人工维护），仍然整体重建，不必为它引入第二套状态
     _tick("正在重建句式索引…")
     conn.execute("DELETE FROM phrases_fts")
     rows = conn.execute("SELECT id, phrase, context FROM user_phrases").fetchall()

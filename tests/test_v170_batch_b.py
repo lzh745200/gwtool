@@ -15,6 +15,13 @@
   N4  六类 worker 都具备 stop()；退出路径对超时线程 terminate 兜底
   N3  备份/恢复、全库打包、数据库维护、体检与重建索引必须真在后台线程执行
   P3  批量归档必须单事务提交（不得逐行 commit）
+  N7  字体缺失提示不得阻塞启动（状态栏角标，点击才展开）
+  N8  空库/空检索必须给出下一步（引导项不可选中）
+  U5  关键动作与菜单项的悬停提示不得为空
+  P4  第二次重建索引必须跳过未改动的文档（增量）
+  D6  移交包校验：好包放行、被篡改的包必须失败
+  U6  汇编选材筛选不得改变勾选与汇编顺序
+  N5  朗读引擎必须显式释放（close 在 finally 中调用）
 """
 from __future__ import annotations
 
@@ -552,7 +559,9 @@ class TestInspectorAndFtsOffMainThread:
         from gwtool.db import dao as dao_mod
         msgs: list[str] = []
         counts = dao_mod.rebuild_fts(progress_cb=msgs.append)
-        assert set(counts) == {"documents", "phrases"}
+        # P4 起多返回一个 rescanned（本次真正重分词的条数）
+        assert {"documents", "phrases"} <= set(counts)
+        assert isinstance(counts.get("rescanned"), int)
         assert msgs, "重建过程没有回报任何阶段进度"
 
     def test_rebuild_fts_empty_result_is_explained(self, qapp, tmp_db, monkeypatch,
@@ -594,3 +603,446 @@ class TestInspectorAndFtsOffMainThread:
             assert "索引重建未完成" in dlg.lbl_fts.text()
         finally:
             dlg.deleteLater()
+
+
+# ------------------------------------------------------------------ B5
+class TestFirstRunFontNotice:
+    """N7+U3：字体缺失提示必须**不阻塞启动**，且不再"只提示一次"。
+
+    老实现是在 __init__ 里同步弹模态 QMessageBox，并靠 settings 的
+    `font_warning_shown` 只弹一次 —— 用户首屏就被技术性警告拦住，而那份
+    提示恰恰只在首启出现，之后装没装字体界面上一概看不出来。
+    """
+
+    def _build(self, qapp, tmp_db, monkeypatch, missing):
+        from PySide6.QtWidgets import (QDialog, QFileDialog, QInputDialog,
+                                       QMessageBox)
+
+        import gwtool.ui.main_window as mw
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(mw, "missing_official_fonts", lambda: list(missing))
+        monkeypatch.setattr(mw, "warn",
+                            lambda parent, text: shown.append(("warn", text)))
+        monkeypatch.setattr(mw, "info",
+                            lambda parent, text: shown.append(("info", text)))
+        monkeypatch.setattr(QDialog, "exec",
+                            lambda self: QDialog.DialogCode.Rejected)
+        monkeypatch.setattr(QMessageBox, "warning", staticmethod(
+            lambda *a, **k: shown.append(("modal", a[2] if len(a) > 2 else ""))))
+        monkeypatch.setattr(QMessageBox, "information",
+                            staticmethod(lambda *a, **k: None))
+        monkeypatch.setattr(QMessageBox, "question", staticmethod(
+            lambda *a, **k: QMessageBox.StandardButton.Yes))
+        monkeypatch.setattr(QInputDialog, "getItem",
+                            staticmethod(lambda *a, **k: ("", False)))
+        monkeypatch.setattr(QInputDialog, "getText",
+                            staticmethod(lambda *a, **k: ("", False)))
+        monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: ("", "")))
+        monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                            staticmethod(lambda *a, **k: ("", "")))
+        return mw.MainWindow(), shown
+
+    def test_constructor_does_not_pop_modal(self, qapp, tmp_db, monkeypatch):
+        win, shown = self._build(qapp, tmp_db, monkeypatch,
+                                 ["仿宋_GB2312", "方正小标宋简体"])
+        try:
+            assert shown == [], f"构造期弹了模态提示：{shown}"
+            assert hasattr(win, "_font_btn"), "缺少状态栏字体角标"
+            win._refresh_font_notice()
+            assert "缺少公文字体 2 种" in win._font_btn.text()
+            assert "仿宋_GB2312" in win._font_btn.toolTip()
+            assert shown == [], "刷新角标本身不得弹窗"
+            # 用户点击才展开详情（被动提示，不打断）
+            win.show_font_notice()
+            assert shown and shown[-1][0] == "info"
+            assert "仿宋_GB2312" in shown[-1][1]
+        finally:
+            win.close()
+
+    def test_notice_hidden_when_fonts_present(self, qapp, tmp_db, monkeypatch):
+        win, shown = self._build(qapp, tmp_db, monkeypatch, [])
+        try:
+            win._refresh_font_notice()
+            assert win._font_btn.text() == ""
+            assert win._font_btn.isHidden() or not win._font_btn.isVisible()
+            assert shown == []
+        finally:
+            win.close()
+
+
+class TestEmptyStateGuidance:
+    """N8：空库/空检索必须给出下一步，而不是一片空白。"""
+
+    def test_empty_library_shows_guidance(self, qapp, tmp_db):
+        from PySide6.QtCore import Qt
+
+        from gwtool.ui.library_panel import LibraryPanel
+        panel = LibraryPanel()
+        try:
+            assert panel.doc_list.count() == 1, "空库应给出且只给一条引导项"
+            item = panel.doc_list.item(0)
+            text = item.text()
+            assert "还没有材料" in text and "导入" in text and "一键汇编" in text
+            assert item.flags() == Qt.NoItemFlags, "引导项不得被选中（它不是材料）"
+            assert item.data(Qt.UserRole) is None
+        finally:
+            panel.close()
+
+    def test_library_with_documents_has_no_hint(self, qapp, tmp_db):
+        from gwtool.db import dao
+        from gwtool.ui.library_panel import LibraryPanel
+
+        dao.add_document(dao.Document(title="有材料", content_text="正文内容"))
+        panel = LibraryPanel()
+        try:
+            assert panel.doc_list.count() == 1
+            assert "还没有材料" not in panel.doc_list.item(0).text()
+        finally:
+            panel.close()
+
+    def test_search_without_hit_explains(self, qapp, tmp_db):
+        from gwtool.ui.library_panel import LibraryPanel
+        panel = LibraryPanel()
+        try:
+            panel.search_box.setText("绝不可能命中的关键词zzz")
+            panel._on_search()
+            texts = [panel.doc_list.item(i).text()
+                     for i in range(panel.doc_list.count())]
+            assert any("没有匹配的材料" in t for t in texts), texts
+        finally:
+            panel.close()
+
+    def test_editor_placeholder_points_to_import(self, qapp, tmp_db):
+        from gwtool.ui.editor_panel import EditorPanel
+        panel = EditorPanel()
+        try:
+            text = panel.editor.placeholderText()
+            assert "导入" in text, "空编辑器应告诉用户第一步是导入"
+        finally:
+            panel.close()
+
+
+class TestTooltipCoverage:
+    """U5：关键动作与菜单项的悬停提示不得为空。
+
+    离线内网里没有在线文档、没有客服，鼠标悬停是用户唯一能问
+    "这个按钮/菜单项是干什么的"的地方。
+
+    ⚠ 判据不能用 `bool(a.toolTip())`：Qt 的 `QAction.toolTip` 在**未设置**时
+    会回落为动作文本，于是"每个动作都有 tooltip"恒真 —— 典型的照抄式断言。
+    这里要求提示必须是**独立的一句说明**（不等于标题、且有实际长度）。
+    """
+
+    @staticmethod
+    def _label(a) -> str:
+        return (a.text() or "").replace("&", "").strip()
+
+    def test_every_main_window_action_has_real_tooltip(self, main_win):
+        from PySide6.QtGui import QAction
+        from PySide6.QtWidgets import QToolBar
+
+        # 容器类动作不算"功能动作"：菜单栏的 5 个菜单标题、工具栏的
+        # toggleViewAction（"主工具栏"显隐开关）都是 Qt 自动生成的容器项，
+        # 它们的 toolTip 必然回落为标题。菜单标题的用途由
+        # test_menu_items_have_real_status_tips 单独断言。
+        containers = set(main_win.menuBar().actions())
+        for bar in main_win.findChildren(QToolBar):
+            containers.add(bar.toggleViewAction())
+
+        acts = [a for a in main_win.findChildren(QAction)
+                if self._label(a) and a not in containers]
+        assert len(acts) >= 40, f"功能动作数量异常偏少：{len(acts)}"
+        weak = []
+        for a in acts:
+            tip = a.toolTip().strip()
+            if tip == self._label(a) or len(tip) < 6:
+                weak.append((self._label(a), tip))
+        assert weak == [], f"以下动作的提示缺失或只是重复标题：{weak}"
+
+    def test_menu_items_have_real_status_tips(self, main_win):
+        weak = []
+        for act in main_win.menuBar().actions():
+            tip = act.statusTip().strip()
+            if not tip or tip == (act.text() or "").replace("&", "").strip():
+                weak.append(act.text())
+        assert weak == [], f"菜单本身也应有独立用途说明：{weak}"
+
+    def test_wizard_key_controls_have_tooltips(self, qapp, tmp_db):
+        from gwtool.ui.compile_wizard import CompileWizard
+        w = CompileWizard()
+        try:
+            for name in ("material_list", "tpl_combo", "chk_titles",
+                         "chk_docx", "chk_pdf", "chk_booklet"):
+                wdg = getattr(w, name)
+                assert len(wdg.toolTip().strip()) >= 6, f"{name} 缺少悬停提示"
+        finally:
+            w.deleteLater()
+
+    def test_receive_form_key_fields_have_tooltips(self, qapp, tmp_db):
+        """拟办意见 vs 领导批示、密级、紧急程度、保管期限 —— 最易填错的一批。"""
+        from gwtool.ui.receive_dialog import ReceiveForm
+        form = ReceiveForm(None)
+        try:
+            for key in ("propose", "instruction", "secret_level", "urgency",
+                        "retention", "due_date"):
+                wdg = form._fields[key]
+                assert len(wdg.toolTip().strip()) >= 6, f"{key} 缺少悬停提示"
+        finally:
+            form.deleteLater()
+
+
+# ------------------------------------------------------------------ B6
+class TestIncrementalFtsRebuild:
+    """P4：第二次重建必须**跳过未改动的文档**（增量的全部意义）。"""
+
+    def test_second_rebuild_reuses_unchanged_documents(self, tmp_db):
+        from gwtool.db import dao as dao_mod
+
+        for i in range(30):
+            dao_mod.add_document(dao_mod.Document(
+                title=f"材料{i}", content_text=f"正文{i}：安全生产责任落实到人。"))
+        first = dao_mod.rebuild_fts()
+        assert first["documents"] == 30
+        assert first["rescanned"] == 30, "首次重建应把所有文档纳入"
+
+        second = dao_mod.rebuild_fts()
+        assert second["documents"] == 30, "条数必须不变"
+        assert second["rescanned"] == 0, "未改动的文档被重新分词了 —— 增量失效"
+
+    def test_changed_document_is_rescanned(self, tmp_db):
+        """改过的文档必须重分词：只查"FTS 行是否存在"会漏掉这种（行还在）。"""
+        from gwtool.db import dao as dao_mod
+
+        did = dao_mod.add_document(dao_mod.Document(title="甲", content_text="原始内容"))
+        dao_mod.rebuild_fts()
+        dao_mod.update_document_content(did, "甲（改）", "改后正文含新关键词航天器")
+        rep = dao_mod.rebuild_fts()
+        assert rep["rescanned"] == 1, "内容变了却跳过了重分词"
+        hits = dao_mod.search_documents("航天器")
+        assert hits and hits[0].ref_id == did, "增量重建后检索不到新内容"
+
+    def test_rebuild_drops_rows_of_removed_documents(self, tmp_db):
+        from gwtool.db import dao as dao_mod
+
+        did = dao_mod.add_document(dao_mod.Document(title="待删", content_text="内容"))
+        dao_mod.rebuild_fts()
+        dao_mod.delete_document(did)                   # 软删除进回收站
+        rep = dao_mod.rebuild_fts()
+        assert rep["documents"] == 0
+        conn = dao_mod.dbconn.get_conn()
+        left = conn.execute("SELECT count(*) FROM fts_index_state"
+                            " WHERE kind='documents'").fetchone()[0]
+        assert left == 0, "回收站文档的状态残留"
+        assert dao_mod.search_documents("内容") == []
+
+    def test_full_rebuild_flag_rescans_everything(self, tmp_db):
+        """incremental=False 是"状态表被改坏"时的兜底，必须真的重扫。"""
+        from gwtool.db import dao as dao_mod
+
+        dao_mod.add_document(dao_mod.Document(title="甲", content_text="正文"))
+        dao_mod.rebuild_fts()
+        rep = dao_mod.rebuild_fts(incremental=False)
+        assert rep["rescanned"] == 1
+        assert rep["documents"] == 1
+
+
+class TestHandoverVerify:
+    """D6：包能不能用，要能**自己验**而不是等对方发现。"""
+
+    @staticmethod
+    def _make_pkg(tmp_path) -> str:
+        from gwtool.core import exporter
+        from gwtool.db import dao as dao_mod
+
+        dao_mod.add_document(dao_mod.Document(title="甲材料", content_text="正文甲"))
+        dao_mod.add_document(dao_mod.Document(title="乙材料", content_text="正文乙"))
+        out = tmp_path / "pkg.zip"
+        exporter.build(exporter.ExportRequest(out_path=str(out),
+                                             include_attachments=False))
+        return str(out)
+
+    def test_good_package_passes(self, tmp_db, tmp_path):
+        from gwtool.core import exporter
+
+        rep = exporter.verify_package(self._make_pkg(tmp_path))
+        assert rep["ok"] is True, rep["problems"]
+        assert rep["documents"] == 2 and rep["problems"] == []
+
+    def test_tampered_package_fails(self, tmp_db, tmp_path):
+        """真实字节篡改：改掉包内一份文档的尾部，sha256 必须对不上。"""
+        import zipfile
+
+        from gwtool.core import exporter
+
+        src = self._make_pkg(tmp_path)
+        tampered = tmp_path / "tampered.zip"
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(tampered, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.endswith(".txt"):
+                    data = data[:-8] + b"TAMPERED"
+                zout.writestr(item, data)
+        rep = exporter.verify_package(str(tampered))
+        assert rep["ok"] is False, "被篡改的包竟然校验通过"
+        assert rep["problems"], "失败但没给出任何原因"
+        assert any(("sha256" in p) or ("字节数" in p) for p in rep["problems"]), \
+            rep["problems"]
+
+    def test_missing_entry_is_reported(self, tmp_db, tmp_path):
+        import zipfile
+
+        from gwtool.core import exporter
+
+        src = self._make_pkg(tmp_path)
+        stripped = tmp_path / "stripped.zip"
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(stripped, "w") as zout:
+            for item in zin.infolist():
+                if item.filename.endswith("/乙材料.txt"):
+                    continue                      # 抽掉一份材料
+                zout.writestr(item, zin.read(item.filename))
+        rep = exporter.verify_package(str(stripped))
+        assert rep["ok"] is False
+        assert any("缺失" in p for p in rep["problems"]), rep["problems"]
+
+    def test_not_a_zip_is_reported(self, tmp_db, tmp_path):
+        from gwtool.core import exporter
+
+        bad = tmp_path / "notzip.zip"
+        bad.write_bytes("这不是压缩包".encode("utf-8") * 20)
+        rep = exporter.verify_package(str(bad))
+        assert rep["ok"] is False and rep["problems"]
+
+
+class TestWizardMaterialFilter:
+    """U6：筛选只影响"看见什么"，不得影响"勾了谁、什么顺序"。"""
+
+    def _setup(self, tmp_db):
+        from gwtool.db import dao as dao_mod
+        cat = dao_mod.add_category("专项材料")
+        a = dao_mod.add_document(dao_mod.Document(title="甲材料", content_text="甲正文"))
+        b = dao_mod.add_document(dao_mod.Document(
+            title="乙材料", content_text="乙正文", category_id=cat))
+        return dao_mod, cat, a, b
+
+    def test_filter_narrows_view_only(self, qapp, tmp_db):
+        from PySide6.QtCore import Qt
+
+        from gwtool.ui.compile_wizard import CompileWizard
+
+        _dao, _cat, a, b = self._setup(tmp_db)
+        w = CompileWizard()
+        try:
+            base = w.selected_doc_ids()
+            assert set(base) == {a, b}, "默认应全勾"
+            w.filt_tag.setText("乙材料")
+            assert w.material_list.count() == 1, "关键字筛选未生效"
+            assert w.selected_doc_ids() == base, "筛选改变了勾选或顺序"
+            w._check_visible(Qt.Unchecked)
+            assert w.selected_doc_ids() == [x for x in base if x != b]
+            w._invert_visible()
+            assert w.selected_doc_ids() == base
+        finally:
+            w.deleteLater()
+
+    def test_category_filter_narrows_view_only(self, qapp, tmp_db):
+        from PySide6.QtCore import Qt
+
+        from gwtool.ui.compile_wizard import CompileWizard
+
+        _dao, cat, a, b = self._setup(tmp_db)
+        w = CompileWizard()
+        try:
+            idx = w.filt_cat.findData(cat)
+            assert idx >= 0, "分类下拉未包含新建分类"
+            base = w.selected_doc_ids()
+            w.filt_cat.setCurrentIndex(idx)
+            assert w.material_list.count() == 1
+            assert w.selected_doc_ids() == base
+            assert w.material_list.item(0).data(Qt.UserRole) == b
+        finally:
+            w.deleteLater()
+
+    def test_invert_only_affects_visible(self, qapp, tmp_db):
+        from gwtool.ui.compile_wizard import CompileWizard
+
+        _dao, _cat, a, b = self._setup(tmp_db)
+        w = CompileWizard()
+        try:
+            w.filt_tag.setText("甲材料")
+            w._invert_visible()                 # 只把"甲"勾掉
+            ids = w.selected_doc_ids()
+            assert a not in ids, "反选未作用于可见项"
+            assert b in ids, "反选影响到了被筛掉的材料"
+        finally:
+            w.deleteLater()
+
+
+class TestTtsComRelease:
+    """N5：朗读引擎必须显式释放 COM 引用（不能只靠 GC）。"""
+
+    def test_engine_close_releases_voice(self, tmp_db, monkeypatch):
+        from gwtool.core import tts
+
+        assert callable(getattr(tts.TTSEngine, "close", None)), \
+            "TTSEngine 缺少 close()，COM 引用只能等 GC"
+        eng = tts.TTSEngine.__new__(tts.TTSEngine)
+        eng._proc = None
+        eng._stopped = False
+        eng._voice = object()               # 冒充已创建的 SAPI 对象
+        eng.close()
+        assert eng._voice is None, "close() 之后仍持有 COM 引用"
+        assert eng._stopped is True
+
+    def test_worker_closes_engine_in_finally(self, tmp_db, monkeypatch):
+        """朗读结束（含中途 stop）都必须走 close —— 放在 finally 里。"""
+        from gwtool.core import tts as tts_core
+        from gwtool.ui import workers as W
+
+        calls: list[str] = []
+
+        class FakeEngine:
+            def __init__(self):
+                self._stopped = False
+
+            def speak(self, _text):
+                pass
+
+            def stop(self):
+                calls.append("stop")
+
+            def close(self):
+                calls.append("close")
+
+        monkeypatch.setattr(tts_core, "TTSEngine", FakeEngine)
+        w = W.TTSWorker("第一句。第二句。")
+        finished: list[bool] = []
+        w.finished_ok.connect(lambda: finished.append(True))
+        w.run()                              # 同步直接跑
+        assert "close" in calls, "朗读结束没有释放引擎（COM 引用会累积）"
+        assert finished, "正常跑完必须发 finished_ok"
+
+    def test_worker_closes_engine_when_stopped(self, tmp_db, monkeypatch):
+        from gwtool.core import tts as tts_core
+        from gwtool.ui import workers as W
+
+        calls: list[str] = []
+
+        class FakeEngine:
+            def __init__(self):
+                self._stopped = False
+
+            def speak(self, _text):
+                pass
+
+            def stop(self):
+                calls.append("stop")
+
+            def close(self):
+                calls.append("close")
+
+        monkeypatch.setattr(tts_core, "TTSEngine", FakeEngine)
+        w = W.TTSWorker("第一句。第二句。")
+        w._stop = True                        # 用户点了停止
+        w.run()
+        assert "close" in calls, "被停止的朗读同样必须释放引擎"

@@ -46,13 +46,18 @@ def list_voices() -> list[str]:
     import sys
     if not sys.platform.startswith("win"):
         return []
+    voice = None
     try:
         import win32com.client
-        v = win32com.client.Dispatch("SAPI.SpVoice")
-        return [v.GetVoices().Item(i).GetDescription()
-                for i in range(v.GetVoices().Count)]
+        voice = win32com.client.Dispatch("SAPI.SpVoice")
+        return [voice.GetVoices().Item(i).GetDescription()
+                for i in range(voice.GetVoices().Count)]
     except Exception:
         return []
+    finally:
+        # N5：显式丢掉 COM 引用。此函数会被设置页反复调用（每次打开都拉一遍
+        # 语音列表），靠 GC 释放的话，COM 端对象会攒到下次 GC 才消失。
+        voice = None
 
 
 def _settings() -> tuple[int, str]:
@@ -127,3 +132,22 @@ class TTSEngine:
                 pass
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
+
+    def close(self) -> None:
+        """释放本引擎持有的系统资源（N5）。
+
+        为什么必须有这个显式入口：`Dispatch` 出来的 SAPI 对象只要还被 Python
+        引用着，COM 端就一直活着。朗读校对每开一次就新建一个引擎（TTSWorker），
+        不释放只能等 GC —— 表现为反复朗读后 COM 引用缓慢累积、退出时报 COM
+        相关错误。这里与 core/compiler.py / core/parsers/doc_parser.py 的
+        COM 释放写法对齐：置空最后一个引用，并把清理放进 finally，任何一步
+        失败都不影响其它清理动作。
+        """
+        self._stopped = True
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+        self._proc = None
+        self._voice = None          # 丢掉最后一个引用 → COM 对象可被释放

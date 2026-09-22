@@ -300,6 +300,25 @@ def test_ci_asserts_optional_stack_on_both_platforms():
         "静默降级写法已复活：装不上也不报错，功能面会被悄悄削弱")
 
 
+def test_ci_records_dependency_snapshots_on_both_platforms():
+    """N12：两个平台都必须把**实际装成的**依赖集存档并上传。
+
+    直接依赖已分档（PySide6 按平台、其余按 Python 版本），但**传递依赖**由各
+    平台自行解析：Windows/py3.11 与 Debian11/py3.9 装到的小版本并不相同，而
+    全仓此前没有任何 lock 文件。没有快照就没有追溯依据 —— 再出"同源码不同
+    行为"的事故只能靠猜。
+
+    另：Linux 快照必须落在 pkgsrc **之外**，那是 .deb 的载荷树。
+    """
+    text = _read(".github", "workflows", "build.yml")
+    assert text.count("pip freeze") >= 2, "两个 job 都要记录依赖快照"
+    assert "artifacts/requirements-locked-windows.txt" in text
+    assert "artifacts/requirements-locked-linux-arm64.txt" in text
+    # 两份都要作为 artifact 上传（只生成不上传等于没记录）
+    assert text.count("requirements-locked-") >= 4, "依赖快照未在两个 job 各上传一次"
+    assert "pkgsrc/requirements-locked" not in text, "快照混进了 .deb 载荷树"
+
+
 def test_smoke_dist_checks_runtime_capabilities():
     """打包冒烟必须让**产物自己**报告能力面（而非在构建机上 import）。"""
     text = _read("scripts", "smoke_dist.py")
