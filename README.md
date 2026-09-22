@@ -221,7 +221,7 @@ gwtool/
 │   ├── logs.py                 # 运行期诊断日志（队列异步、有界轮转、不记正文）
 │   ├── paths.py                # 数据目录（%APPDATA% / ~/.local/share / 便携 Data/）
 │   ├── db/                     # 数据层
-│   │   ├── schema.py           #   12 张业务表 + 3 个 FTS5 虚表 + 版本迁移（v4）
+│   │   ├── schema.py           #   14 张业务表 + 3 个 FTS5 虚表 + 版本迁移（v6）
 │   │   ├── connection.py       #   线程本地连接、WAL、迁移前自动备份
 │   │   ├── dao.py              #   唯一数据访问入口（文档/词典/纠错对/模板/快照…）
 │   │   └── tokenize.py         #   jieba 分词（建索引 + 构造 MATCH 查询）
