@@ -82,14 +82,27 @@ def get_conn() -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        init_schema(conn)
+        try:
+            init_schema(conn)
+        except Exception:
+            # 初始化失败（库版本过新 / 迁移失败）：连接必须在这里关掉 ——
+            # 它既没登记进 _local，也不会被 close_current_thread 收走，
+            # 每次重试都会泄漏一个句柄与一对 -wal/-shm 文件。
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            raise
         _local.conn = conn
         _register_conn()
     return conn
 
 
 def _pre_migrate_backup() -> None:
-    """老库升级（schema 迁移）前自动做一次备份，作为安全网。
+    """打开库之前做一次自洽备份，作为安全网。
+
+    两种场景共用：① 老库即将迁移（`*_premigrate_v{n}.zip`）；
+    ② 库版本比程序新（`*_newer_v{n}.zip`）—— 程序会拒绝打开，但先留原件。
 
     用 SQLite 在线备份 API 落一份**自洽**快照再打包，不走 get_conn
     （避免在初始化中递归触发迁移）。
@@ -111,15 +124,20 @@ def _pre_migrate_backup() -> None:
         raw.close()
     except sqlite3.Error:
         return
-    if not (0 < ver < SCHEMA_VERSION):
-        return
+    if ver <= 0 or ver == SCHEMA_VERSION:
+        return          # 新库（无版本）与当前版本都无需备份
+    # ver < SCHEMA_VERSION：即将迁移，先留安全网。
+    # ver > SCHEMA_VERSION（D5 新增）：库比程序**新**，本程序不会打开它，
+    # 但更要留一份原件 —— 用户接下来无论换版本打开还是误操作，都有退路。
+    newer = ver > SCHEMA_VERSION
     try:
         import datetime
         import zipfile
         backups = _db_file.parent / "backups"
         backups.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = backups / f"gwtool_backup_{stamp}_premigrate_v{ver}.zip"
+        tag = f"newer_v{ver}" if newer else f"premigrate_v{ver}"
+        dest = backups / f"gwtool_backup_{stamp}_{tag}.zip"
         snap = _db_file.with_name(_db_file.name + ".premigrate-snap")
         src = sqlite3.connect(f"file:{_db_file.as_posix()}?mode=ro", uri=True,
                               timeout=30)
@@ -139,9 +157,10 @@ def _pre_migrate_backup() -> None:
             except OSError:
                 pass
     except (OSError, sqlite3.Error) as exc:
-        # 迁移前备份失败 = 本次升级失去安全网。绝不能静默：一旦迁移出问题，
+        # 备份失败 = 本次升级/拒绝打开都失去安全网。绝不能静默：一旦迁移出问题，
         # 用户既没有回退点、也拿不到任何解释。必须留痕。
-        logs.get_logger("db").warning("迁移前备份失败，本次升级无安全网：%s", exc)
+        logs.get_logger("db").warning(
+            "打开库之前的自动备份失败（无安全网，库版本 v%d）：%s", ver, exc)
 
 
 def close_current_thread() -> None:

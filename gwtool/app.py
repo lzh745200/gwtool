@@ -20,6 +20,7 @@ from . import paths
 # 下一行刻意保留未用导入抑制：这里的"未使用"正是本段代码的目的
 # （只为让 PyInstaller 的静态分析看到这两个模块）。
 from .core import classify, report  # noqa: F401
+from .db.schema import MigrationFailedError, SchemaTooNewError
 from .paths import bundled_db_seed_path, db_path
 from .ui.feature_dialogs import LockDialog
 
@@ -195,6 +196,27 @@ def run(import_path: str = "") -> int:
                  "放到 U 盘或其他可写位置；③ 清理磁盘空间。",
                  "数据目录：" + str(exc.path)]
         return _startup_fatal(chr(10).join(lines))
+    except SchemaTooNewError as exc:
+        # D5：库比程序新。**绝不改写版本号**糊过去 —— 明确拒绝并说清怎么走。
+        # 原始库在打开前已被自动备份到 backups/（*_newer_v*.zip）。
+        logs.get_logger("app").error("数据库版本高于本程序，拒绝打开")
+        from .paths import backup_dir
+        lines = [str(exc)]
+        newer = sorted(backup_dir().glob("*_newer_v*.zip"))
+        if newer:
+            lines.append("")
+            lines.append("（打开前已自动留档一份原件：" + newer[-1].name + "）")
+        return _startup_fatal(chr(10).join(lines))
+    except MigrationFailedError as exc:
+        # D5：迁移中途失败已整批回滚，库停在迁移前状态、版本号未变。
+        logs.get_logger("app").exception("数据库迁移失败")
+        return _startup_fatal(chr(10).join([
+            "数据库结构升级失败，已回滚到升级前状态（数据未被改动）。",
+            str(exc),
+            "",
+            "可尝试：① 重启程序重试（迁移会再跑一次）；② 若反复失败，"
+            "请用「备份/恢复」还原一份备份；③ 生成诊断包反馈。",
+        ]))
 
     from .ui.main_window import MainWindow
     # 口令锁（启用后启动先解锁）

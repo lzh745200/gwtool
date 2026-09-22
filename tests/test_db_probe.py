@@ -340,3 +340,134 @@ class TestConnectionFallback:
         conn = dbconn.get_conn()
         conn.execute("SELECT 1")  # 能正常工作即可
         dbconn.close_current_thread()
+
+
+class TestMigrationHardening:
+    """D5：迁移链加硬的四条不变量（真实 SQLite，禁 mock）。
+
+    老实现的两个问题都属"看起来正常、实际已经坏了"：
+      1. 迁移语句失败只记一条 warning 就继续，最后**照样**把 user_version
+         写成最新 —— 那个库从此再也补不上缺的列，而程序认为一切正常；
+      2. 打开比程序**新**的库时，range() 为空 → 不跑迁移 → 却把 user_version
+         **降**回自己能识别的值，等于把"我读不懂这个库"这件事擦掉了。
+    """
+
+    @staticmethod
+    def _make_v1_db(db_file: Path) -> None:
+        """造一个 v1 老库：有 documents 表但缺 v2/v3 的列。"""
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_file))
+        conn.executescript("""
+            CREATE TABLE documents(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content_text TEXT NOT NULL DEFAULT '',
+                category_id INTEGER NOT NULL DEFAULT 0,
+                text_hash TEXT NOT NULL DEFAULT '',
+                word_count INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO documents(title, content_text, text_hash, word_count)
+                VALUES('老文档', '老正文', 'h1', 3);
+        """)
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _user_version(db_file: Path) -> int:
+        conn = sqlite3.connect(str(db_file))
+        try:
+            return conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_newer_db_is_refused_and_version_untouched(self, tmp_path):
+        """库版本高于程序：明确拒绝，且**不得**改写 user_version。"""
+        from gwtool.db import schema as db_schema
+
+        db_file = tmp_path / "future" / "gwtool.db"
+        self._make_v1_db(db_file)
+        future = db_schema.SCHEMA_VERSION + 1
+        conn = sqlite3.connect(str(db_file))
+        conn.execute("PRAGMA user_version=%d" % future)
+        conn.commit()
+        conn.close()
+
+        dbconn.configure(db_file)
+        try:
+            with pytest.raises(db_schema.SchemaTooNewError) as ei:
+                dbconn.get_conn()
+            assert str(future) in str(ei.value)
+            assert str(db_schema.SCHEMA_VERSION) in str(ei.value)
+        finally:
+            dbconn.close_current_thread()
+
+        assert self._user_version(db_file) == future, \
+            "库版本被程序改写了 —— 这正是 D5 要禁止的行为"
+        # 拒绝打开前必须留一份原件，用户还有退路
+        zips = list((tmp_path / "future" / "backups").glob("*_newer_v*.zip"))
+        assert len(zips) == 1, "库比程序新时必须先自动留档"
+
+    def test_migration_failure_rolls_back_and_keeps_version(self, tmp_path,
+                                                            monkeypatch):
+        """迁移语句真故障：整批回滚 + 版本号保持原值 + 不留半截结构。"""
+        from gwtool.db import schema as db_schema
+
+        db_file = tmp_path / "old" / "gwtool.db"
+        self._make_v1_db(db_file)
+        # 注入一条"能改结构但会失败"的迁移：先加列（本条会成功），
+        # 下一条查不存在的表（必失败）→ 整批都必须回滚
+        monkeypatch.setitem(
+            db_schema.MIGRATIONS, 2,
+            ["ALTER TABLE documents ADD COLUMN d5_probe_col INTEGER",
+             "SELECT * FROM d5_no_such_table"])
+
+        dbconn.configure(db_file)
+        try:
+            with pytest.raises(db_schema.MigrationFailedError) as ei:
+                dbconn.get_conn()
+            assert "d5_no_such_table" in str(ei.value)
+        finally:
+            dbconn.close_current_thread()
+
+        assert self._user_version(db_file) == 1, "迁移失败却写进了版本号"
+        conn = sqlite3.connect(str(db_file))
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(documents)")]
+            assert "d5_probe_col" not in cols, "失败前已执行的 ALTER 未被回滚"
+            n = conn.execute("SELECT count(*) FROM documents").fetchone()[0]
+            assert n == 1, "老数据受损"
+        finally:
+            conn.close()
+
+    def test_duplicate_column_is_still_tolerated(self, tmp_db):
+        """新库建表已含新列：重复 ALTER 属预期分支，不得因此抛错。"""
+        from gwtool.db import schema as db_schema
+        conn = dbconn.get_conn()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == \
+            db_schema.SCHEMA_VERSION
+        # 再跑一次初始化（等价于"用户升级后第二次启动"）
+        db_schema.init_schema(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == \
+            db_schema.SCHEMA_VERSION
+
+    def test_failed_init_does_not_leak_connection(self, tmp_path):
+        """初始化失败不得把连接留在 _local：否则每次重试泄漏一个句柄。"""
+        from gwtool.db import schema as db_schema
+
+        db_file = tmp_path / "future2" / "gwtool.db"
+        self._make_v1_db(db_file)
+        conn = sqlite3.connect(str(db_file))
+        conn.execute("PRAGMA user_version=%d" % (db_schema.SCHEMA_VERSION + 1))
+        conn.commit()
+        conn.close()
+
+        dbconn.configure(db_file)
+        try:
+            for _ in range(3):
+                with pytest.raises(db_schema.SchemaTooNewError):
+                    dbconn.get_conn()
+            assert getattr(dbconn._local, "conn", None) is None, \
+                "失败的连接被缓存进了 _local"
+        finally:
+            dbconn.close_current_thread()

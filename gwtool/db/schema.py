@@ -294,6 +294,48 @@ def core_table_names() -> tuple[str, ...]:
     return CORE_TABLES
 
 
+class SchemaTooNewError(RuntimeError):
+    """库由**更新版本**的程序创建（`user_version > SCHEMA_VERSION`）。
+
+    为什么必须明确拒绝、而不是"顺手把版本号改回自己能识别的值"：那个库可能
+    含本版本不认识的列、索引与触发器，降版本号只是把事实掩盖起来 —— 之后
+    任何按老结构写回的操作都可能**破坏用户数据**，而用户看到的却是一切正常。
+
+    宁可拒绝启动：用户至少知道该用哪个版本的程序打开，数据完好无损。
+    """
+
+    def __init__(self, db_version: int, app_version: int):
+        self.db_version = db_version
+        self.app_version = app_version
+        super().__init__(
+            f"数据库由更新版本的程序创建（库结构 v{db_version}，"
+            f"本程序支持到 v{app_version}）。\n"
+            "为避免损坏数据，本程序不会打开或改写它。\n\n"
+            "怎么办（任选其一）：\n"
+            "  1) 改用创建该库的那个程序（更新版本）打开；\n"
+            "  2) 用本版本程序打开另一个数据目录（便携模式 --portable），"
+            "再从备份包还原一份本版本可用的数据；\n"
+            "  3) 确认这份库不需要后，把它移走再启动本程序（会新建空库）。")
+
+
+class MigrationFailedError(RuntimeError):
+    """迁移语句执行失败，本次初始化已**整批回滚**。
+
+    关键点：`user_version` 只在全部迁移成功后写入。老实现会把失败语句
+    记一条 warning 后继续，最后仍把版本号写成 `SCHEMA_VERSION` —— 于是
+    "迁移失败的库"与"迁移成功的库"对程序完全一样，下一版迁移不会再跑，
+    缺失的列会一直缺下去。
+    """
+
+    def __init__(self, version: int, stmt: str, cause: BaseException):
+        self.version = version
+        self.statement = stmt
+        self.cause = cause
+        super().__init__(
+            f"数据库迁移 v{version} 执行失败，已回滚到迁移前状态"
+            f"（版本号保持原值）。\n失败语句：{stmt}\n原因：{cause}")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """建库建表并执行版本化迁移；设置用户版本号以支持后续迁移。
 
@@ -302,30 +344,54 @@ def init_schema(conn: sqlite3.Connection) -> None:
       2. MIGRATIONS —— 老库逐版本补列；
       3. INDEXES  —— 全部二级索引（此时新列两种来源都已就位）；
       4. FTS_TABLES —— 全文检索虚表。
+
+    事务边界（D5）：
+      · 整段初始化放在**单个事务**里（含建表、迁移、索引、虚表），
+        任一真故障即整批回滚 —— 不留"一半迁移完"的库；
+      · `user_version` **只在全部成功后**写入，失败时保持原值，
+        下次启动会重新尝试；
+      · 库版本高于本程序时直接拒绝（SchemaTooNewError），不降版本号。
     """
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA foreign_keys=ON")
     old_ver = cur.execute("PRAGMA user_version").fetchone()[0]
-    for ddl in TABLES:
-        cur.execute(ddl)
-    # 老库逐版本迁移；新库建表已含新列时 ALTER 重复报错属预期，忽略
-    for v in range(old_ver + 1, SCHEMA_VERSION + 1):
-        for stmt in MIGRATIONS.get(v, []):
+    if old_ver > SCHEMA_VERSION:
+        raise SchemaTooNewError(old_ver, SCHEMA_VERSION)
+    # 显式开启事务：Python sqlite3 的 legacy 模式**只为 DML 隐式开事务**，
+    # 而这里全是 DDL —— 不显式 BEGIN 的话，每条 DDL 各自 autocommit，
+    # "整批回滚"就无从谈起（SQLite 本身支持事务化 DDL，是驱动层没开）。
+    owns_txn = not conn.in_transaction
+    if owns_txn:
+        conn.execute("BEGIN")
+    try:
+        for ddl in TABLES:
+            cur.execute(ddl)
+        # 老库逐版本迁移；新库建表已含新列时 ALTER 重复报错属预期，忽略
+        for v in range(old_ver + 1, SCHEMA_VERSION + 1):
+            for stmt in MIGRATIONS.get(v, []):
+                try:
+                    cur.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    # "duplicate column name" 是预期分支（新库建表时已含该列）。
+                    # 其他 OperationalError（语法错、库损坏、锁冲突）是真故障：
+                    # 必须抛 —— 老实现只记一条 warning 就继续，最后仍把版本号
+                    # 顶格写成最新，那个库从此再也补不上缺的列。
+                    if "duplicate column" in str(exc).lower():
+                        continue
+                    logs.get_logger("db").error(
+                        "迁移 v%d 语句失败，整批回滚：%s", v, exc)
+                    raise MigrationFailedError(v, stmt, exc) from exc
+        for ddl in INDEXES:
+            cur.execute(ddl)
+        for ddl in FTS_TABLES:
+            cur.execute(ddl)
+        cur.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+    except Exception:
+        if owns_txn:
             try:
-                cur.execute(stmt)
-            except sqlite3.OperationalError as exc:
-                # "duplicate column name" 是预期分支（新库建表时已含该列）。
-                # 但**其他** OperationalError（语法错、库损坏、锁冲突）是真故障——
-                # 此前一并静默吞掉，等于把迁移失败藏了起来：老库停在半途，
-                # 程序却报告一切正常。真故障必须留痕。
-                if "duplicate column" not in str(exc).lower():
-                    logs.get_logger("db").warning(
-                        "迁移 v%d 的语句执行失败（已跳过，该库可能结构不完整）：%s",
-                        v, exc)
-    for ddl in INDEXES:
-        cur.execute(ddl)
-    for ddl in FTS_TABLES:
-        cur.execute(ddl)
-    cur.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+                conn.rollback()
+            except sqlite3.Error:      # 回滚自身失败不能顶替原始异常
+                pass
+        raise
     conn.commit()
