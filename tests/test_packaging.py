@@ -149,11 +149,18 @@ def test_no_hardcoded_build_machine_paths():
 
     .workbuddy 是 IDE 工作目录（memory/skills/agent 记录），非产品代码，
     笔记里写本机解释器路径属正常使用，扫描应跳过。
+
+    跳过规则说明：
+      · `.venv*` 按前缀匹配（.venv / .venv64 / .venv_win …），里面必然有本机路径；
+      · 构建目录按**前缀**匹配 `build` / `dist`，这样 `build_new/`、`dist_new/`
+        （沙箱不允许删 dist/ 时改用 --distpath/--workpath 的备用目录）也被覆盖。
+        PyInstaller 的 Analysis-00.toc 与 xref-*.html 会原样记录构建机绝对路径，
+        若漏跳会得到"本地红、CI 绿"（CI 上不存在这些目录）的假失败。
     """
-    skip_dirs = {".git", "__pycache__", "build", "dist", ".pytest_cache",
+    skip_dirs = {".git", "__pycache__", ".pytest_cache",
                  "node_modules", ".qoder", ".workbuddy"}
-    # 虚拟环境目录按前缀匹配（.venv / .venv64 / .venv_win …），里面必然有本机路径
-    skip_prefixes = (".venv",)
+    # 虚拟环境目录按前缀匹配；构建产物目录同样按前缀（覆盖 build_new / dist_new）
+    skip_prefixes = (".venv", "build", "dist")
     skip_suffix = {".pyc", ".pdf", ".pptx", ".db", ".zip", ".exe", ".png", ".ico"}
     hits = []
     for path in ROOT.rglob("*"):
@@ -182,6 +189,52 @@ def test_build_script_does_not_assume_venv_exists():
     text = _read("scripts", "build_windows.bat")
     assert "if not exist" in text, "缺少 .venv 存在性判断"
     assert "errorlevel 1" in text, "缺少失败退出判断，打包失败会被当成成功"
+
+
+# ------------------------------------------------- 备用构建目录必须被忽略
+def test_api_commit_skips_variant_build_dirs():
+    """api_commit 的目录过滤必须覆盖 build*/dist*/ 变体，不能只认固定名。
+
+    这是**已经发生过两次**的事故，且第二次是原地复现：
+      · 2026-09-13：SKIP_DIRS 漏 .venv64/.convlib/.zcode/.workbuddy/packs，
+        --auto 把 3.7 万个环境文件（含 740MB 模型包）全量上传。
+      · 2026-09-22：改用 --distpath dist_new/--workpath build_new 绕开沙箱后，
+        精确集合匹配挡不住新目录名 → **420 个产物文件（整个 Qt 运行时）**
+        被逐个上传，只能中途 kill 掉进程。
+    根因是同一类：把"哪些目录不能传"写成人工维护的固定名清单，改一处忘一处
+    就是一次全量污染。故此处要求**前缀匹配**，并直接验行为而不只是读源码。
+    """
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import api_commit
+
+    must_skip = [".venv", ".venv64", ".venv311", ".venv_win",
+                 "build", "build_new", "build-old",
+                 "dist", "dist_new", "dist_old"]
+    must_keep = ["gwtool", "scripts", "tests", "docs",
+                 "buildings", "distribution", "distill", "buildable"]
+    wrong = [n for n in must_skip if not api_commit.is_skipped_dir(n)]
+    wrong += [n for n in must_keep if api_commit.is_skipped_dir(n)]
+    assert not wrong, f"目录过滤判定错误：{wrong}"
+
+
+def test_api_commit_scan_excludes_local_build_outputs():
+    """实扫一遍仓库根：构建产物目录不得出现在待上传清单里。
+
+    上一个用例只验判定函数；本用例验"接上 os.walk 之后真的没漏"——
+    判定对了但调用点没接上，同样会上传。
+    """
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import api_commit
+
+    files = api_commit.scan_local(ROOT)
+    assert files, "扫描结果为空，说明扫描逻辑已失效（不应通过）"
+    leaked = [p for p in files
+              if p.split("/", 1)[0] in ("build", "build_new", "dist", "dist_new")]
+    assert not leaked, (
+        f"待上传清单里出现构建产物（共 {len(leaked)} 项，示例如下）：\n"
+        + "\n".join(leaked[:5]))
 
 
 def test_cli_scripts_force_utf8_stdout():

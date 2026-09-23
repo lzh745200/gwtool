@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 build/
 dist/
+# 备用构建目录：沙箱不允许删 dist/ 时改用 --distpath/--workpath 输出到 *_new，
+# 内容与 dist/ build/ 同类（数百 MB 产物），必须一并忽略，否则 git add -A 会误入库。
+build_new/
+dist_new/
 wheels_aarch64/
 .pytest_cache/
 .ruff_cache/

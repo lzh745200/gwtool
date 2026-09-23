@@ -166,17 +166,26 @@ def main() -> int:
     # 但"三个环节接起来是否真的通"只有端到端能答。改动前向导里**根本没有**
     # `dao.add_document` 调用，产物只落在导出目录，资料库与台账都查不到它 ——
     # 而那时全部单元测试是绿的（没有一条用例跨过"生成→入库→回填"的边界）。
+    #
+    # ⚠ 内容必须**每次运行都不同**：本脚本用的是真实应用数据目录（持久库），
+    # `dao.add_document` 按 content_text 的 hash 查重，上一次运行留下的同内容
+    # 文档会让本次首插直接返回 -1（"-1 是重复"是正确行为，但会让断言假失败）。
+    # 故正文里带上本次运行的唯一目录名，保证与历史数据不可能撞 hash。
     try:
         from gwtool.core import registry
 
+        # ⚠ 唯一性只能取自 sample_dir（tempfile.mkdtemp 的随机后缀），
+        # 不能取 out_docx.name —— 文件名是固定的 "汇编成果.docx"，两次运行同值。
+        _uniq = sample_dir.name
+        _body = f"汇编产物的正文内容（{_uniq}）"
         _prod = dao.add_document(dao.Document(
-            title="汇编成果", content_text="汇编产物的正文内容",
+            title="汇编成果", content_text=_body,
             file_path=str(out_docx), file_type="docx",
             tags="汇编成果，DOCX", category_id=0))
         _ok_save = _prod > 0
         # 同内容重复入库必须被识别为重复（返回 -1），而不是插出第二条
         _dup = dao.add_document(dao.Document(
-            title="汇编成果", content_text="汇编产物的正文内容",
+            title="汇编成果", content_text=_body,
             file_path=str(out_docx), file_type="docx", tags="汇编成果，DOCX"))
         _ok_dup = _dup < 0
         step("汇编产物入库+重复识别", _ok_save and _ok_dup,

@@ -27,11 +27,20 @@ API_HOST = "api.github.com"
 # 深探修复（2026-09-13）：此前 SKIP_DIRS 漏掉 .venv64/.convlib/.zcode/
 # .workbuddy 与 packs/，--auto 会把 3.7 万个环境文件（含 740MB 模型包，
 # 超 GitHub 100MB 单文件上限）全部读入比对并逐个上传，永久卡死且污染仓库。
-SKIP_DIRS = {".git", "__pycache__", ".venv", ".venv64", "build", "dist",
-             ".pytest_cache", ".ruff_cache", "node_modules", ".qoder",
-             "wheels_aarch64", "dist_samples", ".convlib", ".zcode",
-             ".workbuddy", "packs", "backups", "Data", "attachments",
-             "dist_old", "install_test"}
+#
+# 二次事故（2026-09-22）：改用 --distpath dist_new/--workpath build_new 绕开
+# "沙箱不允许删 dist/" 后，**同样的事故原地复现** —— 精确集合匹配挡不住新目录名，
+# 420 个产物文件（含整个 Qt 运行时）被逐个上传，只能中途 kill。
+# 教训：靠"人工维护一份与 .gitignore 相同的目录名清单"必然漂移（.gitignore 已改、
+# 这里没改就是一次全量污染）。故改为**前缀匹配**，任何 build*/dist*/ 变体自动覆盖。
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache",
+             "node_modules", ".qoder", "wheels_aarch64", "dist_samples",
+             ".convlib", ".zcode", ".workbuddy", "packs", "backups",
+             "Data", "attachments", "install_test"}
+
+# 前缀匹配的目录名：build/ build_new/ dist/ dist_new/ dist_old/ .venv/ .venv64/ …
+# 注意 "buildings" 这类同前缀目录会被误伤，故要求前缀后紧跟结尾或分隔符（见 _is_skipped）。
+SKIP_DIR_PREFIXES = (".venv", "build", "dist")
 
 # 文件级忽略（目录名过滤覆盖不到的单文件），与 .gitignore 同步
 SKIP_FILE_PATTERNS = ("*.pyc", "*.tmp", "*.log", ".coverage", "m1.pdf", "probe.pdf",
@@ -47,12 +56,34 @@ def git_blob_sha(raw: bytes) -> str:
     return h.hexdigest()
 
 
+def is_skipped_dir(name: str) -> bool:
+    """目录名是否应跳过。
+
+    精确匹配 SKIP_DIRS，或前缀匹配 SKIP_DIR_PREFIXES —— 但前缀后必须紧跟
+    结尾、分隔符或**数字**，避免误伤同前缀的正常目录（"buildings"）。
+
+    为什么要把数字也算进去：真实存在的环境目录里有 `.venv64`（历史事故里
+    明确点名的一个），它的分隔符是数字而不是 `_`/`-`/`.`。只允许符号分隔
+    会让 `.venv64` 漏网 —— 正是这类"看着像边界、实际不是"的缺口造成了事故。
+    "buildings" 这类词在数字上不冲突（b-u-i-l-d-i-n-g-s 无数字），故安全。
+    """
+    if name in SKIP_DIRS:
+        return True
+    for pre in SKIP_DIR_PREFIXES:
+        if name == pre:
+            return True
+        rest = name[len(pre):] if name.startswith(pre) else None
+        if rest and (rest[0] in "_-." or rest[0].isdigit()):
+            return True
+    return False
+
+
 def scan_local(root: Path = Path(".")) -> dict[str, bytes]:
     """收集本地待比对文件的相对路径与内容。"""
     import fnmatch
     out: dict[str, bytes] = {}
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if not is_skipped_dir(d)]
         for name in filenames:
             if any(fnmatch.fnmatch(name, pat) for pat in SKIP_FILE_PATTERNS):
                 continue

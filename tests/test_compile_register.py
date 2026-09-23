@@ -629,6 +629,36 @@ def test_dangling_doc_id_disables_open(wizard, monkeypatch):
     dlg.close()
 
 
+def test_negative_doc_id_is_treated_as_unlinked(wizard, monkeypatch):
+    """doc_id 为负数（如 -1）时必须按「未关联」处理，不能放行去查库。
+
+    背景：`doc_id=-1` 不是凭空构造的形态 —— 它是**真实会落库**的值。
+    `dao.add_document` 命中内容重复时返回 -1，调用方若未判负就把 -1 写进
+    台账（E2E 自检里就实测留下过这种记录），于是台账里存在指向不存在条目的行。
+
+    守卫写法 `not int(rec.doc_id or 0)` 只挡得住 0 和 None：`int(-1)` 是 -1，
+    **真值为 True**，不会在这里短路。真正兜住负数的是下一层——
+    `dao.get_document(-1)` 查不到行返回 None，被 `if doc is None: return 0` 拦下。
+
+    也就是说：**负数情形靠的是"查库查不到"这一层，而不是首道判空**。
+    本用例把最终行为钉死（无论哪一层救回来），避免日后有人把 `doc is None`
+    那一支删掉或加宽 `get_document` 的容错，让 -1 变成"能点开但打开空白页"。
+    """
+    from gwtool.ui.registry_dialog import RegistryDialog
+
+    dao.add_dispatch(dao.Dispatch(title="doc_id 为负数的脏数据", doc_id=-1))
+
+    dlg = RegistryDialog()
+    dlg.reload()
+    dlg.table.selectRow(0)
+    assert dlg.btn_open_source.isEnabled() is False, (
+        "doc_id=-1 被当成有效关联，点开后会是空页或报错")
+    # 直接验守卫返回值：负数必须归 0
+    rec = dao.get_dispatch(dlg._selected_record().id)
+    assert dlg._live_document_id(rec) == 0, "负数 doc_id 未归一为 0"
+    dlg.close()
+
+
 def test_open_source_emits_document_id(wizard, monkeypatch):
     """「打开原文」把 doc_id 通过信号抛出，由主窗口承接跳转。"""
     from gwtool.ui.registry_dialog import RegistryDialog
