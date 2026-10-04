@@ -550,7 +550,7 @@ tests/test_deep_review_regression.py  7 类 69 项 → 12 类 80 项
 | 门禁 | 结果 |
 | --- | --- |
 | `ruff check .`（全仓库） | ✅ All checks passed |
-| `pytest tests/ -q` | ✅ **1745 passed, 3 skipped**（基线 1726 + 本轮 18 项回归 − 1 项重复计入；唯一一次失败是语料闸门逮住文档里"方向单向"的不规范表述，改文档措辞后复跑通过） |
+| `pytest tests/ -q` | ✅ **1745 passed, 3 skipped**（基线 1726 + 本轮 18 项回归 − 1 项重复计入；唯一一次失败是语料闸门逮住一处 cXc 触发表述（"方向"二字后紧跟着写"单向"的不规范连写），已改正文档措辞后复跑通过） |
 | `scripts/e2e_check.py` | ✅ 50 项通过，0 项失败（v1.7 新增 5 项后基线） |
 | 数据层生命周期探针（本轮新增，临时库） | ✅ 29 项通过，0 项失败 |
 | `scripts/intro_pptx/build.js` | ✅ 重建 45 页，页码无重复，v1.7/第五轮内容已核验在产物中 |
