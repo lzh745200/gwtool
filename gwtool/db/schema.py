@@ -29,7 +29,21 @@ from .. import logs
 #
 # 版本 6：新增 fts_index_state（增量重建全文索引的状态表，P4）。
 # 同样由 TABLES 建立（老库自动补上），故 MIGRATIONS[6] 也为空。
-SCHEMA_VERSION = 6
+#
+# 版本 7：新增 paragraphs（段落派生表）+ user_skeletons（用户派生骨架），
+# 以及 paragraphs_fts 虚表。**MIGRATIONS[7] 故意留空**——理由见下。
+#
+# 为什么段落回填**不能**放进迁移：`init_schema` 跑在**启动路径**上。段落回填
+# 要逐文档读 blocks_json 并做 jieba 分词，万篇库耗时以分钟计；放进迁移会让
+# "升级版程序首次启动"长时间无响应，用户只会以为程序卡死。v4/v5/v6 新增表
+# 也全部走"TABLES 建表 + MIGRATIONS 留空"这条路径，本版沿用同一惯例。
+# 回填改由 dao.rebuild_paragraphs 在后台增量执行（三级触发：启动后台 /
+# 导入即写 / 首次使用兜底）。
+#
+# paragraphs 是**纯派生数据**（源 = documents.blocks_json）：
+# 删表、重建、损坏都不影响任何既有功能，随时可重新派生。
+# 它**绝不能**进 CORE_TABLES —— 那会让用户所有旧备份立刻无法恢复（v4 真实事故）。
+SCHEMA_VERSION = 7
 
 # 版本化迁移：键 = 目标版本号。老库按 user_version 逐版本升级。
 #
@@ -238,6 +252,48 @@ TABLES = [
         text_hash TEXT NOT NULL DEFAULT '',
         PRIMARY KEY(kind, ref_id)
     )""",
+    # v7：段落派生表。源 = documents.blocks_json（blocks_json 为空/损坏时
+    # 退回按 content_text 切分，见 core/paragraph_ref.derive_blocks）。
+    #
+    # 为什么是"派生"而不是"真源"：段落本身没有独立语义，它就是块结构的
+    # 可检索化视图。把它当派生数据看，才敢在索引坏掉时整表重建、才敢让
+    # 旧备份缺这张表（恢复后 init_schema 直接建空表，回填会把它补满）。
+    #
+    # char_offset 允许 -1："该段在源文档 content_text 里的起始偏移"。定位
+    # 失败时**不猜**、写 -1 —— 语义是"能检索、能展示，但不能精确跳转"，
+    # UI 据此降级为"打开所属文档"。宁可不能跳转，也不能跳到错误位置。
+    #
+    # text_hash 是段落**自身**的哈希，用于引用落点校验：源文档被编辑后，
+    # 用户先前建立的引用会失效，此时必须提示"参考文献已变更"而不是静默错位。
+    """CREATE TABLE IF NOT EXISTS paragraphs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        doc_id INTEGER NOT NULL DEFAULT 0,
+        ordinal INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL DEFAULT 'paragraph',
+        level INTEGER NOT NULL DEFAULT 0,
+        text TEXT NOT NULL DEFAULT '',
+        char_offset INTEGER NOT NULL DEFAULT -1,
+        text_hash TEXT NOT NULL DEFAULT ''
+    )""",
+    # v7：用户从参考段落派生的骨架（L3）。
+    #
+    # 为什么不复用 user_phrases：骨架是"段落序列 + 槽位集合"的**结构**，
+    # 塞进 user_phrases 的单条 phrase 字段会被压扁成一个字符串，取回来
+    # 还要重新解析——那等于把结构信息降级成文本再猜回来。
+    #
+    # 与内质骨架（core/skeletons.py 的 12 文种）**同形**：都是
+    # "段落序列 + 槽位占位符"，因此可共用同一套 render 语义。
+    # 同样**不进 CORE_TABLES**。
+    """CREATE TABLE IF NOT EXISTS user_skeletons(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL DEFAULT '',
+        template TEXT NOT NULL DEFAULT '',
+        slots_json TEXT NOT NULL DEFAULT '[]',
+        source_paras TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        created_time TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )""",
 ]
 
 # 二级索引：统一在"建表+迁移"之后创建。
@@ -265,6 +321,10 @@ INDEXES = [
     """CREATE INDEX IF NOT EXISTS idx_receive_date ON receive_register(receive_date)""",
     """CREATE INDEX IF NOT EXISTS idx_receive_org ON receive_register(from_org)""",
     """CREATE INDEX IF NOT EXISTS idx_receive_due ON receive_register(due_date)""",
+    # 段落按 (doc_id, ordinal) 取用是**唯一**的热路径：预览、跳转、整体替换
+    # 都按文档取段。复合索引让"取某文档全部段落"一次索引扫描即可，
+    # 不必回表排序（万篇库下这是段落功能的性能命门）。
+    """CREATE INDEX IF NOT EXISTS idx_paragraphs_doc ON paragraphs(doc_id, ordinal)""",
 ]
 
 # 核心业务表：这四张缺任意一张，就判定"不是本程序创建的库"。
@@ -283,6 +343,14 @@ FTS_TABLES = [
         word, tokenized, ref_id UNINDEXED)""",
     """CREATE VIRTUAL TABLE IF NOT EXISTS phrases_fts USING fts5(
         phrase, tokenized, ref_id UNINDEXED)""",
+    # v7：段落全文索引。与上面三张 FTS 表**同构**（standalone + ref_id UNINDEXED），
+    # ref_id 指向 paragraphs.id。
+    #
+    # 刻意**不放** doc_id 列：既有三张 FTS 表都不存关联列，命中后 JOIN 源表
+    # 取归属即可。多存一列会引入"FTS 里的 doc_id 与 paragraphs 表不一致"的
+    # 第二处真相，徒增漂移面。保持同一范式比省一次 JOIN 重要。
+    """CREATE VIRTUAL TABLE IF NOT EXISTS paragraphs_fts USING fts5(
+        tokenized, ref_id UNINDEXED)""",
 ]
 
 # 必需业务表清单：从 TABLES 的 DDL 里解析，避免与建表语句两处维护、日久漂移。

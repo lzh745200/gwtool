@@ -40,11 +40,18 @@ class DocTree:
 
     def effective_blocks(self, insert_titles: bool) -> list["Block"]:
         """汇编视图下的正文块：当材料标题已作为一级标题插入时，
-        跳过与标题重复的首个标题块（避免标题渲染两遍）。"""
+        跳过与标题重复的首个标题块（避免标题渲染两遍）。
+
+        ⚠ 只跳过 **level==1** 的首块：`docxgen` 把材料标题渲染为一级标题，
+        真正会被重复的只有同样的一级标题块。若不校验层级，一个 level=2 的
+        同名首块也会被当作"已渲染过"而删掉 —— 而它其实**没有被渲染**，
+        于是标题连同正文一起消失（`blocks[1:]` 会把整个列表清空）。
+        """
         blocks = list(self.blocks)
         tree_title = (self.title or "").strip()
         if insert_titles and tree_title:
             if blocks and blocks[0].type == HEADING \
+                    and blocks[0].level == 1 \
                     and blocks[0].text.strip() == tree_title:
                 blocks = blocks[1:]
         return blocks

@@ -222,6 +222,112 @@ def main() -> int:
     items = reference.lookup("发展")
     step("写作参考检索", len(items) > 0, f"{len(items)} 条")
 
+    # 7b) 段落参考（v7）：段落检索 → 引用定位 → 内容对齐 → 骨架生成
+    from gwtool.core import paragraph_ref as para
+    counts = dao.rebuild_paragraphs()
+    step("段落索引回填", counts["documents"] > 0,
+         f"文档 {counts['documents']} 篇 / 段落 {counts['paragraphs']} 条")
+    again = dao.rebuild_paragraphs()
+    step("段落索引幂等（增量第二次不重切）", again["rescanned"] == 0,
+         f"rescanned={again['rescanned']}")
+
+    # 查询词必须取自**样例素材里真实出现**的文本。此处不能用步骤 7 的
+    # "发展"：那个词是靠 4 万条词典命中的，样例公文正文里并没有它，
+    # 拿来查段落必然是 0 段 —— 会得到"功能没生效"的假失败。
+    phits = para.search_paragraphs("工作")
+    step("段落级检索", len(phits) > 0, f"{len(phits)} 段")
+
+    # 落点不变量：偏移处切片必须**恰好等于**该段文本（点跳转不能跳错位置）
+    anchor_ok = True
+    for h in phits[:10]:
+        doc = dao.get_document(h.doc_id)
+        if doc is None or h.char_offset < 0:
+            continue
+        if doc.content_text[h.char_offset:h.char_offset + len(h.text)] != h.text:
+            anchor_ok = False
+            break
+    step("引用定位落点不变量", anchor_ok, "偏移切片 == 段落原文")
+
+    if phits:
+        refs = phits[:3]
+        sk = para.derive_skeleton(refs)
+        step("从参考派生骨架", bool(sk.template), f"{len(sk.slots)} 个槽位")
+        # 生成**必须只做结构复用**：填了槽位之后，产出的文本必须来自
+        # 参考原文 + 用户填值，不得出现凭空生成的内容
+        filled = {s.name: "××" for s in sk.slots}
+        out = para.render_draft(sk, filled)
+        step("填槽生成草稿", "××" in out or not sk.slots,
+             f"{len(out)} 字")
+
+        # 对齐样例必须用**文档序**的段落（paragraphs_of），不能用检索命中
+        # （检索按相关度排序，顺序与文档次序无关）。拿乱序的段落拼一份
+        # "同源草稿"，对齐自然对不上 —— 那是样例构造错误，不是功能缺陷。
+        ordered = para.paragraphs_of(phits[0].doc_id)[:3]
+        if ordered:
+            draft = "\n".join(r.text for r in ordered)
+            aligns = para.align_to_draft(draft, ordered)
+            matched = sum(1 for a in aligns if a.relation == "matched")
+            step("内容对齐（同源草稿应全部对齐）", matched == len(ordered),
+                 f"对齐 {matched}/{len(ordered)}")
+
+    # 7c) 骨架持久化往返
+    try:
+        sid = dao.save_user_skeleton(name="e2e派生骨架", kind="通知",
+                                     template="关于{matter}的通知",
+                                     source_paras="1")
+        got = dao.get_user_skeleton(sid)
+        step("用户骨架持久化往返", got is not None
+             and got.template == "关于{matter}的通知")
+        dao.delete_user_skeleton(sid)
+    except Exception as _exc:                       # 自检失败要报出来，不吞
+        step("用户骨架持久化往返", False, f"{type(_exc).__name__}: {_exc}")
+
+    # 7d) 公文风格量化（七文体语料指纹 + 三层判定）
+    from gwtool.core import style_data as sdata
+    from gwtool.core import style_profile as sprof
+    step("风格参数表覆盖七文体", len(sdata.REF) == 7 and len(sdata.STYLES) == 7,
+         f"{'、'.join(sdata.STYLES)}")
+    step("法定公文不设参数行", not (set(sdata.NO_PARAM) & set(sdata.REF)),
+         "通知/请示/批复等属固定填空，不作风格参数验收")
+
+    _plan = ("一、工作目标\n到今年年底，缺口基本补齐。\n"
+             "二、重点任务\n（一）摸清底数。\n1．开展拉网式排查。\n"
+             "2．建立问题隐患台账。\n3．实行动态更新。\n"
+             "（二）补齐缺口。\n1．加快建设集中充停设施。\n2．加装阻车系统。\n"
+             "3．整治违规停放。\n三、保障措施\n（一）加强组织领导。\n"
+             "（二）强化资金保障。\n（三）严格督导考核。"
+             + "该部分按既定分工推进，责任到岗到人。" * 60)
+    _rank = sprof.match_genre(sprof.analyze(_plan))
+    step("风格量化：匹配到正确文种", _rank[0][0] == "工作方案",
+         f"首选 {_rank[0][0]}（距离 {_rank[0][1]:.2f}）")
+
+    # ⚠ 标题必须 ≥2 字：上游正则 `^\**[一二三四五六七八九十]+、([^\n]{2,80})`
+    # 要求序号后至少两个字，`一、甲` 不计入一级标题（这是刻意口径，
+    # 改了就要重算整张参数表）。
+    _bad = sprof.verdict("一、背景情况\n二、主要做法\n" + "叙述做法与成效。" * 100,
+                         "短经验材料")
+    step("风格判定：硬冲突（千字材料加一级标题）", not _bad.ok,
+         f"{len(_bad.hard)} 项：" + "；".join(f.message for f in _bad.hard))
+
+    _ok = sprof.verdict(_plan, "工作方案")
+    step("风格判定：软提示不判错", _ok.ok, f"硬冲突通过，软提示 {len(_ok.soft)} 项")
+
+    _report = "\n".join(sprof.report_lines(_ok))
+    _need = ("文体：", "身份证参数：", "【硬冲突检查】", "【参数对照】",
+             "【标点修辞检查】", "【避坑词】")
+    step("风格报告十项契约", all(k in _report for k in _need),
+         "缺项：" + str([k for k in _need if k not in _report]) if not all(
+             k in _report for k in _need) else "齐全")
+
+    _skel = sprof.skeleton_draft("工作方案")
+    step("风格骨架只出占位不编内容", "【待补" in _skel and "重心" in _skel,
+         f"{len(_skel)} 字")
+
+    from gwtool.core import inspector as _insp
+    _sf = _insp.style_findings(_plan, "工作方案")
+    step("风格检查独立成类", bool(_sf) and all(f.item == "文体风格" for f in _sf),
+         f"{len(_sf)} 条")
+
     # 8) 纠错（验收对）
     from gwtool.core import corrector
     corr = corrector.check_text("工作布署已完成，报名截止本月底。")
@@ -253,6 +359,30 @@ def main() -> int:
               "形成工作合力，确保任务圆满完成。")
     _rh = repeat_rules.check_repeat(_essay)
     step("重复字：公文范文零误报", len(_rh) == 0, f"{len(_rh)} 命中")
+
+    # 8d) 语法与表达规则层（L2.5）：语义冗余 / 搭配 / 关联词 / 提示类边界
+    #
+    # 这一层补的是**词表法结构上够不着**的错：多字赘余、动宾搭配错位、
+    # 关联词呼应错误。两条边界必须一起验：可替换类要能替换，
+    # 提示类（suggestion 是标签）**绝不能**被写回正文。
+    from gwtool.core import grammar_rules  # noqa: F401  (存在性即契约)
+    _g = {(c.category, c.wrong, c.suggestion)
+          for c in corrector.check_text("各单位要加强力度，涉及到安全生产的问题。")}
+    step("规则层：语义冗余（涉及到→涉及）", ("语义冗余", "涉及到", "涉及") in _g)
+    step("规则层：搭配不当（加强力度→加大力度）", ("搭配", "加强力度", "加大力度") in _g)
+    _cj = {(c.wrong, c.suggestion)
+           for c in corrector.check_text("只有深入调研，就能找到办法。")
+           if c.category == "关联词"}
+    step("规则层：关联词呼应（就→才）", ("就", "才") in _cj)
+    _adv_txt = "该项目大约需要五天左右完成。"
+    _adv_fixed, _adv_cs = corrector.correct_block(_adv_txt)
+    step("规则层：提示类不写回正文",
+         _adv_fixed == _adv_txt and all(
+             c.category not in corrector.ADVISORY_CATEGORIES for c in _adv_cs))
+    _long = corrector.check_text("反应情况")
+    step("纠错：精标长对优先于短规则",
+         bool(_long) and _long[0].wrong == "反应情况"
+         and _long[0].suggestion == "反映情况")
 
     # 9) 词表导入：预检 → 预览 → 事务写入 → 生效与回归校验
     #

@@ -86,11 +86,23 @@ def _tess_env(tess: str) -> dict:
     （ImportWorker / FnWorker 批量导入扫描件），用户同时可能点"检测中文包"。
     两条路径并发写同一个键时，subprocess 读到的可能是对方刚写进去的值，
     还会覆盖用户手工设置。改成随 env 传参后，各次调用互不影响。
+
+    **只在真的用随包引擎时才设 TESSDATA_PREFIX**（修正）：`tesseract_path()`
+    的优先级是「用户配置 > 随包 > 系统 PATH」，而旧实现只要随包 tessdata 目录
+    存在就无条件把 TESSDATA_PREFIX 指向它 —— 参数 `tess` 传进来却从未被看。
+    后果：用户显式配置了系统安装的 tesseract 时，系统版引擎会被喂随包
+    tessdata，在那里找不到自己的语言包 → `--list-langs` 输出为空 →
+    `has_chi_sim()` 判否 → UI 报「未检测到中文包」，而中文包其实就在系统
+    安装目录里。用户照提示反复"装中文包"永远装不好。
     """
     env = dict(os.environ)
-    td = _bundled_tessdata()
-    if td:
-        env["TESSDATA_PREFIX"] = td
+    bundled, _ = _bundled()
+    # 只有当实际选用的引擎就是随包那份时，才让它的 tessdata 生效；
+    # 否则保留用户环境原有的 TESSDATA_PREFIX（可能指向系统语言包）。
+    if bundled and tess and Path(tess) == Path(bundled):
+        td = _bundled_tessdata()
+        if td:
+            env["TESSDATA_PREFIX"] = td
     return env
 
 
@@ -124,9 +136,14 @@ def ocr_pdf(path: str, dpi: int = 220, progress_cb=None) -> DocTree:
     if not tess:
         raise RuntimeError("未找到 tesseract，请先安装并在设置中指定路径")
     tmpdir = Path(tempfile.mkdtemp(prefix="gwtool_ocr_"))
-    doc = fitz.open(path)
+    # fitz.open 必须在 try 之内：加密/损坏/被占用的 PDF 会直接抛，而清理只写在
+    # finally 里 —— 放在外面时 finally 从未进入，`gwtool_ocr_xxxx` 目录永久留在
+    # 系统临时目录（程序内没有任何地方扫它）。批量导入几十份含坏文件时，
+    # 临时目录里就积几十个空目录，且再无清理路径。
+    doc = None
     tree = DocTree(title=Path(path).stem)
     try:
+        doc = fitz.open(path)
         for pno in range(doc.page_count):
             if progress_cb:
                 progress_cb(pno + 1, doc.page_count)
@@ -142,7 +159,8 @@ def ocr_pdf(path: str, dpi: int = 220, progress_cb=None) -> DocTree:
                     continue
                 tree.blocks.append(Block(type=PARAGRAPH, text=stripped))
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
         import shutil as _sh
         _sh.rmtree(tmpdir, ignore_errors=True)
     # 简单标题识别：首行

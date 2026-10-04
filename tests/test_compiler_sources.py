@@ -35,10 +35,23 @@ class TestCollectSources:
 
     def test_marks_extra_paths_as_not_imported(self, tmp_db, tmp_path):
         p = tmp_path / "外部材料.docx"
-        p.write_bytes(b"x")
+        # 必须是**可解析**的 docx：解析失败的文件内容没进汇编，来源清单
+        # 不得虚列出处（第五轮深审修复；旧实现用 b"x" 造的假 docx 恰好
+        # 固化了"失败文件也被列出"的缺陷）。
+        from docx import Document
+        d = Document()
+        d.add_paragraph("外部材料正文")
+        d.save(str(p))
         got = compiler.collect_sources([], [str(p)])
         assert got[0]["category"] == "（未入库）"
         assert got[0]["file"] == "外部材料.docx"
+
+    def test_unparseable_extra_not_listed(self, tmp_db, tmp_path):
+        """解析失败的文件不进来源清单（虚列出处 = 清单说内容来自它，
+        实际来自别处）；回归护栏见 tests/test_review_round5.py。"""
+        bad = tmp_path / "坏材料.docx"
+        bad.write_bytes(b"x")          # 非 zip，解析必失败
+        assert compiler.collect_sources([], [str(bad)]) == []
 
     def test_skips_deleted_documents(self, tmp_db):
         """材料在汇编前被删掉了就跳过，不该编造一行出来。"""

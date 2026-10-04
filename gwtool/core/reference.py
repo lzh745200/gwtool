@@ -51,7 +51,10 @@ def lookup(query: str, limit_each: int = 12) -> list[ReferenceItem]:
         lo, hi = min(scores), max(scores)
         span = (hi - lo) or 1.0
         for r in results:
-            base = 1.0 - (abs(r.rank) - lo) / span     # 组内相对相关度 0..1
+            # FTS5 的 bm25 为**负值且越负越相关**，abs(rank) 越大即越相关；
+            # 归一化后与词典源的 0.7~0.9 分级同向（越大越靠前）。
+            # 此前写成 1.0-(abs-lo)/span，把最相关的文档压成最低分。
+            base = (abs(r.rank) - lo) / span          # 组内相对相关度 0..1
             boost = 0.0
             if r.title and q in r.title:
                 boost += 0.15                           # 标题命中加权

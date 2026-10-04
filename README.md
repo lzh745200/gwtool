@@ -1,7 +1,7 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.6.0**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.7.0**。
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
@@ -22,12 +22,15 @@
 | 收文登记台账 | 来文的**签收 → 拟办 → 批办 → 承办 → 办结 → 归档**全流程登记：来文机关/来文字号/密级/紧急程度/拟办意见/领导批示/承办部门与承办人/应办结与办结日期/办理结果；按年度·机关·文种·状态筛选；统计报表；导出 Excel/CSV |
 | 办理时限督办 | 填了"应办结日期"的收文自动进入督办：启动时扫描已逾期与 2 日内到期的件，状态栏常显角标，点开即见清单并可一键跳转台账。**不做后台常驻轮询**（伤续航且对"天"级业务无意义），提前量可在设置里调 |
 | 公文归档 | 已办结收文批量归档：自动编档号（按年度流水）、标注保管期限（**永久 / 30年 / 10年**）、生成可签字盖章随卷的《归档移交清单》（DOCX，走公文排版）或 Excel 汇总。**在办件不允许归档**（会造成卷内缺件） |
-| 文字纠错 | 4 万+ 错别字/易混词、新华社禁用词、机构沿革对照、标点数字规则、持久忽略名单 |
+| 文字纠错 | 4 万+ 错别字/易混词、新华社禁用词、机构沿革对照、标点数字规则、持久忽略名单；**语法与表达规则层**：语义冗余（`涉及到`→`涉及`）、动宾搭配（`加强力度`→`加大力度`）、关联词呼应（`只有……就`→`才`）、成对标点未配对；人工精标对 **370 条**（检出率 100%） |
 | 格式体检 | 军队机关公文格式合规检查：标题编号链条、发文字号、成文日期、结束语与文种匹配、字体字号行距，**并新增引文规范、数字用法、文内一致性、公文文风四类**；结果可一键导出为规范 DOCX 报告或 Excel 整改清单（可加"处理意见"列逐条销号） |
 | 模板自定义 | 页边距、字体、行距、标题层级、红头、版记、页码、水印/密级标注，保存即生效 |
 | A4 / A3 小册子 | A4 纵向标准公文 PDF；A3 横向骑马钉小册子（自动补页、页序自动排列） |
 | 资料分类检索 | 树形分类、标签、SQLite FTS5 全文检索（1 秒内返回命中段落） |
 | 写作参考 | 输入词语/主题，从资料库、词典、句式库按相关度检索，双击一键插入 |
+| 写作提示与灵感 | 按文种（12 种军队机关文种骨架）给写作提示：缺哪个要素、结构要不要分层、平均句长与空泛词体检；并按写作环节推荐可套用的公文句式、检索本地资料库里的既有写法。**只给建议、绝不改动正文**（模块内没有任何写入入口），全程离线。另附"这篇更像哪个文种"的量化识别 |
+| **段落参考**（新增） | 写作参考可选**段落**粒度：命中到"某篇的第几段"，多选累积成「参考清单」，可**溯源**（文档+段序号+正文偏移+段落指纹）、可**跳回原文并高亮**；据此做**内容对齐**（并排比出缺失/多余/章节顺序颠倒/序号跳号重复）与**骨架生成**（把参考段落里的单位名、事项名、日期、时限、数量、引用公文抽成槽位，你填完拼成新稿）。全程离线、纯规则、可解释；生成只做**结构复用**，不编造任何未提供的内容 |
+| **公文风格校验**（新增） | 把写作风格量成**可测量、可验收**的指标（篇幅/句长/层级/顿号密度/「一是二是」/力度词配额/引号概念/长引语/百分比/重心分布共 14 项），对照七种文体的语料指纹判断"像不像这个文种"。判定分三层：**硬冲突**（文种识别错误）判错、**软提示**只提醒、**参数对照**只展示。右侧同时给出该文体的**骨架公式**与写作约束，可把结构占位一键填入编辑器 |
 | 任意文档纠错 | 任意格式文件/粘贴文本全文纠错：按类别底色**标记视图**、点击定位、逐处/整篇修正、保结构导出 DOCX/TXT |
 | 资料移交包 | 按分类/标签/时间段批量导出为移交包（ZIP）：文档按目录树归档、附件可选、`manifest.json` 含每份文档的原文件名与 sha256 校验值。与"整库备份"互补——交接某专题不必把整个数据库交出去 |
 | 词典/词库扩充 | 自定义词条、纠错对、常用句式、忽略名单，支持批量导入，立即生效。**多格式词表导入**：CSV/TSV/TXT（自动识别编码与分隔符：UTF-8/GBK/BOM、逗号/制表符/分号）、JSON、Excel(.xlsx)、Word 表格、TBX/XLIFF；导入前先**预检并列出**「新增/覆盖/冲突/跳过/无效」，**确认后才写库**，整批单事务、失败全回滚 |
@@ -187,11 +190,39 @@ CI 以 dpkg-deb 打成唯一安装包 `gwtool_<版本>_linux_arm64.deb`。
 | 文字提取>99% | 六格式解析器 + 兜底 | test_parsers |
 | 汇编 WPS 不跑版 | 标准 OOXML + 域代码 | test_compile_pdf |
 | 截止/截至等 100% 识别 | 三级纠错流水线 | test_corrector::test_jianku_100_curated_pairs |
+| 精标集全量检出 100% | `_dedupe` 精标长对优先于短规则（单向消解） | test_grammar_rules::test_dedupe_prefers_lexicon_long_pair |
+| 语义冗余/搭配/关联词可检出且零误报 | L2.5 语法与表达规则层（每条规则都有正例 + 27 条负样本守门） | test_grammar_rules::test_no_dead_rules / test_negative_no_false_positive |
+| 提示类规则绝不写回正文 | `ADVISORY_CATEGORIES` 单一来源，批量/整篇应用整类排除 | test_grammar_rules::test_correct_block_skips_advisory_categories |
+| 写作提示只建议、不改正文 | 模块只产出 Hint/Idea 纯数据，无任何写入入口 | test_writing_hints::test_writing_hints_module_has_no_write_api |
+| 写作提示空数据不崩 | 空稿/未知文种/无库/检索异常一律降级 | test_writing_hints::test_inspiration_swallows_reference_error |
+| 汇编材料标题不错位 | 标题按**输入槽位**对齐，解析失败/已删材料只跳过自己那一坑 | test_review_round5::TestCompileTitleAlignment |
+| 来源清单不虚列出处 | 解析失败的文件不进来源清单（内容根本没进汇编） | test_review_round5::TestCollectSourcesFilter |
+| 机构一致性"简称+连接词"场景可检出 | 「县应急局**与**县应急管理局」前导连接字确定性修剪 | test_review_round5::TestEntityLeadTrim |
+| 无 Qt 环境字体探测不崩进程 | QFontDatabase 原生崩溃前置拦截（QApplication 判空） | test_review_round5::TestFontcheckNoApp |
 | 纠错库 ≥3 万条 | 精标 220 + 生成 40000 | test_corrector::test_seed_db_pair_count |
 | 模板即时生效 | JSON 模板实时渲染 | UI 内置预览 |
 | A3 骑马钉页序正确 | PyMuPDF 重排 8,1\|2,7… | test_booklet_order_math |
 | 检索 1 秒内 | FTS5 + jieba 预分词 | test_fts_search_speed_and_snippet |
 | 写作参考可插入 | BM25 三库联合检索 | test_reference_lookup |
+| 段落可检索/可溯源 | paragraphs 表 + 段落级 FTS5 | test_paragraph_ref |
+| 段落偏移不跳错位置 | 落点不变量：正文字符切片 == 段落原文 | test_paragraph_index::TestAnchorInvariant |
+| 段落索引可整表重建 | 索引缺失/过期一律回落现场派生 | test_paragraph_index |
+| 段落索引不残留/不重复 | 整体替换 + 哈希判据增量 + 回收站隔离 | test_paragraph_index |
+| 对齐规则不误报 | 六维确定性规则（层级/序号/角色/顺序/覆盖/多余） | test_para_align |
+| 生成不编造内容 | 槽位示例必须取自参考原文；未填槽位保留占位 | test_para_generate |
+| 段落开关可退 | 关掉即回到"整篇"这条原有路径 | test_para_panel::TestActionEnablement |
+| 风格量法口径一致 | 14 项指标逐项钉住（含 `不得`/`不得不`、引号内力度词剔除、`【待补】` 里的 `%` 不计） | test_style_profile |
+| 风格判定不误判 | 只有硬冲突算错；区间外不等于错（有专门的反例测试） | test_style_verdict::TestHardConflicts |
+| 风格检查独立成类 | 不并入 GB/T 9704 版式检查 | test_style_verdict::TestInspectorIntegration |
+| 生成不编内容 | 骨架只出【待补】占位，不产生成文内容 | test_style_profile::TestSkeletonDraft |
+| 段落检索排对顺序 | FTS5 bm25 越负越相关，词频高的段必须排前 | test_review_round4::TestRetrievalOrder |
+| 序号判定不误报 | 重复序号不得引发后续"假跳号"；真跳号仍报 | test_review_round4::TestOrdinalIssues |
+| 槽位不误抽单位名 | 普通句不得产出 `{org}`（简称白名单 + 排除集） | test_review_round4::TestOrgSlotFalsePositive |
+| 彻底删除级联派生表 | purge 后 paragraphs／段落 FTS／状态表全部归零 | test_review_round4::TestPurgeCascades |
+| 骨架文种可选可用 | 下拉必须带 userData；载入需回填 kind | test_review_round4::TestSkeletonKindAndExamples |
+| 能力开关真生效 | 关掉后菜单入口一起隐藏（约束 C16） | test_review_round4::TestParaFeatureSwitches |
+| 替换预览不可漂移 | 预览期间条件变动即作废，不按新条件改旧清单 | test_review_round4::TestReplacePreviewSnapshot |
+| 模态入口全部设防 | 静态文件对话框全局屏蔽（含参数化构造用例） | test_ui_actions_smoke::test_file_dialog_static_methods_blocked |
 | 零网络请求 | 全离线设计 | 代码审计：无 socket/requests 调用 |
 | 小册子确实生成 | 向导勾选后 worker 真正启动 | test_bugfix_regression::TestBookletWorkerStarted |
 | 批量纠错不改错位置 | 上下文锚点重定位 | test_bugfix_regression::TestBatchRelocate |
@@ -221,7 +252,7 @@ gwtool/
 │   ├── logs.py                 # 运行期诊断日志（队列异步、有界轮转、不记正文）
 │   ├── paths.py                # 数据目录（%APPDATA% / ~/.local/share / 便携 Data/）
 │   ├── db/                     # 数据层
-│   │   ├── schema.py           #   14 张业务表 + 3 个 FTS5 虚表 + 版本迁移（v6）
+│   │   ├── schema.py           #   16 张业务表 + 4 个 FTS5 虚表 + 版本迁移（v7）
 │   │   ├── connection.py       #   线程本地连接、WAL、迁移前自动备份
 │   │   ├── dao.py              #   唯一数据访问入口（文档/词典/纠错对/模板/快照…）
 │   │   └── tokenize.py         #   jieba 分词（建索引 + 构造 MATCH 查询）
@@ -235,8 +266,9 @@ gwtool/
 │   │   ├── compiler.py         #   汇编编排 + docx→pdf 转换链
 │   │   ├── pdfrender.py        #   内置 PDF 渲染器（两遍渲染算目录页码）
 │   │   ├── booklet.py          #   A3 骑马订小册子（页序算法）
-│   │   ├── corrector.py        #   三级纠错流水线 + 词边界保护
-│   │   ├── corrector_data.py   #   内置精标对/机构沿革/上下文与标点规则
+│   │   ├── corrector.py        #   纠错流水线（L1 词表 / L2 规则 / L2.5 语法表达 / L3 重复字）+ 词边界保护
+│   │   ├── corrector_data.py   #   内置精标对/机构沿革/上下文与标点数字规则
+│   │   ├── grammar_rules.py    #   L2.5 语法与表达规则层（语义冗余/搭配/关联词/成对标点）
 │   │   ├── csc_neural.py       #   L4 神经精排层（可选 opt-in，依赖缺失即静默降级）
 │   │   ├── enhance_pack.py     #   精度增强包导入/校验/卸载（zip 安全 + sha256）
 │   │   ├── inspector.py        #   军队公文格式体检（文本级 + docx 级 + 引文/数字/一致性/文风）
@@ -245,6 +277,9 @@ gwtool/
 │   │   ├── differ.py           #   文档对比（词级 diff → 红绿 HTML）
 │   │   ├── simhash.py          #   SimHash + Jaccard 相似查重
 │   │   ├── reference.py        #   写作参考（三库联合 BM25 检索）
+│   │   ├── writing_hints.py    #   写作提示/文种识别/灵感建议（只给建议，不改正文）
+│   │   ├── writing_data.py     #   内置公文句式库与写作提示阈值（自撰，许可干净）
+│   │   ├── paragraph_ref.py    #   段落参考（段落检索/引用定位/内容对齐/骨架抽取）
 │   │   ├── batch.py            #   批量汇编（单份失败不中断）
 │   │   ├── tts.py              #   离线朗读（SAPI/spd-say/espeak-ng）
 │   │   ├── watermark.py        #   PDF/DOCX 水印与密级标注
@@ -277,7 +312,7 @@ gwtool/
 │   │   └── theme.py            #   语义色常量（深浅色兼容）
 │   └── resources/data/
 │       └── seed.db             # 种子库：词典 12.3 万 + 纠错对 4 万（15.7 MB）
-├── tests/                      # pytest 测试套件（1190 个用例，含性能验收）
+├── tests/                      # pytest 测试套件（1700+ 个用例，含性能验收）
 ├── scripts/                    # 构建与运维脚本
 │   ├── build_windows.bat       #   Windows x64 打包（PyInstaller + 便携 zip）
 │   ├── build_kylin_arm64.sh    #   麒麟 ARM64 打包（支持离线 wheels）
@@ -286,7 +321,7 @@ gwtool/
 │   ├── install_context_menu.bat / uninstall_context_menu.bat  # 右键菜单
 │   ├── gwtool.desktop          #   Linux 桌面入口
 │   ├── seed_data.py            #   构建期生成 seed.db（词典下载+混淆对生成）
-│   ├── e2e_check.py            #   端到端自检（23 步全流程）
+│   ├── e2e_check.py            #   端到端自检（50 项全流程）
 │   ├── smoke_dist.py           #   打包产物冒烟（含能力面自报断言）
 │   ├── check_inference_stack.py #   推理栈自检（双平台 CI 共用，默认失败即非零退出）
 │   ├── bench_scale.py          #   大数据量性能基线（临时库，不碰用户数据）

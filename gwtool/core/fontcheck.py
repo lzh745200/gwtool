@@ -28,6 +28,15 @@ def missing_fonts() -> list[str]:
     离屏/打包环境均可用。
     """
     try:
+        # 必须先确认 QApplication 存在：QFontDatabase 在没有任何
+        # QApplication 的进程里调用会触发 **原生崩溃**（access violation，
+        # 整个进程无栈死亡）——下面的 try/except 只能拦 Python 异常，
+        # 拦不住它。第五轮深审实测：纯逻辑调用方（脚本/无界面工具）走
+        # compile_docx → 本函数时进程直接消失。无 app 即视为"探测不可用"，
+        # 按下方既有纪律返回安全默认值。
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            return []
         from PySide6.QtGui import QFontDatabase
         installed = set(QFontDatabase.families())
     except Exception:

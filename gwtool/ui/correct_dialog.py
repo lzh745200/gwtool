@@ -27,8 +27,9 @@ from .theme import MUTED, severity_color
 from .widgets import ThreadSafeDialog
 from .workers import FnWorker
 
-# 逐处确认、不参与"全部应用"的类别（与纠错面板口径一致）
-_APPLY_SKIP = ("数字用法",)
+# 逐处确认、不参与"全部应用"的类别（与纠错面板口径一致）。
+# 清单来自 core 的单一事实来源：提示类类别的 suggestion 是标签而非替换文本。
+_APPLY_SKIP = corrector.ADVISORY_CATEGORIES
 
 
 class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):

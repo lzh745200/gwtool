@@ -54,6 +54,7 @@ def bench_one(n_docs: int) -> dict:
         # 空索引上跑的，得到"0 ms 命中 0 条"的假数据。建索引的耗时不计入
         # 检索指标（真实场景中它发生在写入时，且只做一次）。
         _timed(dao.rebuild_fts)
+        db_mb_before = (tmp / "bench.db").stat().st_size / 1024 / 1024
 
         # **预热**：jieba 首次调用要加载词典（数百毫秒）。不预热的话
         # 第一档（300 篇）会把这段固定开销算进检索耗时，得到
@@ -61,11 +62,19 @@ def bench_one(n_docs: int) -> dict:
         # 差异全部来自这里，与数据量无关。
         dao.search_documents("预热")
 
+        # v7 段落索引：整库回填的耗时与体积增量（规格 §8.2 的性能验收项）。
+        # 批量插入用的是 blocks_json='[]'，所以这里同时也在压测**纯文本兜底
+        # 切分**这条路径——它正是"块结构缺失"时真正会走的那条。
+        para_build_t, para_counts = _timed(dao.rebuild_paragraphs)
+        para_second_t, para_second = _timed(dao.rebuild_paragraphs)
+        dao.search_paragraphs_fts("预热", 5)
+        para_search_t, para_hits = _timed(dao.search_paragraphs_fts, "安全生产", 30)
+        db_mb = (tmp / "bench.db").stat().st_size / 1024 / 1024
+
         list_t, rows = _timed(dao.list_documents)
         content_t, rows2 = _timed(dao.list_documents, include_content=True)
         search_t, hits = _timed(dao.search_documents, "安全生产")
         count_t, total = _timed(dao.count_documents)
-        size_mb = (tmp / "bench.db").stat().st_size / 1024 / 1024
         return {
             "docs": n_docs,
             "insert_s": insert_t,
@@ -77,7 +86,14 @@ def bench_one(n_docs: int) -> dict:
             "search_hits": len(hits),
             "count_ms": count_t * 1000,
             "count": total,
-            "db_mb": size_mb,
+            "db_mb": db_mb,
+            "db_mb_before_para": db_mb_before,
+            "para_build_s": para_build_t,
+            "para_second_s": para_second_t,
+            "para_rescanned2": para_second.get("rescanned", -1),
+            "para_count": para_counts.get("paragraphs", 0),
+            "para_search_ms": para_search_t * 1000,
+            "para_hits": len(para_hits),
         }
     finally:
         dbconn.close_current_thread()
@@ -133,6 +149,33 @@ def main(argv: list) -> int:
     slowest_search = max(results, key=lambda r: r["search_ms"])
     print(f"最长检索：{slowest_search['search_ms']:.1f} ms"
           f"（{slowest_search['docs']} 篇，命中 {slowest_search['search_hits']} 条）")
+
+    # v7 段落参考：回填耗时、体积增量、段落检索与幂等性
+    print("\n段落参考（v7）基线")
+    print("-" * 74)
+    print(f"{'文档数':>7} {'段落数':>8} {'回填(s)':>9} {'二次(s)':>9} "
+          f"{'重切':>5} {'检索(ms)':>10} {'命中':>6} {'体积+%':>8}")
+    print("-" * 74)
+    for r in results:
+        before = r["db_mb_before_para"] or 1e-9
+        growth = (r["db_mb"] - before) / before * 100
+        print(f"{r['docs']:>7} {r['para_count']:>8} {r['para_build_s']:>9.2f} "
+              f"{r['para_second_s']:>9.3f} {r['para_rescanned2']:>5} "
+              f"{r['para_search_ms']:>10.1f} {r['para_hits']:>6} {growth:>8.1f}")
+    print("-" * 74)
+    worst_para = max(results, key=lambda r: r["para_build_s"])
+    print(f"最长全量回填：{worst_para['para_build_s']:.1f} s"
+          f"（{worst_para['docs']} 篇 / {worst_para['para_count']} 段）"
+          "　—— 注意：它在**后台线程**执行，不阻塞 UI")
+    worst_psearch = max(results, key=lambda r: r["para_search_ms"])
+    print(f"最长段落检索：{worst_psearch['para_search_ms']:.1f} ms"
+          f"（{worst_psearch['docs']} 篇，命中 {worst_psearch['para_hits']} 段）")
+    idem_ok = all(r["para_rescanned2"] == 0 for r in results)
+    print(f"增量幂等（第二次重切数应为 0）：{'通过' if idem_ok else '不通过'}")
+    worst_growth = max((r["db_mb"] - r["db_mb_before_para"])
+                       / (r["db_mb_before_para"] or 1e-9)
+                       for r in results) * 100
+    print(f"段落索引体积增量：{worst_growth:.1f}%（验收线 < 40%）")
     return 0
 
 

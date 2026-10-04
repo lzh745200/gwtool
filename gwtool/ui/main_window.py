@@ -15,10 +15,11 @@ from ..paths import db_path, export_dir
 from .compile_wizard import CompileWizard
 from .dict_manager import DictManager
 from .editor_panel import EditorPanel
-from .feature_dialogs import (BatchCorrectDialog, BulkReplaceDialog,
+from .feature_dialogs import (AlignDialog, BatchCorrectDialog, BulkReplaceDialog,
                               InspectorDialog, SecurityDialog,
                               SimilarityDialog, SkeletonDialog,
-                              SnapshotsDialog)
+                              SkeletonFromRefsDialog, SnapshotsDialog,
+                              StyleCheckDialog, WritingHintsDialog)
 from .import_dialog import ImportDialog
 from .library_panel import LibraryPanel
 from .material_dialogs import RecycleBinDialog
@@ -452,6 +453,18 @@ class MainWindow(QMainWindow):
         self._menu_action(m_tool, "文档对比…", self.open_compare,
                           "逐行对比两篇材料的差异")
         m_tool.addSeparator()
+        self.act_align = self._menu_action(
+            m_tool, "内容对齐（参考↔草稿）…", self.open_align,
+            "把参考清单与当前草稿做结构对齐，指出缺失/多余/错位")
+        self.act_generate = self._menu_action(
+            m_tool, "从参考段落生成草稿…", self.open_generate,
+            "从参考清单派生骨架，填槽后生成草稿（结构复用，非自动成文）")
+        self._menu_action(m_tool, "公文风格校验…", self.open_style_check,
+                          "把写作风格量成指标，对照七文体的语料指纹判断文种是否写偏")
+        self._menu_action(m_tool, "写作提示与灵感…", self.open_writing_hints,
+                          "按文种给写作提示（缺什么、怎么组织）并推荐可借鉴的句式与写法，"
+                          "只作建议不改正文")
+        m_tool.addSeparator()
         self._menu_action(m_tool, "历史版本（快照）…", self.open_snapshots,
                           "查看并回退到某次修改前的版本（批量纠错/替换前会自动留）")
         self._menu_action(m_tool, "词典与词库管理…", self.open_dict_manager,
@@ -492,6 +505,29 @@ class MainWindow(QMainWindow):
                   f"数据目录：{db_path().parent}\n全程无网络请求。"),
             "版本号与数据目录位置")
 
+        self._sync_para_features()
+
+    def _sync_para_features(self):
+        """让段落参考的菜单入口与三个能力开关保持一致。
+
+        只让右侧面板读开关是不够的：关掉 `para_align_enabled`/`para_gen_enabled`
+        的组织，菜单里却仍留着可点的入口 —— "关了还能进"等于开关失效
+        （规格 §9.2 / 约束 C16）。关掉 `para_ref_enabled` 时更糟：段落清单已无从
+        产生，菜单入口点开只剩一句死路提示。
+        同时驱动面板自身刷新 `refresh_switch_state()`，避免"改了库、面板还是老样子"。
+        """
+        try:
+            from .. import config
+            self.act_align.setVisible(bool(config.para_align_enabled()))
+            self.act_generate.setVisible(bool(config.para_gen_enabled()))
+        except Exception:
+            # 退出/启动路径上的开关同步失败绝不能拦住界面（保守按"显示"处理）
+            log.warning("段落参考菜单开关同步失败（按显示处理）", exc_info=True)
+        try:
+            self.reference.refresh_switch_state()
+        except Exception:
+            pass
+
     # ------------------------------------------------ 信号接线
     def _wire(self):
         self.library.open_document.connect(self.editor.load_document)
@@ -499,6 +535,11 @@ class MainWindow(QMainWindow):
         self.reference.insert_text.connect(self._insert_at_cursor)
         self.reference.apply_edit.connect(self._apply_edit)
         self.reference.corrections_ready.connect(self.editor.set_corrections)
+        # 段落参考（v7）：跳转溯源、内容对齐、骨架生成
+        self.reference.open_source.connect(self._open_paragraph_source)
+        self.reference.align_requested.connect(self._align_with_picks)
+        self.reference.generate_requested.connect(self._generate_from_picks)
+        self.reference.hints_requested.connect(self._open_writing_hints)
         self.editor.content_modified.connect(self._on_editor_saved)
         sc_f3 = QShortcut(QKeySequence("F3"), self)
         sc_f3.activated.connect(self.library.focus_search)
@@ -520,6 +561,136 @@ class MainWindow(QMainWindow):
         cur.setPosition(start)
         cur.setPosition(end, QTextCursor.KeepAnchor)
         cur.insertText(replacement)
+
+    # ------------------------------------------------ 段落参考（v7）
+    def _open_paragraph_source(self, ref):
+        """打开参考段落的来源文档并高亮该段。
+
+        定位走 `paragraph_ref.resolve_anchor`（对 documents.content_text 验过
+        落点不变量），但**编辑器里的文本未必逐字节等于 content_text**（Qt 富文本
+        往返、用户未保存的改动都会造成差异），所以还要拿编辑器实际文本再验一次：
+        不成立就现场在编辑器文本里搜该段；仍搜不到就只打开文档并给出状态栏提示。
+
+        整条链路**不弹模态框**：跳转是高频操作，弹框会打断写作节奏；而且新增
+        模态入口就必须同步补测试 mock，否则未 mock 的弹框会挂死全量测试。
+        """
+        from ..core import paragraph_ref
+        doc_id = int(getattr(ref, "doc_id", 0) or 0)
+        text = getattr(ref, "text", "") or ""
+        if not doc_id:
+            return
+        try:
+            self.editor.load_document(doc_id)
+            try:
+                self.library.select_document(doc_id)
+            except Exception:
+                pass          # 资料库面板差异不该阻断跳转
+            ed = self.editor.editor
+            live = ed.toPlainText()
+            off, length = paragraph_ref.resolve_anchor(ref)
+            if off < 0 or live[off:off + length] != text:
+                pos = live.find(text) if text else -1
+                off, length = (pos, len(text)) if pos >= 0 else (-1, 0)
+            if off < 0:
+                self.status.showMessage(
+                    "已打开来源文档；该段在当前视图中未能精确定位（可能已被编辑）", 8000)
+                return
+            cur = ed.textCursor()
+            cur.setPosition(off)
+            cur.setPosition(off + length, QTextCursor.KeepAnchor)
+            ed.setTextCursor(cur)
+            ed.ensureCursorVisible()
+            ed.setFocus()
+            self.status.showMessage(f"已定位到来源段落（第 {ref.ordinal + 1} 段）", 5000)
+        except Exception:
+            log.warning("段落来源跳转失败", exc_info=True)
+
+    def _align_with_picks(self, refs):
+        dlg = AlignDialog(refs, self.editor.editor.toPlainText(), self)
+        dlg.exec()
+
+    def _generate_from_picks(self, refs):
+        dlg = SkeletonFromRefsDialog(refs, self)
+        if dlg.exec() == QDialog.Accepted:
+            text = dlg.text()
+            if text:
+                # 只走既有插入信号：直接操作 QTextEdit 会绕过主窗口链路，
+                # 破坏 undo 栈与 _apply_edit 的坐标语义。
+                self._insert_at_cursor(text)
+
+    def open_align(self):
+        """菜单入口：用当前参考清单做对齐。清单为空时给出明确指引。"""
+        refs = self.reference.picks()
+        if not refs:
+            info(self, "请先在右侧「写作参考」按段落检索，并把需要的段落"
+                      "「加入参考清单」，然后再来做内容对齐。")
+            return
+        self._align_with_picks(refs)
+
+    def open_style_check(self):
+        """公文风格校验：量化指标 + 对照七文体指纹。
+
+        骨架以**结构占位**形式填入编辑器（【待补】），不生成成文内容 ——
+        与「从参考段落生成草稿」同一条纪律：只做结构复用，不编造。
+        """
+        dlg = StyleCheckDialog(lambda: self.editor.editor.toPlainText(), self,
+                              insert_cb=self._insert_at_cursor)
+        dlg.exec()
+
+    def open_writing_hints(self):
+        """写作提示与灵感建议：按文种给"缺什么/怎么写"，只作建议、不改正文。
+
+        与「公文风格校验」的分工：风格校验回答"像不像这个文种"（量化对照），
+        本入口回答"接下来该写什么、可以套用什么句式"（结构提示＋句式推荐）。
+        """
+        dlg = WritingHintsDialog(lambda: self.editor.editor.toPlainText(), self)
+        dlg.exec()
+
+    def _open_writing_hints(self, topic: str = ""):
+        """写作参考面板入口：带上面板里的检索词作为主题（可留空）。"""
+        dlg = WritingHintsDialog(lambda: self.editor.editor.toPlainText(), self,
+                                 topic=topic or "")
+        dlg.exec()
+
+    def open_generate(self):
+        """菜单入口：用当前参考清单派生骨架生成草稿。"""
+        refs = self.reference.picks()
+        if not refs:
+            info(self, "请先在右侧「写作参考」按段落检索，并把需要的段落"
+                      "「加入参考清单」，然后再来生成草稿。")
+            return
+        self._generate_from_picks(refs)
+
+    def backfill_paragraph_index(self):
+        """启动后台：增量回填段落索引（段落参考功能的数据基础）。
+
+        必须**在后台线程**做：全量回填要逐篇 jieba 分词，万篇库以分钟计。
+        放在 UI 线程上就是"打开程序卡住不动"。
+
+        失败只记日志：段落索引是派生数据，补不上时各功能会走"现场派生"路径，
+        用户侧完全无感 —— 绝不能因为索引没建好而让程序启动报错。
+        """
+        from .. import config
+        try:
+            if not config.para_ref_enabled():
+                return
+        except Exception:
+            pass
+        worker = getattr(self, "_para_backfill_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        from .workers import FnWorker
+        worker = FnWorker(dao.rebuild_paragraphs, parent=self)
+        worker.ok.connect(self._on_backfill_done)
+        worker.failed.connect(lambda msg: log.warning("段落索引回填失败：%s", msg))
+        self._para_backfill_worker = worker
+        worker.start()
+
+    def _on_backfill_done(self, counts):
+        try:
+            log.info("段落索引回填完成：%s", counts)
+        except Exception:
+            pass
 
     # ------------------------------------------------ 功能入口
     def open_registry(self):
@@ -1246,6 +1417,10 @@ class MainWindow(QMainWindow):
             self._maybe_db_health_check()
         except Exception:
             pass
+        try:
+            self.backfill_paragraph_index()
+        except Exception:
+            pass      # 回填失败不该影响启动（索引是派生数据，可现场派生）
 
     def _wait_for_background_threads(self) -> list[str]:
         """退出前等所有后台 QThread 收工；返回仍在跑的线程名（超时未退）。

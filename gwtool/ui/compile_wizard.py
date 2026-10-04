@@ -635,6 +635,13 @@ class CompileWizard(ThreadSafeDialog, QWizard):
              是"这份材料已经在库里了"；此时按标题找回既有 id 继续用。
         """
         items = self._products if products is None else products
+        # 显式传入的清单必须**回填** self._products：批量模式在 _run_batch 里把
+        # self._products 清空后，用 `[(p, stem) for p in paths]` 这个临时列表调用
+        # 本函数。旧实现在 `products is not None` 分支不回填，于是紧接着的
+        # `_register_from_compile()` 从空的 self._products 出发 —— 它在
+        # `_register_impl` 开头就因 docs 为空而 return False，**批量模式下
+        # 产物永远进不了台账**，且全程没有任何提示（saved 非空，也不报错）。
+        self._products = list(items)
         saved: list[int] = []
         failed = 0
         for path, title in items:
@@ -742,14 +749,6 @@ class CompileWizard(ThreadSafeDialog, QWizard):
                                    doc_id=int(docs[0].id))
         if self._doc_no_override:
             rec.doc_no = self._doc_no_override
-        # 应用层字号查重：`idx_dispatch_no` 是普通索引，库层允许同号
-        existing = self._find_by_doc_no(rec.doc_no) if rec.doc_no else None
-        if existing is not None and existing.doc_id != rec.doc_id:
-            log.warning("发文字号 %s 已被占用（id=%s），本次登记已跳过",
-                        rec.doc_no, existing.id)
-            self._append_result(f"发文字号「{rec.doc_no}」在台账中已存在，"
-                                f"本次未登记；可在台账中手工核对。")
-            return False
 
         dlg = RegisterFromCompileDialog(self, record=rec)
         from PySide6.QtWidgets import QDialog
@@ -757,6 +756,21 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             return False
 
         final = dlg.value()
+        # 字号查重必须在**取到用户最终填写的字号之后**做（修正）。
+        # 旧实现把查重放在 dlg.exec() 之前、只查 `rec.doc_no`（汇编封面带来的、
+        # 通常为空的值），而用户真正填字号是在对话框里（含「自动取号」按钮）。
+        # `idx_dispatch_no` 是普通索引、库层允许同号，`find_dispatch_by_document`
+        # 又只按 doc_id 匹配 —— 于是"对话框里手填一个已存在的字号"完全无人拦截，
+        # 台账直接出现两条同号记录。这里改为对 final.doc_no 查重。
+        dup = self._find_by_doc_no(final.doc_no) if final.doc_no else None
+        if dup is not None and int(dup.doc_id or 0) != int(final.doc_id or 0):
+            log.warning("发文字号 %s 已被占用（id=%s），本次登记已跳过",
+                        final.doc_no, dup.id)
+            self._append_result(
+                f"发文字号「{final.doc_no}」在台账中已存在（{dup.title}），"
+                f"本次未登记；请在台账中核对后手工处理。")
+            return False
+
         # 幂等：同一资料条目已有记录就更新，不新增
         prev = dao.find_dispatch_by_document(final.doc_id)
         if prev is not None:

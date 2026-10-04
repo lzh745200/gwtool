@@ -21,12 +21,13 @@ def amount_to_cn(value) -> str:
     """人民币小写金额 -> 规范大写。
 
     规则（中国人民银行《正确填写票据和结算凭证的基本规定》）：
-      - 零拾零佰化简；中间连续零只写一个"零"
+      - 零拾零佰化简；中间有"0"必须写"零"，连续几个"0"只写一个"零"
       - 角分：无分写"整"，有角无分写"整"可省（此处保留"整"），
         全零写"整"；分有值不写"整"
       - 万/亿 段末零化简
-    示例：10050000.30 -> 壹仟零伍拾万元零叁角整
-         10050000.00 -> 壹仟零伍拾万元整
+    示例：10050000.30 -> 壹仟零伍万元叁角整
+         10050000.00 -> 壹仟零伍万元整
+         1005000.00  -> 壹佰万零伍仟元整（上段不满四位，跨段须补"零"）
     """
     if isinstance(value, str):
         s = value.strip().replace(",", "").replace("，", "").replace("¥", "").replace("￥", "")
@@ -83,22 +84,42 @@ def amount_to_cn(value) -> str:
         n //= 10000
 
     int_parts: list[str] = []
-    prev_zero = False          # 上一段是否整段为零（需要在本段前补一个"零"）
+    # 段间补零：判据是**上一段的最低有效位与下一段的最高有效位在十进制上是否
+    # 相邻**（规范：阿拉伯数字中间有"0"时必须写"零"，连续几个只写一个）。
+    #
+    # 用「位号」（个位=0，逐位递增）表达最不易出错：此前用"本段是否满四位"之类
+    # 间接判据，既漏过 1005000（壹佰万**零**伍仟：上段 0100 的最低有效位在百位，
+    # 与下段千位之间隔着万位），又会在 1234567（壹佰贰拾叁万肆仟…：上段 0123 的
+    # 最低有效位在万位，与下段千位紧邻）上多补一个零。
+    #
+    # 例外：两段都满四位时（50001000 = 伍仟万壹仟 或 伍仟万零壹仟），规范明确
+    # "可以只写一个零字，也可以不写"；此处与既有行为/断言一致地取"不写"。
+    def _top(val: int, base: int) -> int:
+        """段内最高有效位的绝对位号。"""
+        return base + len(str(val)) - 1
+
+    def _bottom(val: int, base: int) -> int:
+        """段内最低有效位的绝对位号（去掉该段尾部所有的零）。"""
+        k = 0
+        while val % 10 == 0:
+            val //= 10
+            k += 1
+        return base + k
+
+    prev_val = 0
+    prev_bottom = None
     for gi, val in enumerate(chunks):
-        last = gi == len(chunks) - 1
         if val == 0:
-            if not last:
-                prev_zero = True            # 段名（万/亿）一律不写，只记待补零
-            continue
-        if int_parts:
-            # 跨段补零只补"必需的那一个"（规范读法）：
-            #   - 本段不满四位：不补零会被并进上一段读错（100050000 = 壹亿零伍万）
-            #   - 中间有整段为零：必须补零（1000001000 = 壹拾亿零壹仟）
-            # 本段满四位并与上一段相邻时直接连读：50001000 = 伍仟万壹仟
-            if val < 1000 or prev_zero:
+            continue                      # 段名（万/亿）一律不写；缺口由下一段补零
+        base = 4 * (len(chunks) - 1 - gi)
+        if prev_bottom is not None:
+            adjacent = (prev_bottom - _top(val, base)) == 1
+            may_skip = prev_val >= 1000 and val >= 1000
+            if not (adjacent or may_skip):
                 int_parts.append("零")
         int_parts.append(group4(val) + _scale_suffix(len(chunks), gi))
-        prev_zero = False
+        prev_val = val
+        prev_bottom = _bottom(val, base)
     int_cn = "".join(int_parts)
 
     dec_cn = ""

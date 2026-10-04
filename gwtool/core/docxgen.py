@@ -259,8 +259,10 @@ def _build_red_header(doc, tpl: DocTemplate) -> None:
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _set_line_exact(p, rh.org_size_pt * 1.35)
     run = p.add_run(rh.org)
-    _set_run_font(run, rh.org_font if rh.org_font != "方正小标宋简体" else "方正小标宋简体",
-                  rh.org_size_pt, color=(255, 0, 0))
+    # 旧版这里写成 `rh.org_font if rh.org_font != FONT_XBS else FONT_XBS`——
+    # 三元两侧同值，等价于直接用 rh.org_font。清理掉，避免后来者误以为
+    # 这里有"非小标宋时回退"的逻辑而据此改动行为。
+    _set_run_font(run, rh.org_font, rh.org_size_pt, color=(255, 0, 0))
     if rh.doc_number:
         p2 = doc.add_paragraph()
         p2.alignment = WD_ALIGN_PARAGRAPH.CENTER

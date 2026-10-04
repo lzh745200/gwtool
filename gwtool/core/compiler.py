@@ -30,11 +30,38 @@ class CompileRequest:
     include_sources: bool = False                          # 追加材料来源清单
 
 
-def load_trees(doc_ids: list[int], extra_paths: list[str]) -> list[DocTree]:
+def load_trees_ex(doc_ids: list[int], extra_paths: list[str]
+                  ) -> tuple[list[DocTree], list[tuple[str, str]], list[bool]]:
+    """`load_trees` 的完整形态：同时返回失败清单与"输入槽位是否成功"。
+
+    返回 `(成功解析的 trees, failures, slot_ok)`：
+      - failures 元素为 `(展示名, 原因)`，展示名对文档是 `文档#id`、
+        对文件是 `Path(p).name`（仅用于日志/提示，不做身份匹配）；
+      - `slot_ok` 与输入 `[*doc_ids, *extra_paths]` **逐位对齐**，第 i 位
+        表示第 i 个输入是否产出了材料。
+
+    为什么要有它：`load_trees` 对进不了汇编的输入**静默丢弃**（返回值里
+    看不出少了谁），而调用方若按"输入个数"准备材料标题，丢弃后标题会
+    **整体错位**——第 N 份材料被冠以第 N+1 份的标题（第五轮深审实测：
+    坏文件在前时，好材料被冠以坏材料的标题）。要对齐，就必须按**输入
+    槽位**逐位过滤标题：坏文件只跳过自己那一坑，不挤占别人的。
+
+    软删除（已进回收站）与不存在的文档同样视为"进不了汇编"，与
+    `collect_sources` 的口径一致——否则会出现"正文里有它、来源清单里
+    没有它"的自相矛盾。
+    """
     trees: list[DocTree] = []
+    failures: list[tuple[str, str]] = []
+    slot_ok: list[bool] = []
     for did in doc_ids:
         d = dao.get_document(did)
         if not d:
+            failures.append((f"文档#{did}", "材料不存在（可能已被彻底删除）"))
+            slot_ok.append(False)
+            continue
+        if (d.deleted_time or "").strip():
+            failures.append((d.title or f"文档#{did}", "材料已在回收站中"))
+            slot_ok.append(False)
             continue
         tree = DocTree.from_json(d.title, d.blocks_json)
         if not tree.blocks:  # 旧数据兜底：按纯文本段落
@@ -43,20 +70,49 @@ def load_trees(doc_ids: list[int], extra_paths: list[str]) -> list[DocTree]:
                 if line.strip():
                     tree.blocks.append(Block(text=line.strip()))
         trees.append(tree)
+        slot_ok.append(True)
     from .importer import parse_any
     for p in extra_paths:
-        r = parse_any(p)
-        if r.ok and r.tree:
+        try:
+            r = parse_any(p)
+            reason = "" if (r.ok and r.tree) else (r.error or "解析失败")
+        except Exception as exc:      # 单个文件炸掉不能拖垮整次汇编
+            reason = str(exc) or exc.__class__.__name__
+            r = None
+        if r is not None and r.ok and r.tree:
             trees.append(r.tree)
-    return trees
+            slot_ok.append(True)
+        else:
+            failures.append((Path(p).name, reason or "解析失败"))
+            slot_ok.append(False)
+    return trees, failures, slot_ok
 
 
-def collect_sources(doc_ids: list[int], extra_paths: list[str]) -> list[dict]:
+def load_trees(doc_ids: list[int], extra_paths: list[str]) -> list[DocTree]:
+    """合并资料库文档与额外文件的解析结果（保持既有签名：只返回 trees）。
+
+    ⚠ 进不了汇编的输入（解析失败 / 文档不存在 / 已进回收站）会被**静默
+    丢弃**且调用方无从得知 —— 需要失败清单或要做"材料标题对齐"的调用方
+    请改用 `load_trees_ex`。
+    """
+    return load_trees_ex(doc_ids, extra_paths)[0]
+
+
+def collect_sources(doc_ids: list[int], extra_paths: list[str],
+                    extra_parsed: list[str] | None = None) -> list[dict]:
     """收集汇编材料的来源信息（标题 / 原文件名 / 导入时间 / 所属分类）。
 
     **为什么要它**：汇编类公文需要可追溯性 —— "这份汇编里的内容从哪来"
     必须能答出来（审计、责任划分、领导询问）。此前成品是一个孤立的 DOCX，
     来源只存在于操作者的记忆里，隔周就说不清了。
+
+    **口径必须与 `load_trees_ex` 一致**：解析失败的额外文件内容根本没进
+    汇编，列进来源清单就是"虚列出处"——清单说内容来自它，实际来自别处。
+    （第五轮深审实测：坏 docx 被列入清单、其内容缺席，且材料标题整体错位。）
+
+    `extra_parsed` 是调用方已经成功解析过的额外文件集合（`compile_docx`
+    传入以避免同一批文件被解析两遍）；传 None 时本函数自行解析判定，
+    独立调用（如测试、预览）同样得到过滤后的清单。
     """
     out: list[dict] = []
     try:
@@ -77,7 +133,24 @@ def collect_sources(doc_ids: list[int], extra_paths: list[str]) -> list[dict]:
             "time": (d.import_time or "")[:16],
             "category": cats.get(d.category_id, "") or "未分类",
         })
+    if extra_parsed is None:
+        from .importer import parse_any
+        extra_parsed = []
+        for p in extra_paths:
+            try:
+                r = parse_any(p)
+            except Exception:
+                continue
+            if r.ok and r.tree:
+                extra_parsed.append(p)
+            else:
+                logs.get_logger("compile").warning(
+                    "额外材料解析失败，未列入来源清单：%s（%s）",
+                    Path(p).name, r.error or "解析失败")
+    ok = {str(p) for p in extra_parsed}
     for p in extra_paths:
+        if str(p) not in ok:
+            continue
         out.append({
             "title": Path(p).stem,
             "file": Path(p).name,
@@ -103,15 +176,30 @@ def build_sources_tree(sources: list[dict]) -> DocTree:
 
 def compile_docx(req: CompileRequest) -> str:
     tpl = req.template or DocTemplate()
-    trees = load_trees(req.doc_ids, req.extra_paths)
+    trees, failures, slot_ok = load_trees_ex(req.doc_ids, req.extra_paths)
+    for name, reason in failures:
+        # 静默丢材料是"用户以为进汇编了，其实没有"——必须留痕。
+        # UI 主路径（向导）的材料先入库再汇编，失败在导入步已逐条点名；
+        # 这里兜住直接走 CompileRequest 的调用方（脚本/测试/后续入口）。
+        logs.get_logger("compile").warning(
+            "汇编材料进不了成品，已跳过：%s（%s）", name, reason)
     if not trees:
         raise ValueError("没有可汇编的材料")
     if req.material_titles:
-        for t, title in zip(trees, req.material_titles):
+        # 标题按**输入槽位**对齐：第 i 个标题属于第 i 个输入（先文档后
+        # 文件），进不了汇编的输入只跳过自己那一坑。旧实现直接
+        # zip(trees, titles)，坏文件被丢弃后标题整体错位（实测：坏材料
+        # 的标题被冠到好材料头上）。
+        aligned = [t for t, ok in zip(req.material_titles, slot_ok) if ok]
+        for t, title in zip(trees, aligned):
             if title:
                 t.title = title
     if req.include_sources:
-        sources = collect_sources(req.doc_ids, req.extra_paths)
+        # 把成功解析的额外文件传下去，避免同一批文件被解析两遍
+        ok_extra = [p for p, ok in zip(req.extra_paths,
+                                       slot_ok[len(req.doc_ids):]) if ok]
+        sources = collect_sources(req.doc_ids, req.extra_paths,
+                                  extra_parsed=ok_extra)
         # 无材料时不追加空清单（否则会凭空多出一个只有表头的附录）
         if sources:
             trees.append(build_sources_tree(sources))

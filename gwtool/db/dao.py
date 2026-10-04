@@ -13,7 +13,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from . import connection as dbconn
-from .tokenize import build_match_query, tokenize
+from .tokenize import build_match_query, build_match_query_any, tokenize
 
 
 def now() -> str:
@@ -164,6 +164,40 @@ class Attachment:
     added_time: str = ""
 
 
+@dataclass
+class ParagraphRow:
+    """一条段落（派生自 documents.blocks_json，见 core/paragraph_ref）。
+
+    char_offset 的 -1 是**有意义的取值**，不是"忘了填"：它表示"这段在源文档
+    content_text 里定位不到"。UI 遇到 -1 会降级为"打开所属文档"而不是跳转。
+    """
+    id: int = 0
+    doc_id: int = 0
+    ordinal: int = 0
+    kind: str = "paragraph"
+    level: int = 0
+    text: str = ""
+    char_offset: int = -1
+    text_hash: str = ""
+
+
+@dataclass
+class UserSkeleton:
+    """用户从参考段落派生的骨架（L3）。
+
+    与 core/skeletons.Skeleton 同形（"段落序列 + 槽位"），因此可共用同一套
+    render 语义；区别只是它由用户从参考文献抽象而来、可持久化复用。
+    """
+    id: int = 0
+    name: str = ""
+    kind: str = ""
+    template: str = ""          # 槽位已替换为 {name} 的文本
+    slots_json: str = "[]"      # [{"name","example","span":[a,b]}, ...]
+    source_paras: str = ""      # 来源段落 id，逗号分隔（可追溯）
+    note: str = ""
+    created_time: str = ""
+
+
 # ---------------------------------------------------------------- categories
 def add_category(name: str, parent_id: int = 0) -> int:
     conn = dbconn.get_conn()
@@ -217,6 +251,31 @@ def _fts_update_documents(doc_id: int, title: str, content: str) -> None:
         (tokenize(title), tokenize(content), doc_id))
 
 
+def _paragraph_update(doc_id: int, blocks_json: str, content_text: str,
+                      doc_hash: str = "") -> None:
+    """写入/刷新某文档的段落索引（v7）。
+
+    与 `_fts_update_documents` **同一职责层**：派生索引在写入时同步维护，
+    这是本模块自上而下的约定（FTS 行由 DAO 维护，而不是靠事后重建）。
+    放在这里而不是各个调用点，是因为写入口有导入、编辑器保存、批量纠错、
+    剪贴板入库等多条路径 —— 逐点补调用必然漏掉其中一条，而漏掉的后果是
+    "某类来源的文档在段落检索里永远搜不到"，且没人会发现。
+
+    **任何异常都吞掉**：段落索引是派生数据，它没建好不该让"保存文档"失败。
+    没建好的代价只是该篇要走"现场派生"（功能照常），而让保存失败是用户
+    直接丢数据 —— 两者严重性不对等。
+    """
+    try:
+        from ..core.paragraph_ref import derive_blocks
+        replace_paragraphs(dbconn.get_conn(), doc_id,
+                           derive_blocks(blocks_json, content_text),
+                           doc_hash=doc_hash, commit=False)
+    except Exception as exc:
+        from .. import logs
+        logs.get_logger("db").warning(
+            "段落索引更新失败（doc_id=%s），该篇将走现场派生：%s", doc_id, exc)
+
+
 def add_document(doc: Document) -> int:
     """插入文档；重复内容（hash 相同）返回 -1。
 
@@ -248,6 +307,8 @@ def add_document(doc: Document) -> int:
          doc.simhash))
     doc_id = int(cur.lastrowid)
     _fts_update_documents(doc_id, doc.title, doc.content_text)
+    _paragraph_update(doc_id, doc.blocks_json, doc.content_text,
+                      doc_hash=doc.text_hash)
     conn.commit()
     return doc_id
 
@@ -263,6 +324,8 @@ def update_document_content(doc_id: int, title: str, content: str,
          text_hash(content), len(content), now(),
          to_db(_simhash(content)), doc_id))
     _fts_update_documents(doc_id, title, content)
+    _paragraph_update(doc_id, blocks_json if blocks_json is not None else "[]",
+                      content, doc_hash=text_hash(content))
     conn.commit()
 
 
@@ -334,6 +397,10 @@ def purge_document(doc_id: int) -> None:
     # 级联清理历史快照与附件记录，避免孤儿数据无限累积
     conn.execute("DELETE FROM snapshots WHERE doc_id=?", (doc_id,))
     conn.execute("DELETE FROM attachments WHERE doc_id=?", (doc_id,))
+    # v7 的段落派生表（paragraphs / paragraphs_fts / fts_index_state）同属该文档，
+    # 必须一并清掉：否则彻底删除后仍残留永不命中的段落行与 FTS 行，
+    # 清空回收站的用户会持续累积（只有下一次 rebuild 才会顺带回收）。
+    _drop_paragraphs_of(conn, doc_id)
     conn.commit()
 
 
@@ -1274,7 +1341,11 @@ def dispatch_stats(group_by: str = "doc_type", year: str = "") -> list[tuple[str
            f" FROM dispatch_register")
     params: list = []
     if year:
-        sql += " WHERE sign_date LIKE ? OR doc_no LIKE ?"
+        # 括号不能省：`... WHERE a LIKE ? OR b LIKE ? GROUP BY k` 里的 OR 会把
+        # **年度过滤整个失效**（退化成「成文日期匹配 或 号码里含该年」），年度
+        # 统计会混进别的年度。list_dispatch 里的同类写法是对的——那里整体被
+        # where.append(...) 的括号包住了，两处别改混。
+        sql += " WHERE (sign_date LIKE ? OR doc_no LIKE ?)"
         params += [f"{year}%", f"%〔{year}〕%"]
     sql += " GROUP BY k ORDER BY n DESC, k"
     return [(r["k"], int(r["n"])) for r in conn.execute(sql, params).fetchall()]
@@ -1295,6 +1366,13 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
     """取某机关代字某年度已用的最大发文序号，无记录返回 0。
 
     prefix 形如「×政办发」，匹配「×政办发〔2026〕12号」中的 12。
+
+    为什么用 findall 取最大、而不是 search 取首个（修正）：本函数回答的是
+    「已用序号的**最大值**」，而同一行台账的文号列里可能出现多个「〕N号」
+    片段（如「×政办发〔2025〕8号并入〔2025〕12号」这类合并件的写法）。旧实现
+    用 search 只取第一个，会**低估**已用序号（得 8 而非 12）→ 自动取号给出
+    已用过的字号，台账出现重号。旧 docstring 写着「取最大」而代码只取首个，
+    两者不一致；现按文档承诺改为真取最大。
     """
     conn = dbconn.get_conn()
     rows = conn.execute(
@@ -1302,9 +1380,13 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
         (f"{prefix}%〔{year}〕%",)).fetchall()
     best = 0
     for r in rows:
-        m = re.search(r"〕\s*(\d+)\s*号", r["doc_no"] or "")
-        if m:
-            best = max(best, int(m.group(1)))
+        # 逐段取号：号段里混进异常长数字（误粘贴/脏数据）时只跳过该段，
+        # 否则它会把"已用最大序号"顶成天文数字，自动取号随即给出 10^30 量级的号。
+        # 注：这里不能用 try/int 兜底 —— `\d+` 捕获的一定是纯数字，int() 永不抛。
+        for tok in re.findall(r"〕\s*(\d+)\s*号", r["doc_no"] or ""):
+            if len(tok) > 9:
+                continue
+            best = max(best, int(tok))
     return best
 
 
@@ -1442,7 +1524,8 @@ def receive_stats(group_by: str = "from_org", year: str = "") -> list[tuple[str,
            f" FROM receive_register")
     params: list = []
     if year:
-        sql += " WHERE receive_date LIKE ? OR incoming_no LIKE ?"
+        # 括号不能省，理由同 dispatch_stats（OR 会让年度过滤失效）
+        sql += " WHERE (receive_date LIKE ? OR incoming_no LIKE ?)"
         params += [f"{year}%", f"%〔{year}〕%"]
     sql += " GROUP BY k ORDER BY n DESC, k"
     return [(r["k"], int(r["n"])) for r in conn.execute(sql, params).fetchall()]
@@ -1472,6 +1555,7 @@ def max_reg_no_serial(prefix: str, year: str) -> int:
     """取某前缀某年度已用的最大收文登记号序号，无记录返回 0。
 
     与 max_doc_no_serial 对称，但**独立计数**——收文与发文是两本账。
+    取最大值的理由同 max_doc_no_serial（见其文档：同一行可能出现多个号段）。
     """
     conn = dbconn.get_conn()
     rows = conn.execute(
@@ -1479,9 +1563,11 @@ def max_reg_no_serial(prefix: str, year: str) -> int:
         (f"{prefix}%〔{year}〕%",)).fetchall()
     best = 0
     for r in rows:
-        m = re.search(r"〕\s*(\d+)\s*号", r["reg_no"] or "")
-        if m:
-            best = max(best, int(m.group(1)))
+        # 长度门槛与 max_doc_no_serial 同源，理由见该函数注释
+        for tok in re.findall(r"〕\s*(\d+)\s*号", r["reg_no"] or ""):
+            if len(tok) > 9:
+                continue
+            best = max(best, int(tok))
     return best
 
 
@@ -1507,3 +1593,286 @@ def pending_receive(due_within_days: int = 2, today: str = "") -> list[Receive]:
         "   AND due_date <= ?"
         " ORDER BY due_date ASC, id ASC", (edge,)).fetchall()
     return [Receive(**dict(r)) for r in rows]
+
+
+# ---------------------------------------------------------------- paragraphs (v7)
+# 段落是**派生数据**：源 = documents.blocks_json（块为空时回落按 content_text
+# 切分）。所有函数都建立在"随时可整表重建"这个前提上，因此这里没有、也不该有
+# 任何"段落数据不可再生"的假设。
+def replace_paragraphs(conn, doc_id: int, paras, doc_hash: str = "",
+                       commit: bool = True) -> int:
+    """整体替换某文档的全部段落与其 FTS 行，返回写入段数。
+
+    为什么是"整体替换"而不是"增量比对"：段落序号会因插入/删除而整体错位，
+    逐条 diff 的收益远小于复杂度；而单篇段落数很小（通常几十条），整删整插
+    既简单又不会留下"序号错位"这类持续性脏数据。
+
+    ⚠ 为什么用**直接 SQL 单事务**、而不是调用本模块的 add_* 系列：
+    那些函数各自 `conn.commit()`。批量重建时中途提交会让"整批回滚"失效——
+    这正是词表导入踩过的同一个坑（见 memory 记录）。`commit=False` 是给
+    批量路径用的：由调用方在循环结束后统一提交一次。
+
+    FTS 行必须先按旧段落 id 删干净，再删段落行：`paragraphs_fts.ref_id`
+    指向 `paragraphs.id`，段落行一旦删掉就再也找不回这些 id，FTS 里就会
+    永久残留一批"指向不存在段落"的孤儿行。
+    """
+    old = [int(r["id"]) for r in conn.execute(
+        "SELECT id FROM paragraphs WHERE doc_id=?", (doc_id,)).fetchall()]
+    if old:
+        conn.executemany("DELETE FROM paragraphs_fts WHERE ref_id=?",
+                         [(i,) for i in old])
+    conn.execute("DELETE FROM paragraphs WHERE doc_id=?", (doc_id,))
+    written = 0
+    for p in paras:
+        text = getattr(p, "text", "") or ""
+        cur = conn.execute(
+            "INSERT INTO paragraphs(doc_id,ordinal,kind,level,text,"
+            "char_offset,text_hash) VALUES(?,?,?,?,?,?,?)",
+            (doc_id, int(getattr(p, "ordinal", written)),
+             getattr(p, "kind", "paragraph") or "paragraph",
+             int(getattr(p, "level", 0) or 0), text,
+             int(getattr(p, "char_offset", -1)),
+             getattr(p, "text_hash", "") or text_hash(text)))
+        conn.execute("INSERT INTO paragraphs_fts(tokenized,ref_id) VALUES(?,?)",
+                     (tokenize(text), int(cur.lastrowid)))
+        written += 1
+    if doc_hash:
+        conn.execute(
+            "INSERT INTO fts_index_state(kind,ref_id,text_hash)"
+            " VALUES('paragraphs',?,?)"
+            " ON CONFLICT(kind,ref_id) DO UPDATE SET text_hash=excluded.text_hash",
+            (doc_id, doc_hash))
+    if commit:
+        conn.commit()
+    return written
+
+
+def _drop_paragraphs_of(conn, doc_id: int) -> None:
+    """删某文档的段落 + FTS 行 + 状态（不提交）。rebuild 清残留时复用。"""
+    old = [int(r["id"]) for r in conn.execute(
+        "SELECT id FROM paragraphs WHERE doc_id=?", (doc_id,)).fetchall()]
+    if old:
+        conn.executemany("DELETE FROM paragraphs_fts WHERE ref_id=?",
+                         [(i,) for i in old])
+    conn.execute("DELETE FROM paragraphs WHERE doc_id=?", (doc_id,))
+    conn.execute("DELETE FROM fts_index_state WHERE kind='paragraphs' AND ref_id=?",
+                 (doc_id,))
+
+
+def rebuild_paragraphs(progress_cb=None, incremental: bool = True) -> dict[str, int]:
+    """重建段落索引；默认**增量**。与 rebuild_fts 同构，判据同源。
+
+    状态**复用 `fts_index_state`**（`kind='paragraphs'`、`ref_id=doc_id`、
+    `text_hash=documents.text_hash`），不另起一张状态表：整篇索引与段落索引
+    的"是否落后于源数据"判据完全一致，各记一份必然出现两份状态互相漂移，
+    而漂移的表现是"检索命中旧内容"——最难排查的一类不一致。
+
+    回收站里的文档**不进段落索引**（与 rebuild_fts 同规矩）：否则重建一次就
+    把软删除的材料全部变回可检索。属于回收站但仍留在索引里的历史残留行，
+    由本函数末尾的 stale 清理一并摘掉。
+
+    `incremental=False` 退化为全量重建（先清空段落表、FTS 与状态表）：
+    状态表被外部改坏时用它兜底——自助入口必须能真的自救，不能只会增量。
+
+    返回 {"documents": 索引内文档数, "paragraphs": 段落总数, "rescanned": 本次重切文档数}。
+    """
+    def _tick(msg: str) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(msg)
+        except Exception:
+            pass
+
+    conn = dbconn.get_conn()
+    # 延迟导入：core.paragraph_ref 需要 dao，此处反向引用只能在调用期解析
+    # （与 add_document 里 simhash 的延迟导入同一惯例）。
+    from ..core.paragraph_ref import derive_blocks
+
+    rows = conn.execute(
+        "SELECT id, blocks_json, content_text, text_hash FROM documents"
+        " WHERE deleted_time=''").fetchall()
+    total = len(rows)
+
+    if incremental:
+        indexed = {int(r["doc_id"]) for r in conn.execute(
+            "SELECT DISTINCT doc_id FROM paragraphs").fetchall()}
+        state = {int(r["ref_id"]): (r["text_hash"] or "") for r in conn.execute(
+            "SELECT ref_id, text_hash FROM fts_index_state"
+            " WHERE kind='paragraphs'").fetchall()}
+    else:
+        _tick("正在清空旧段落索引…")
+        indexed, state = set(), {}
+        conn.execute("DELETE FROM paragraphs_fts")
+        conn.execute("DELETE FROM paragraphs")
+        conn.execute("DELETE FROM fts_index_state WHERE kind='paragraphs'")
+
+    keep: set[int] = set()
+    reused = 0
+    _tick(f"正在重建段落索引（0/{total}）…")
+    for i, r in enumerate(rows, 1):
+        did = int(r["id"])
+        keep.add(did)
+        digest = r["text_hash"] or ""
+        if digest and did in indexed and state.get(did) == digest:
+            reused += 1          # 内容未变且已索引：跳过
+        else:
+            try:
+                paras = derive_blocks(r["blocks_json"], r["content_text"])
+            except Exception as exc:
+                # 单篇派生失败**不能**拖垮整次重建：跳过它、留日志，其余照常。
+                # 该文档的段落索引保持缺失，下次重建还会再试（状态未写入）。
+                from .. import logs as _logs
+                _logs.get_logger("db").warning(
+                    "段落派生失败，已跳过该文档（doc_id=%s）：%s", did, exc)
+                keep.discard(did)
+                continue
+            replace_paragraphs(conn, did, paras, doc_hash=digest, commit=False)
+        if i % 50 == 0 or i == total:
+            _tick(f"正在重建段落索引（{i}/{total}）…")
+
+    # 清残留：已不在库中、已进回收站、或（全量模式下）派生失败的文档
+    for did in (indexed | set(state)) - keep:
+        _drop_paragraphs_of(conn, did)
+    # 兜底：段落行所属文档已不存在（外部改库/旧备份恢复带来的孤儿）
+    for orphan in {int(x["doc_id"]) for x in conn.execute(
+            "SELECT DISTINCT doc_id FROM paragraphs").fetchall()} - keep:
+        _drop_paragraphs_of(conn, orphan)
+
+    counts = {
+        "documents": len(keep),
+        "paragraphs": paragraph_count(),
+        "rescanned": total - reused,
+    }
+    conn.commit()
+    return counts
+
+
+def list_paragraphs(doc_id: int) -> list[ParagraphRow]:
+    """取某文档全部段落（按序号升序）。"""
+    rows = dbconn.get_conn().execute(
+        "SELECT * FROM paragraphs WHERE doc_id=? ORDER BY ordinal ASC, id ASC",
+        (doc_id,)).fetchall()
+    return [ParagraphRow(**dict(r)) for r in rows]
+
+
+def get_paragraph(para_id: int) -> ParagraphRow | None:
+    row = dbconn.get_conn().execute(
+        "SELECT * FROM paragraphs WHERE id=?", (para_id,)).fetchone()
+    return ParagraphRow(**dict(row)) if row else None
+
+
+def paragraph_count(doc_id: int | None = None) -> int:
+    conn = dbconn.get_conn()
+    if doc_id is None:
+        return int(conn.execute("SELECT COUNT(*) FROM paragraphs").fetchone()[0])
+    return int(conn.execute("SELECT COUNT(*) FROM paragraphs WHERE doc_id=?",
+                            (doc_id,)).fetchone()[0])
+
+
+def paragraph_index_hash(doc_id: int) -> str:
+    """该文档段落索引所依据的内容哈希；没索引过返回空串。
+
+    与 `documents.text_hash` 比对即得"索引是否落后于源数据"——复用
+    `fts_index_state`（kind='paragraphs'），不另立状态表。
+    """
+    row = dbconn.get_conn().execute(
+        "SELECT text_hash FROM fts_index_state"
+        " WHERE kind='paragraphs' AND ref_id=?", (doc_id,)).fetchone()
+    return (row["text_hash"] or "") if row else ""
+
+
+def search_paragraphs_fts(query: str, limit: int = 30,
+                          any_terms: bool = False) -> list[SearchResult]:
+    """段落级 FTS 检索。返回的 SearchResult.title 是**所属文档标题**。
+
+    JOIN documents 并追加 `deleted_time=''`：软删除时 rebuild 会摘掉 FTS 行，
+    但外部改库或恢复旧备份可能留下残行——不能让回收站里的材料被检索命中
+    （与 _fts_search 对 documents 的处理同一道保险）。
+
+    FTS 语法异常一律返回 []，不向外抛：查询串由用户输入，畸形输入不该让
+    整个检索面板炸掉。
+
+    `any_terms=True` 改用 OR 语义（召回兜底，见 tokenize.build_match_query_any）。
+    """
+    match = (build_match_query_any(query) if any_terms
+             else build_match_query(query))
+    if not match:
+        return []
+    conn = dbconn.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT f.ref_id AS ref_id, bm25(paragraphs_fts) AS rank,"
+            " p.text AS text, p.doc_id AS doc_id, p.ordinal AS ordinal,"
+            " d.title AS doc_title"
+            " FROM paragraphs_fts f"
+            " JOIN paragraphs p ON p.id=f.ref_id"
+            " JOIN documents d ON d.id=p.doc_id"
+            " WHERE paragraphs_fts MATCH ? AND d.deleted_time=''"
+            " ORDER BY rank LIMIT ?", (match, limit)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [SearchResult("paragraphs", int(r["ref_id"]), r["doc_title"] or "",
+                         r["text"] or "", float(r["rank"])) for r in rows]
+
+
+def paragraph_doc_info(para_ids: list[int]) -> dict[int, dict]:
+    """批量取段落归属信息（文档标题 / 序号 / 偏移 / 哈希），供 UI 溯源展示。
+
+    一次查询取代"逐段落各查一次"：参考清单可能几十条，逐条查会打出几十次
+    SQL，在面板滚动刷新时会成为可见的卡顿。
+    """
+    ids = [int(i) for i in para_ids]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    rows = dbconn.get_conn().execute(
+        f"SELECT p.id AS id, p.doc_id AS doc_id, p.ordinal AS ordinal,"
+        f" p.kind AS kind, p.level AS level, p.char_offset AS char_offset,"
+        f" p.text_hash AS text_hash, d.title AS doc_title,"
+        f" d.deleted_time AS deleted_time"
+        f" FROM paragraphs p LEFT JOIN documents d ON d.id=p.doc_id"
+        f" WHERE p.id IN ({marks})", ids).fetchall()
+    return {int(r["id"]): dict(r) for r in rows}
+
+
+# ---------------------------------------------------------- user_skeletons (v7)
+def save_user_skeleton(name: str, kind: str, template: str,
+                       slots_json: str = "[]", source_paras: str = "",
+                       note: str = "") -> int:
+    """保存一条用户派生骨架，返回 id。同名覆盖。
+
+    返回的 id 是**回查**来的，不用 `cur.lastrowid`：upsert 走 DO UPDATE 分支时
+    并没有发生 INSERT，此时 lastrowid 可能是上一条语句留下的陈旧值——用它当
+    "刚保存的骨架 id"会指向另一条记录。
+    """
+    conn = dbconn.get_conn()
+    conn.execute(
+        "INSERT INTO user_skeletons(name,kind,template,slots_json,"
+        "source_paras,note) VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(name) DO UPDATE SET kind=excluded.kind,"
+        " template=excluded.template, slots_json=excluded.slots_json,"
+        " source_paras=excluded.source_paras, note=excluded.note",
+        (name, kind, template, slots_json, source_paras, note))
+    row = conn.execute("SELECT id FROM user_skeletons WHERE name=?",
+                       (name,)).fetchone()
+    conn.commit()
+    return int(row["id"]) if row else 0
+
+
+def list_user_skeletons() -> list[UserSkeleton]:
+    rows = dbconn.get_conn().execute(
+        "SELECT * FROM user_skeletons ORDER BY id DESC").fetchall()
+    return [UserSkeleton(**dict(r)) for r in rows]
+
+
+def get_user_skeleton(skeleton_id: int) -> UserSkeleton | None:
+    row = dbconn.get_conn().execute(
+        "SELECT * FROM user_skeletons WHERE id=?", (skeleton_id,)).fetchone()
+    return UserSkeleton(**dict(row)) if row else None
+
+
+def delete_user_skeleton(skeleton_id: int) -> None:
+    conn = dbconn.get_conn()
+    conn.execute("DELETE FROM user_skeletons WHERE id=?", (skeleton_id,))
+    conn.commit()

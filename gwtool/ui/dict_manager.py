@@ -79,6 +79,9 @@ class DictManager(QDialog):
         kw = self.dict_search.text().strip()
         conn = get_conn()
         if kw:
+            # 检索态**故意包含**内置词典：用户搜"政务"时想看的就是释义，
+            # 把它挡掉反而查不到东西。能不能删由 _del_dict_row 把关
+            # （内置词条不可删），显示与可删范围分开，各管一段。
             rows = conn.execute(
                 "SELECT word,pinyin,definition,example,source FROM dictionary"
                 " WHERE word LIKE ? ORDER BY id LIMIT 300", (f"%{kw}%",)).fetchall()
@@ -178,12 +181,47 @@ class DictManager(QDialog):
         self._import_wordlist("protect")
 
     def _del_dict_row(self):
+        """删除词典页选中的词条 —— **内置词典（cc-cedict）不可删**。
+
+        为什么必须拦住：词典页检索态会把内置词典一并列出（用户搜词就是要看释义），
+        而内置 12.3 万条是 `scripts/seed_data.py` 初始化时一次性灌入的随包数据，
+        删掉之后**界面里没有任何重建入口**（dao 层只有 add/delete，无 rebuild）。
+        更严重的连锁危害在纠错侧：`dao.builtin_dictionary_words()` 把非用户来源的
+        词条当作**重复字检测的判词证据集**，批量误删会让"这段字是不是汉语真词"
+        的判断失灵，误报成倍上涨（如"进行行。"、"直接接时间"这类本就靠词典放行）。
+        因此这里按来源判据拦截，而不是靠"用户别乱点"。
+        """
         rows = {i.row() for i in self.dict_table.selectedIndexes()}
+        blocked: list[str] = []
+        deleted = 0
         for r in sorted(rows, reverse=True):
-            word = self.dict_table.item(r, 0).text()
+            item = self.dict_table.item(r, 0)
+            src_item = self.dict_table.item(r, 4)      # 第 5 列 = 来源
+            word = item.text() if item is not None else ""
+            if not word:
+                continue
+            source = src_item.text() if src_item is not None else ""
+            if source == "cc-cedict":                  # 内置词典：只提示，不删
+                blocked.append(word)
+                continue
             get_conn().execute("DELETE FROM dictionary WHERE word=?", (word,))
+            deleted += 1
+        if deleted:
             get_conn().commit()
+            # 纠错流水线把用户词缓存进 repeat_rules._context()：删库后不失效，
+            # 本次会话仍按旧词典放行（被删的词继续参与"整段豁免"），
+            # 用户会以为"删了没用"，只有重启才生效。
+            invalidate_cache()
         self._reload_dict()
+        self._refresh_stats()
+        if blocked:
+            warn(self, f"内置词典的 {len(blocked)} 个词条不能删除"
+                       f"（它们是随程序分发的基础数据，且参与重复字检测的判词）：\n"
+                       + "、".join(blocked[:8])
+                       + ("…" if len(blocked) > 8 else "")
+                       + "\n\n如需让某个词不参与纠错，请到「忽略名单」标签页添加。")
+        if deleted:
+            info(self, f"已删除 {deleted} 个自建词条。")
 
     # ================================================================ 错别字对
     def _tab_errors(self):

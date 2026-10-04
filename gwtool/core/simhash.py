@@ -55,20 +55,31 @@ def from_db(v: int) -> int:
     return v + (1 << 64) if v < 0 else v
 
 
-def _trigrams(text: str) -> set[str]:
-    s = "".join(text.split())
-    if len(s) < 3:
-        return {s} if s else set()
-    return {s[i:i + 3] for i in range(len(s) - 2)}
+def _ngrams(s: str, n: int) -> set[str]:
+    """s 的 n-gram 集合（s 已去空白；n 自动收敛到 len(s)）。"""
+    if not s:
+        return set()
+    n = max(1, min(n, len(s)))
+    return {s[i:i + n] for i in range(len(s) - n + 1)}
 
 
 def jaccard(a: str, b: str) -> float:
-    """字符三元组 Jaccard 相似度（短文本精确值）。"""
-    sa, sb = _trigrams(a), _trigrams(b)
-    if not sa and not sb:
+    """字符 n-gram Jaccard 相似度（短文本与长短混合均稳定）。
+
+    ⚠ 两边必须用**同一个阶**，否则集合永远无法相交。旧实现让每一边按自身
+    长度定阶（<3 字时整个串当唯一元素），于是 "甲乙" 与 "甲乙丙" 这样
+    「一个明显是另一个前缀」的对被判成 0.0 —— 短句查重直接失效。
+    现在由**较短的一边**统一定阶（上限 3）：短串退化为 2-gram/1-gram，
+    包含关系能体现为高重合，长文本行为与原先完全一致。
+    """
+    sa0 = "".join((a or "").split())
+    sb0 = "".join((b or "").split())
+    if not sa0 and not sb0:
         return 1.0
-    if not sa or not sb:
+    if not sa0 or not sb0:
         return 0.0
+    n = min(3, len(sa0), len(sb0))
+    sa, sb = _ngrams(sa0, n), _ngrams(sb0, n)
     return len(sa & sb) / len(sa | sb)
 
 

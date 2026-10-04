@@ -12,11 +12,25 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import grammar_rules
 from .corrector_data import (CONTEXT_RULES, CURATED_PAIRS, NEGATIVE_CONTEXTS,
                              NUMBER_RULES, ORG_RENAME_PAIRS, PUNCT_RULES)
 from ..db import dao
 
 _RULES_CACHE: dict = {}
+
+# L1 精确词表命中的 reason 标识（也是"精标长对可吃掉子规则"判据的锚点）
+_REASON_LEXICON = "词库匹配"
+
+# 提示类类别：其 suggestion 是**提示标签**而不是替换文本，
+# 批量写回 / 整篇应用必须整类排除，否则会把正文改成标签本身。
+# 单一事实来源 —— batch、correct_dialog、reference_panel 一律 import 这里，
+# 不再各自维护一份清单（两份清单手工同步必然漂移，本项目已两次踩过）。
+ADVISORY_CATEGORIES: tuple[str, ...] = (
+    "数字用法",      # 阿拉伯数字年份/百分数等规范提示
+    grammar_rules.CAT_ADVISORY,     # 表达提示（跨词冗余）
+    grammar_rules.CAT_PUNCT_PAIR,   # 标点规范（成对符号/引号形式）
+)
 
 
 @dataclass
@@ -111,9 +125,27 @@ def check_text(text: str) -> list[Correction]:
     found.extend(_check_regex_group(text, CONTEXT_RULES, "易混词"))
     found.extend(_check_regex_group(text, PUNCT_RULES, "标点"))
     found.extend(_check_regex_group(text, NUMBER_RULES, "数字用法"))
+    found.extend(_check_grammar(text))                    # L2.5 语法与表达规则层
     found.extend(_check_repeat(text))                     # L3 重复字（同字连）
     found = _apply_neural_layer(text, _dedupe(found))     # L4 单字替换精排
     return _apply_gec_layer(text, found)                  # L5 语法纠错
+
+
+def _check_grammar(text: str) -> list[Correction]:
+    """L2.5 语法与表达规则层：语义冗余 / 关联词搭配 / 搭配不当 / 成对标点。
+
+    与 L2 的分工：L2 处理"同一个词的两种写法看语境"，本层处理**不在词表里**的
+    多字赘余、关联词错配、动宾搭配错位、成对符号落单 —— 这三类是词表法
+    结构上够不着的区间（对应《纠错系统差距分析》的"多字少字/词序/语法"）。
+
+    异常一律咽掉：规则数据损坏、正则编译失败，都只丢本层，绝不拖垮主流程。
+    """
+    try:
+        return [Correction(s, e, w, sug, cat, reason, conf)
+                for s, e, w, sug, cat, reason, conf
+                in grammar_rules.all_hits(text)]
+    except Exception:
+        return []
 
 
 def _check_repeat(text: str) -> list[Correction]:
@@ -352,7 +384,22 @@ def _check_regex_group(text: str, rules, category: str) -> list[Correction]:
 
 
 def _dedupe(items: list[Correction]) -> list[Correction]:
-    """重叠去重：按 (confidence desc, length desc) 贪心保留。"""
+    """重叠去重：按 (confidence desc, length desc) 贪心保留。
+
+    **D3 修正**：贪心之前先做一次"包含消解" —— 严格落在某个 L1 精确词表命中
+    （``reason == "词库匹配"``）内部的候选一律丢弃。
+    否则 ``反应情况→反映情况``（词表 0.85，长对）会被上下文规则
+    ``反应→反映``（0.9，短规则）截胡：提示退化成"反应→反映"，
+    精标集实测因此只有 99.4%（评测 E1 长期红灯）。
+    消解是**单向**的——只有 L1 长对能吃掉别人，反向不成立，
+    所以规则层自身的命中不会被误伤，重叠语义仍由下面的贪心兜底。
+    """
+    lexicon = [c for c in items if c.reason == _REASON_LEXICON]
+    if lexicon:
+        items = [c for c in items
+                 if c.reason == _REASON_LEXICON or not any(
+                     e.start <= c.start and c.end <= e.end
+                     and (e.end - e.start) > (c.end - c.start) for e in lexicon)]
     items = sorted(items, key=lambda c: (c.confidence, c.end - c.start), reverse=True)
     taken: list[Correction] = []
     for c in items:
@@ -387,6 +434,11 @@ _MARK_STYLE = {
     "用户词库": ("#fdecea", "#8c1d18"),
     "神经纠错": ("#ede7f6", "#4527a0"),   # L4 神经精排（可选增强包）
     "语法纠错": ("#e3f2fd", "#0d47a1"),   # L5 Seq2Seq 语法纠错（可选增强包）
+    "语义冗余": ("#fff8e1", "#795500"),   # L2.5 多字赘余（可自动替换）
+    "搭配": ("#e8f5e9", "#1b5e20"),       # L2.5 动宾/修饰搭配
+    "关联词": ("#f3e5f5", "#4a148c"),     # L2.5 关联词呼应
+    "表达提示": ("#e0f7fa", "#006064"),   # L2.5 提示类（跨词冗余，不可自动改）
+    "标点规范": ("#e1f5fe", "#01579b"),   # L2.5 成对标点/引号形式（不可自动改）
 }
 _MARK_FALLBACK = ("#eceff1", "#37474f")
 
@@ -430,12 +482,14 @@ def paragraph_no(text: str, pos: int) -> int:
     return text.count("\n", 0, max(0, min(pos, len(text)))) + 1
 
 
-def correct_block(text: str, skip_categories: "set[str] | tuple" = ("数字用法",)
+def correct_block(text: str, skip_categories: "set[str] | tuple" = ADVISORY_CATEGORIES
                   ) -> "tuple[str, list[Correction]]":
     """单个文本块（段落/标题/单元格）的纠错：返回 (修正后文本, 命中明细)。
 
-    偏移为块内局部偏移。默认跳过"数字用法"类——与纠错面板的口径一致
-    （该类多为提示性规范建议，批量替换容易把编号、日期改坏）。
+    偏移为块内局部偏移。默认跳过 ``ADVISORY_CATEGORIES``（"数字用法/表达提示/
+    标点规范"）——这些类的 suggestion 是**提示标签而不是替换文本**，
+    直接写回会把正文改成标签；且它们多为需人工判断的规范建议，
+    批量替换容易把编号、日期、成对符号改坏。
     """
     cs = [c for c in check_text(text) if c.category not in skip_categories]
     out = text

@@ -15,6 +15,16 @@ log = logs.get_logger("config")
 SETTING_COMPILE_CATEGORY = "compile_result_category"
 SETTING_COMPILE_ASK_REGISTER = "compile_ask_register"
 
+# 段落参考写作功能的三个能力开关（分级交付 / 逐级可回滚）。
+#
+# 为什么要开关、而且**默认全开**：本功能是新增能力，但"新增"本身不该让
+# 用户在出问题时无处可退。任一环节出状况，用户（或我们远程指导）都能把对应
+# 开关关掉，界面立刻回到改动前的样子 —— 不需要回滚数据库、不需要换版本。
+# 默认全开是因为功能已通过门禁与验收；开关是应急预案，不是灰度策略。
+SETTING_PARA_REF = "para_ref_enabled"
+SETTING_PARA_ALIGN = "para_align_enabled"
+SETTING_PARA_GEN = "para_gen_enabled"
+
 # 「汇编成果」标签：产物入库时打上，便于用户在资料库里一眼找出所有汇编成品，
 # 也便于体检/统计按标签聚合。用中文标签是因为它**直接展示给用户**。
 COMPILE_PRODUCT_TAG = "汇编成果"
@@ -67,3 +77,53 @@ def set_compile_ask_register(flag: bool) -> bool:
     except Exception as exc:
         log.warning("汇编登记询问开关未能持久化（%s），重启后将回到原值", exc)
         return False
+
+
+# ------------------------------------------------ 段落参考功能开关
+def _flag(key: str, default: bool = True) -> bool:
+    """读一个布尔设置。读不到/读坏了都返回 default（静默降级）。
+
+    为什么"读坏了"要返回**默认值**而不是 False：设置读取失败是环境问题
+    （库只读、锁冲突），不该被解释成"用户关掉了这个功能"。返回 False 会让
+    "库有点小问题"表现为"功能自己消失了"，用户完全无法理解。
+    """
+    try:
+        return dao.get_setting(key, "1" if default else "0") != "0"
+    except Exception:
+        return default
+
+
+def _set_flag(key: str, flag: bool) -> bool:
+    try:
+        dao.set_setting(key, "1" if flag else "0")
+        return True
+    except Exception as exc:
+        log.warning("开关 %s 未能持久化（%s），重启后将回到原值", key, exc)
+        return False
+
+
+def para_ref_enabled() -> bool:
+    """段落级检索与引用定位（L1）。关掉后面板只剩"整篇"粒度。"""
+    return _flag(SETTING_PARA_REF)
+
+
+def set_para_ref_enabled(flag: bool) -> bool:
+    return _set_flag(SETTING_PARA_REF, flag)
+
+
+def para_align_enabled() -> bool:
+    """内容对齐（L2）。关掉后对齐入口隐藏。"""
+    return _flag(SETTING_PARA_ALIGN)
+
+
+def set_para_align_enabled(flag: bool) -> bool:
+    return _set_flag(SETTING_PARA_ALIGN, flag)
+
+
+def para_gen_enabled() -> bool:
+    """骨架生成（L3）。关掉后生成入口隐藏，仍可用内置 12 文种骨架。"""
+    return _flag(SETTING_PARA_GEN)
+
+
+def set_para_gen_enabled(flag: bool) -> bool:
+    return _set_flag(SETTING_PARA_GEN, flag)

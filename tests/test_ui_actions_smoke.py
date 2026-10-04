@@ -38,6 +38,32 @@ def block_modal_dialogs(monkeypatch):
                         staticmethod(lambda *a, **k: (0, False)))
     monkeypatch.setattr(QInputDialog, "getDouble",
                         staticmethod(lambda *a, **k: (0.0, False)))
+    # QFileDialog 的静态方法同理（C++ 侧、不走 QDialog.exec）。原先只在 win
+    # fixture 里屏蔽，而**不用 win 的用例**（如 test_dialog_constructible 的参数化）
+    # 不受保护 —— 新增的「保存报告…」这类入口一旦被"点按钮"式用例触发就会
+    # 真弹模态框。提升到这里做全局屏蔽，`test_file_dialog_static_methods_blocked`
+    # 负责自证它确实生效。
+    monkeypatch.setattr(QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([], "")))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: ""))
+
+
+def test_file_dialog_static_methods_blocked(qapp):
+    """自证：全局屏蔽确实生效。
+
+    若哪天 PySide6 改了静态方法的绑定方式、patch 不再生效，这条会立刻变红，
+    而不是等某个新用例把全量测试挂死（无报错、日志不增）才发现。
+    """
+    assert QFileDialog.getSaveFileName() == ("", "")
+    assert QFileDialog.getOpenFileName() == ("", "")
+    assert QFileDialog.getOpenFileNames() == ([], "")
+    assert QInputDialog.getItem() == ("", False)
+    assert QInputDialog.getText() == ("", False)
 
 
 @pytest.fixture()
@@ -51,10 +77,8 @@ def win(tmp_db, qapp, monkeypatch):
     monkeypatch.setattr(mw, "info", lambda *a, **k: None)
     monkeypatch.setattr(mw, "warn", lambda *a, **k: None)
     monkeypatch.setattr(mw, "ask", lambda *a, **k: True)
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
-    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([], "")))
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
+    # QFileDialog 的四个静态方法已在 autouse 的 block_modal_dialogs 里全局屏蔽
+    # （不再只护 win fixture 一条路径）
 
     w = mw.MainWindow()
     yield w
@@ -148,6 +172,19 @@ DIALOG_SPECS = [
     ("feature_dialogs", "SimilarityDialog"),
     ("feature_dialogs", "SecurityDialog"),
     ("feature_dialogs", "LockDialog"),
+    # v7 段落参考：两个新对话框同样必须"构造即不崩"。
+    # 它们的必填参数（refs / draft_text）会被上面的兜底逻辑填成 None，
+    # 构造函数里对 None 一律按"空集合/空文本"处理 —— 这正是测试想守住的：
+    # 传入空数据时不能抛（真实场景里参考清单为空也会走到这里）。
+    ("feature_dialogs", "AlignDialog"),
+    ("feature_dialogs", "SkeletonFromRefsDialog"),
+    # v7 公文风格校验：必填参数名含 "getter"，会被上面的兜底填成 `lambda: ""`，
+    # 于是走的是"空文本"这条路径 —— 这正是要守的：编辑器为空时校验必须
+    # 出报告（硬冲突「文件为空」）而不是抛异常。
+    ("feature_dialogs", "StyleCheckDialog"),
+    # v1.7 写作提示与灵感：必填参数名含 "getter"，同样被兜底填成 `lambda: ""`，
+    # 走的是"编辑器为空"这条路径 —— 空稿必须给"先搭骨架"引导而不是抛异常。
+    ("feature_dialogs", "WritingHintsDialog"),
     ("editor_panel", "EditorPanel"),
     ("library_panel", "LibraryPanel"),
     ("material_dialogs", "AttachmentDialog"),

@@ -10,6 +10,18 @@ from PyInstaller.utils.hooks import collect_data_files
 
 datas = [('gwtool/resources/data/seed.db', 'gwtool/resources/data')]
 datas += collect_data_files('opencc')
+# 第三方来源与许可声明（third_party/）：MIT 要求"在软件的所有副本或实质性
+# 部分中保留版权与许可声明"，PolyForm Noncommercial 要求附许可全文。
+# 随产物一起分发，用户才能看到"这些派生数据仅限非商业用途"这个使用边界；
+# 不进包的话，安装目录里没有任何许可痕迹（合规缺口）。
+datas += [
+    ('third_party/lieflat-gongwen/LICENSE', 'third_party/lieflat-gongwen'),
+    ('third_party/lieflat-gongwen/NOTICE.md', 'third_party/lieflat-gongwen'),
+    ('third_party/official-document-skill/LICENSE',
+     'third_party/official-document-skill'),
+    ('third_party/official-document-skill/NOTICE.md',
+     'third_party/official-document-skill'),
+]
 
 hiddenimports = [
     # icons.py 用 QImage.fromData(..., "SVG") 画图标，需要 imageformats/qsvg 插件；

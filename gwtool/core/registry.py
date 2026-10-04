@@ -103,22 +103,31 @@ _YEAR_ONLY_RE = re.compile(r"^\s*(?P<y>\d{4})\s*年?\s*$")
 
 
 def normalize_date(raw: str) -> str:
-    """把中文/点号分隔的日期归一为 `YYYY-MM-DD`；识别不了返回空串。"""
+    """把中文/点号分隔的日期归一为 `YYYY-MM-DD`；识别不了返回空串。
+
+    ⚠ 必须做**真实日历校验**，不能只查 `1<=月<=12 / 1<=日<=31`：
+    旧的区间判据会放行 `2026年2月30日`（二月没有 30 日）与 `2026-02-31`，
+    这类不存在的日期一旦入库，会以"合法日期"的身份参与年度分组与排序，
+    错误一直藏到需要按日期对账时才暴露。用 `date()` 构造即可挡住。
+    """
     text = (raw or "").strip()
     if not text:
         return ""
     m = _DATE_RE.search(text)
     if m:
-        y, mo, d = m.group("y"), int(m.group("m")), m.group("d")
-        if not (1 <= mo <= 12):
-            return ""
+        y, mo, d = int(m.group("y")), int(m.group("m")), m.group("d")
         day = int(d) if d else 1
-        if not (1 <= day <= 31):
+        try:
+            return date(y, mo, day).isoformat()
+        except ValueError:
             return ""
-        return f"{y}-{mo:02d}-{day:02d}"
     m2 = _YEAR_ONLY_RE.match(text)
     if m2:
-        return f"{m2.group('y')}-01-01"
+        y = int(m2.group("y"))
+        try:
+            return date(y, 1, 1).isoformat()
+        except ValueError:
+            return ""
     return ""
 
 
@@ -306,8 +315,21 @@ def validate(d: dao.Dispatch) -> list[str]:
         problems.append(f"状态取值异常：{d.status}")
     for field_name, label in (("sign_date", "成文日期"), ("print_date", "印发日期")):
         value = (getattr(d, field_name) or "").strip()
-        if value and not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        if not value:
+            continue
+        # ⚠ 必须与 normalize_date 用**同一把尺子**：只查 `^\d{4}-\d{2}-\d{2}$`
+        # 会放行 `2026-13-01`（13 月）、`2026-02-30`、`2026-00-10` —— 它们形状
+        # 完全合规，`value[:4]`/`[5:7]` 切分也不会报错，于是以"合法日期"入库，
+        # 悄悄污染年度分组与逐月统计（与 normalize_date 已修的那类缺陷同因）。
+        # 反面案例很直观：同一模块的 normalize_date 已经拦住了「2026年2月30日」，
+        # 而手工在台账里敲 `2026-02-30` 却能存进去 —— 两条入口一条严一条松。
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
             problems.append(f"{label}应为 YYYY-MM-DD 格式：{value}")
+            continue
+        try:
+            date(int(value[:4]), int(value[5:7]), int(value[8:10]))
+        except ValueError:
+            problems.append(f"{label}不是一个存在的日期：{value}")
     if d.sign_date and d.print_date and d.print_date < d.sign_date:
         problems.append("印发日期早于成文日期")
     if int(d.pages or 0) < 0 or int(d.copies or 0) < 0:

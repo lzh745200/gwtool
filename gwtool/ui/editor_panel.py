@@ -22,21 +22,33 @@ _HEADING_RE = re.compile(
 
 
 def _render_pdf_images(pdf_path: str, max_pages: int = 8):
-    """后台渲染 PDF 页面为 QImage 列表（QImage 可跨线程传递，QPixmap 不行）。"""
+    """后台渲染 PDF 页面为 QImage 列表（QImage 可跨线程传递，QPixmap 不行）。
+
+    ⚠ 文档对象必须用 try/finally 关闭。此前 `doc.close()` 是裸调用：只要
+    `get_pixmap()` 在某页抛异常（该页内容损坏、页数被改、渲染时内存不足），
+    close 就被跳过，PyMuPDF 文档与底层文件句柄一起泄漏。本函数跑在
+    **每次生成后都调**的输出预览通路上，长会话里反复预览会累积到句柄耗尽
+    （麒麟上尤其容易撞 too many open files）。
+
+    同一仓库的 `core/booklet.py`、`core/pdfrender.py:_page_count` 都已按
+    try/finally 写，这里是与既有纪律对齐。
+    """
     try:
         import pymupdf as fitz
     except ImportError:  # pragma: no cover
         import fitz as fitz  # type: ignore
     doc = fitz.open(pdf_path)
-    n = min(doc.page_count, max_pages)
-    images = []
-    for i in range(n):
-        pix = doc[i].get_pixmap(dpi=80)
-        img = QImage(pix.samples, pix.width, pix.height,
-                     pix.stride, QImage.Format_RGB888)
-        images.append(img.copy())
-    doc.close()
-    return images, n, pdf_path
+    try:
+        n = min(doc.page_count, max_pages)
+        images = []
+        for i in range(n):
+            pix = doc[i].get_pixmap(dpi=80)
+            img = QImage(pix.samples, pix.width, pix.height,
+                         pix.stride, QImage.Format_RGB888)
+            images.append(img.copy())
+        return images, n, pdf_path
+    finally:
+        doc.close()
 
 
 class EditorPanel(QWidget):

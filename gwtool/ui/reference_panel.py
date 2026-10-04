@@ -1,28 +1,50 @@
 # -*- coding: utf-8 -*-
-"""右侧面板：纠错建议 + 写作参考。"""
+"""右侧面板：纠错建议 + 写作参考。
+
+写作参考有两种粒度（v7 新增段落粒度）：
+
+  · **段落**（默认）—— 命中到"某篇的第几段"，可多条累积成「参考清单」，
+    可溯源、可跳回原处、可作为对齐与生成的输入。这是"段落参考"的主体。
+  · **整篇** —— v1.6.0 之前的行为（`core/reference.lookup` 三源检索 +
+    整篇插入）。保留它有两个理由：一是老习惯的用户能一键切回；二是
+    段落功能若被开关关掉，这里就是**改动前的那条路径**。
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QSplitter, QVBoxLayout,
-                               QWidget)
+                               QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..core import corrector, reference
 from ..db import dao
 
+# 粒度取值（与 QComboBox 的插入顺序一一对应）
+MODE_PARAGRAPH = "paragraph"
+MODE_DOCUMENT = "document"
+
 
 class ReferencePanel(QWidget):
-    """纠错建议列表（可一键替换）+ 写作参考（检索+一键插入）。"""
+    """纠错建议列表（可一键替换）+ 写作参考（检索/选段/溯源/插入）。"""
     insert_text = Signal(str)
     apply_edit = Signal(int, int, str)   # start, end, replacement -> 编辑器
     corrections_ready = Signal(list)     # 一次检查完成 -> 编辑器画波浪线
+    # 段落参考（v7）
+    open_source = Signal(object)         # ParagraphRef -> 主窗口跳转并高亮
+    align_requested = Signal(list)       # list[ParagraphRef] -> 内容对齐对话框
+    generate_requested = Signal(list)    # list[ParagraphRef] -> 骨架生成对话框
+    hints_requested = Signal(str)        # 主题/关键词 -> 写作提示与灵感对话框
 
     def __init__(self, editor_getter, parent=None):
         super().__init__(parent)
         self._editor_getter = editor_getter   # () -> str，当前编辑器文本
         self._corrections: list[corrector.Correction] = []
+        # 检索结果的真相源是 ref_list 里每项的 Qt.UserRole（`_picks` 另存参考清单）。
+        # 此前还并存着一个 `_results` 列表，但它只被赋值、从无读取 ——
+        # 那种"看起来也是权威结果集"的第二份状态，只会诱使后来者据它取值，
+        # 而它与界面列表在换粒度、清空时机上并不保证同步。
+        self._picks: list = []                # 参考清单（已选中的段落）
         self._build_ui()
 
     def _build_ui(self):
@@ -76,34 +98,145 @@ class ReferencePanel(QWidget):
         v2 = QVBoxLayout(ref_widget)
         v2.setContentsMargins(0, 0, 0, 0)
         sbar = QHBoxLayout()
+        self.cmb_mode = QComboBox()
+        self.cmb_mode.addItem("段落", MODE_PARAGRAPH)
+        self.cmb_mode.addItem("整篇", MODE_DOCUMENT)
+        self.cmb_mode.setToolTip(
+            "段落：命中到具体段落，可累积成参考清单并溯源/对齐/生成\n"
+            "整篇：按整篇检索并整篇插入（v1.6.0 原有行为）")
+        self.cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self.ref_input = QLineEdit()
         self.ref_input.setPlaceholderText("输入词语/主题，检索资料、词典与句式…")
         self.ref_input.returnPressed.connect(self.run_reference)
         btn_ref = QPushButton("检索")
         btn_ref.clicked.connect(self.run_reference)
+        # 写作提示与灵感：把当前检索词作为主题带过去（留空也可用）。
+        # **只弹对话框、不写正文** —— 写作辅助与文字纠错的边界在这里。
+        btn_hints = QPushButton("写作提示…")
+        btn_hints.setToolTip("按文种查看写作提示（缺什么/怎么组织）并推荐可借鉴的句式，"
+                             "只作建议，不改动正文")
+        btn_hints.clicked.connect(
+            lambda: self.hints_requested.emit(self.ref_input.text().strip()))
+        sbar.addWidget(self.cmb_mode)
         sbar.addWidget(self.ref_input, 1)
         sbar.addWidget(btn_ref)
+        sbar.addWidget(btn_hints)
         v2.addLayout(sbar)
 
         self.ref_list = QListWidget()
+        self.ref_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.ref_list.itemDoubleClicked.connect(self._insert_ref)
+        self.ref_list.itemSelectionChanged.connect(self._update_ref_actions)
         v2.addWidget(self.ref_list, 1)
         bar3 = QHBoxLayout()
         btn_insert = QPushButton("插入到光标处")
         btn_insert.clicked.connect(self._insert_ref)
+        self.btn_pick = QPushButton("加入参考清单")
+        self.btn_pick.setToolTip("把选中的段落累积到下方清单，供对齐与生成使用")
+        self.btn_pick.clicked.connect(self._add_picks)
         btn_add_phrase = QPushButton("存为常用句式")
         btn_add_phrase.clicked.connect(self._save_as_phrase)
         bar3.addWidget(btn_insert)
+        bar3.addWidget(self.btn_pick)
         bar3.addWidget(btn_add_phrase)
         bar3.addStretch(1)
         v2.addLayout(bar3)
+
+        # 参考清单（段落粒度才显示）
+        self.lbl_picks = QLabel("参考清单（0 条）")
+        v2.addWidget(self.lbl_picks)
+        self.pick_list = QListWidget()
+        self.pick_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.pick_list.itemDoubleClicked.connect(self._open_pick_source)
+        self.pick_list.itemSelectionChanged.connect(self._update_ref_actions)
+        v2.addWidget(self.pick_list, 1)
+        bar4 = QHBoxLayout()
+        self.btn_unpick = QPushButton("移除所选")
+        self.btn_unpick.clicked.connect(self._remove_picks)
+        self.btn_clear_picks = QPushButton("清空")
+        self.btn_clear_picks.clicked.connect(self._clear_picks)
+        self.btn_open = QPushButton("打开来源")
+        self.btn_open.setToolTip("打开来源文档并高亮该段落（双击清单项同效）")
+        self.btn_open.clicked.connect(lambda: self._open_pick_source())
+        self.btn_align = QPushButton("内容对齐…")
+        self.btn_align.setToolTip("把参考清单与当前草稿做结构对齐，指出缺/多/错位")
+        self.btn_align.clicked.connect(self._request_align)
+        self.btn_generate = QPushButton("生成草稿…")
+        self.btn_generate.setToolTip("从参考清单派生骨架，填槽后生成草稿（结构复用，非自动成文）")
+        self.btn_generate.clicked.connect(self._request_generate)
+        for b in (self.btn_unpick, self.btn_clear_picks, self.btn_open,
+                  self.btn_align, self.btn_generate):
+            bar4.addWidget(b)
+        bar4.addStretch(1)
+        v2.addLayout(bar4)
+
         self.lbl_ref = QLabel("")
+        self.lbl_ref.setWordWrap(True)
         v2.addWidget(self.lbl_ref)
         split.addWidget(ref_widget)
 
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 1)
         layout.addWidget(split, 1)
+
+        self._apply_switch_state()
+        self._update_ref_actions()
+
+    # ------------------------------------------------ 开关与状态
+    def _features(self) -> tuple[bool, bool, bool]:
+        """读三个能力开关。**读失败一律当作开启**（详见 config._flag 的注释）。"""
+        from .. import config
+        try:
+            return (config.para_ref_enabled(), config.para_align_enabled(),
+                    config.para_gen_enabled())
+        except Exception:
+            return (True, True, True)
+
+    def _apply_switch_state(self):
+        ref_on, align_on, gen_on = self._features()
+        if not ref_on:
+            # 关掉段落能力：回到"整篇"这一条既有路径，并隐藏所有段落相关控件
+            idx = self.cmb_mode.findData(MODE_DOCUMENT)
+            if idx >= 0:
+                self.cmb_mode.setCurrentIndex(idx)
+            self.cmb_mode.setVisible(False)
+        else:
+            self.cmb_mode.setVisible(True)
+        show_para = ref_on and self.mode() == MODE_PARAGRAPH
+        for w in (self.btn_pick, self.pick_list, self.btn_unpick,
+                  self.btn_clear_picks, self.btn_open, self.lbl_picks):
+            w.setVisible(show_para)
+        self.btn_align.setVisible(show_para and align_on)
+        self.btn_generate.setVisible(show_para and gen_on)
+
+    def refresh_switch_state(self):
+        """供"设置改动开关"后刷新面板（不必重启）。"""
+        self._apply_switch_state()
+        self._update_ref_actions()
+
+    def mode(self) -> str:
+        return self.cmb_mode.currentData() or MODE_PARAGRAPH
+
+    def _on_mode_changed(self, *_):
+        # 换粒度就清空结果与清单：两套结果的 ref_id 语义不同（段落 id vs 文档 id），
+        # 混在一起会让"插入"取到错误的实体。
+        self._picks = []
+        self.ref_list.clear()
+        self.pick_list.clear()
+        self._apply_switch_state()
+        self._update_ref_actions()
+        self.lbl_ref.setText("")
+
+    def _update_ref_actions(self):
+        has_pick = bool(self._picks)
+        self.btn_unpick.setEnabled(has_pick)
+        self.btn_clear_picks.setEnabled(has_pick)
+        self.btn_open.setEnabled(bool(self.pick_list.selectedItems()))
+        self.btn_align.setEnabled(has_pick)
+        self.btn_generate.setEnabled(has_pick)
+        self.btn_pick.setEnabled(bool(self.ref_list.selectedItems())
+                                 and self.mode() == MODE_PARAGRAPH
+                                 and self._features()[0])
 
     # ------------------------------------------------ 纠错
     def run_check(self):
@@ -209,7 +342,8 @@ class ReferencePanel(QWidget):
             return
         min_conf = self.chk_min_conf.value()
         to_apply = [c for c in self._corrections
-                    if c.confidence >= min_conf and c.category not in ("数字用法",)]
+                    if c.confidence >= min_conf
+                    and c.category not in corrector.ADVISORY_CATEGORIES]
         # 从后往前替换：前面的偏移不受影响（同一批内的坐标是自洽的）
         for c in sorted(to_apply, key=lambda x: x.start, reverse=True):
             self.apply_edit.emit(c.start, c.end, c.suggestion)
@@ -241,42 +375,161 @@ class ReferencePanel(QWidget):
 
     # ------------------------------------------------ 写作参考
     def run_reference(self):
+        """检索。按当前粒度分别走段落路径或整篇路径。"""
         q = self.ref_input.text().strip()
         self.ref_list.clear()
         if not q:
+            self._update_ref_actions()
             return
+        if self.mode() == MODE_PARAGRAPH and self._features()[0]:
+            self._fill_paragraph_results(q)
+        else:
+            self._fill_document_results(q)
+        self._update_ref_actions()
+
+    def _fill_paragraph_results(self, q: str):
+        from ..core import paragraph_ref
+        try:
+            items, relaxed = paragraph_ref.search_paragraphs_ex(q)
+        except Exception as exc:
+            from .errmsg import friendly
+            self.lbl_ref.setText(friendly(exc, action="段落检索"))
+            return
+        for it in items:
+            label = (f"[{it.source_label}·{it.kind_label}] {it.doc_title}"
+                     f"（第 {it.ordinal + 1} 段）\n    {self._snippet(it.text)}")
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, it)
+            item.setToolTip(self._tooltip(it))
+            self.ref_list.addItem(item)
+        # 放宽必须如实说明：不告知的话，用户会以为"这些同样精确相关"，
+        # 进而对检索结果失去信任——那比少给几条结果更坏。
+        note = "（精确命中较少，已放宽为「任一词命中」，排序中已降权）" if relaxed else ""
+        self.lbl_ref.setText(
+            f"命中 {len(items)} 个段落{note}；双击插入，选中后「加入参考清单」可累积")
+
+    def _fill_document_results(self, q: str):
         items = reference.lookup(q)
         for it in items:
             label = f"[{it.source_label}] {it.title}\n    {it.snippet}"
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, (it.source, it.ref_id))
+            item.setData(Qt.UserRole, it)
             item.setToolTip(it.snippet)
             self.ref_list.addItem(item)
         self.lbl_ref.setText(f"相关结果 {len(items)} 条（双击插入；按相关度排序）")
 
+    @staticmethod
+    def _snippet(text: str, n: int = 80) -> str:
+        t = (text or "").replace("\n", " ").strip()
+        return t if len(t) <= n else t[:n] + "…"
+
+    def _tooltip(self, ref) -> str:
+        """溯源信息：让用户一眼看清"这段从哪来"。"""
+        lines = [ref.locator, f"相关度 {ref.score:.2f}"]
+        off = int(getattr(ref, "char_offset", -1))
+        lines.append(f"正文偏移 {off}" if off >= 0 else "正文偏移：未定位")
+        h = (getattr(ref, "text_hash", "") or "")[:8]
+        if h:
+            lines.append(f"段落指纹 {h}")
+        from ..core import paragraph_ref
+        try:
+            if paragraph_ref.reference_changed(ref):
+                lines.append("⚠ 该段在资料库中已变更，插入的是最新版本")
+        except Exception:
+            pass
+        lines.append("—" * 12)
+        lines.append(self._snippet(ref.text, 160))
+        return "\n".join(lines)
+
+    # ------------------------------------------------ 参考清单
+    def _add_picks(self):
+        added = 0
+        exist = {p.para_id for p in self._picks}
+        for item in self.ref_list.selectedItems():
+            ref = item.data(Qt.UserRole)
+            if ref is None or not hasattr(ref, "para_id"):
+                continue          # 整篇结果不参与清单
+            if ref.para_id in exist:
+                continue
+            self._picks.append(ref)
+            exist.add(ref.para_id)
+            added += 1
+        if added:
+            self._fill_pick_list()
+        self._update_ref_actions()
+
+    def _remove_picks(self):
+        drop = {item.data(Qt.UserRole) for item in self.pick_list.selectedItems()}
+        if not drop:
+            return
+        self._picks = [p for p in self._picks if p.para_id not in drop]
+        self._fill_pick_list()
+        self._update_ref_actions()
+
+    def _clear_picks(self):
+        self._picks = []
+        self._fill_pick_list()
+        self._update_ref_actions()
+
+    def _fill_pick_list(self):
+        self.pick_list.clear()
+        for p in self._picks:
+            item = QListWidgetItem(f"{p.locator}\n    {self._snippet(p.text)}")
+            item.setData(Qt.UserRole, p.para_id)
+            item.setToolTip(self._tooltip(p))
+            self.pick_list.addItem(item)
+        self.lbl_picks.setText(f"参考清单（{len(self._picks)} 条）")
+
+    def picks(self) -> list:
+        return list(self._picks)
+
+    def _open_pick_source(self, *_):
+        items = self.pick_list.selectedItems()
+        if not items:
+            return
+        pid = items[0].data(Qt.UserRole)
+        for p in self._picks:
+            if p.para_id == pid:
+                self.open_source.emit(p)
+                return
+
+    def _request_align(self):
+        if self._picks:
+            self.align_requested.emit(self.picks())
+
+    def _request_generate(self):
+        if self._picks:
+            self.generate_requested.emit(self.picks())
+
+    # ------------------------------------------------ 插入
     def _insert_ref(self, *_):
         items = self.ref_list.selectedItems()
         if not items:
             return
-        src, ref_id = items[0].data(Qt.UserRole)
+        ref = items[0].data(Qt.UserRole)
+        if ref is None:
+            return
+        # 段落粒度：直接插该段文本
+        if hasattr(ref, "para_id") and hasattr(ref, "ordinal"):
+            text = ref.text or ""
+            if text:
+                self.insert_text.emit(text)
+            return
+        # 整篇粒度：沿用 v1.6.0 行为（含词典/句式的特殊取法）
+        src, ref_id = ref.source, ref.ref_id
         text = ""
         if src == "documents":
             text = reference.document_full_text(ref_id)
         elif src == "phrases":
-            for p in dao.list_phrases():
-                if p.id == ref_id:
-                    text = p.context or p.phrase
-                    break
+            text = reference.phrase_full_text(ref_id)
         elif src == "dictionary":
-            # 按 ref_id 查词典条目：取词与释义
-            from ..db.connection import get_conn
-            row = get_conn().execute(
-                "SELECT word,pinyin,definition FROM dictionary WHERE id=?",
-                (ref_id,)).fetchone()
-            if row:
-                text = f"{row['word']}" + (f"（{row['pinyin']}）" if row["pinyin"] else "")
-                if row["definition"]:
-                    text += f"：{row['definition']}"
+            entry = reference.dictionary_entry(ref_id)
+            if entry:
+                text = f"{entry.get('word', '')}"
+                if entry.get("pinyin"):
+                    text += f"（{entry['pinyin']}）"
+                if entry.get("definition"):
+                    text += f"：{entry['definition']}"
         if text:
             self.insert_text.emit(text)
 
@@ -284,11 +537,20 @@ class ReferencePanel(QWidget):
         items = self.ref_list.selectedItems()
         if not items:
             return
-        src, ref_id = items[0].data(Qt.UserRole)
-        if src == "documents":
-            text = reference.document_full_text(ref_id)
-        else:
+        ref = items[0].data(Qt.UserRole)
+        if ref is None:
             return
+        if hasattr(ref, "para_id") and hasattr(ref, "ordinal"):
+            text = ref.text or ""
+            if not text:
+                return
+            dao.add_phrase(text[:2000], context=text[:2000],
+                           source="收藏", tag=f"来自资料库·{ref.doc_title}")
+            self.lbl_ref.setText("已存为常用句式。")
+            return
+        if ref.source != "documents":
+            return
+        text = reference.document_full_text(ref.ref_id)
         if text:
             dao.add_phrase(text[:2000], context=text[:2000],
                            source="收藏", tag="来自资料库")

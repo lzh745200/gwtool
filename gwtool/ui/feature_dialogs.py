@@ -166,6 +166,9 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         v.addLayout(ops)
         self._findings: list[inspector.Finding] = []
         self._source = ""
+        # 「是否真的拿到过体检结果」的独立标记：不能用 lbl_stat 文案替代
+        # （"体检中…"与"体检未完成"都非空），详见 _export_report。
+        self._has_result = False
         self.result_list = QListWidget()
         v.addWidget(self.result_list, 1)
         self.lbl_stat = QLabel("")
@@ -222,6 +225,7 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         self.btn_export.setEnabled(True)
         self._findings = findings
         self._source = source
+        self._has_result = True       # 有结果了，_export_report 才允许导出
         self.result_list.clear()
         colors = {"error": theme.DANGER, "warn": theme.WARN, "info": theme.INFO}
         for f in findings:
@@ -246,8 +250,12 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         warn(self, msg)
 
     def _export_report(self):
-        if not self._findings and not self.lbl_stat.text():
-            warn(self, "请先点击「开始体检」。")
+        # 判据必须是"是否真拿到过体检结果"，**不能**用 lbl_stat 文案非空 ——
+        # `_run` 一开始就写"体检中…"、`_run_failed` 写"体检未完成"，两者都非空，
+        # 于是"体检失败后点导出"会带着空 findings 进后台，产出一份结论为空的
+        # 报告，看起来像成功了。加独立标记 _has_result 来区分这三种状态。
+        if not self._findings and not getattr(self, "_has_result", False):
+            warn(self, "请先点击「开始体检」，等体检完成后再导出报告。")
             return
         from datetime import datetime
 
@@ -333,6 +341,16 @@ class _BulkReplaceWorker(QThread):
 
     def _run(self):
         import re as _re
+        # 空查找串是**破坏性**输入而非"无操作"：
+        #   非正则模式下 text.replace("", x) 会在每个字符间插入 x；
+        #   正则模式下 re.subn("", x, text) 更甚 —— 连首尾都会插。
+        # 实测「某市人民政府办公室文件」+ 替换为「【空】」→
+        # 「【空】某【空】市【空】…【空】件【空】」，一篇正文被彻底破坏，
+        # 而用户会以为"什么都没改"。宁可整批拒绝，也不产生这种结果。
+        if not self.find:
+            self.failed.emit("查找内容不能为空，已中止（空查找会把替换文本插入"
+                             "每一个字符之间，破坏全部正文）。")
+            return
         results = []
         for i, did in enumerate(self.doc_ids):
             self.progress.emit(i + 1, len(self.doc_ids))
@@ -421,6 +439,21 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
         row.addWidget(btn_close)
         v.addLayout(row)
         self._worker = None
+        # 预览条件快照（None = 尚未预览或预览已失效）；见 _apply 的说明。
+        self._plan_key = None
+        # 启动预览那一刻的条件快照，用于完成时校验（见 _preview / _on_preview_done）
+        self._preview_key: tuple | None = None
+        # 条件一起变就立即置灰「执行替换」：让"预览已失效"在按钮上就看得见，
+        # 比等用户点了执行再弹提示更早、更直观。
+        self.ed_find.textChanged.connect(self._invalidate_plan)
+        self.ed_repl.textChanged.connect(self._invalidate_plan)
+        self.chk_regex.toggled.connect(self._invalidate_plan)
+
+    def _invalidate_plan(self, *_):
+        """查找内容/替换内容/「按正则」任一变动 → 预览失效，禁用执行。"""
+        if self._plan_key is not None and self._current_key() != self._plan_key:
+            self._plan_key = None
+            self.btn_apply.setEnabled(False)
 
     def _docs(self, scope=None) -> list[int]:
         """当前范围内的文档 id。
@@ -440,6 +473,13 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
             warn(self, "请输入查找内容")
             return
         from .workers import FnWorker
+
+        # 条件快照必须在**启动时**拍，不能在完成回调里读控件：预览全库要跑
+        # 数秒，用户完全可能在此期间改查找词/替换词/正则开关。若完成时才读，
+        # 就会把"用旧条件扫出的文档清单"配上"新条件"交给执行 —— 正是
+        # _plan_key 要挡住的那类事故（预览所见 ≠ 实际所改）。`_invalidate_plan`
+        # 在预览期间是空转的（此刻 _plan_key 还是 None），所以校验只能放这里。
+        self._preview_key = self._current_key()
 
         # 主线程先把所有控件值取出来，worker 里只碰纯数据
         scope_id = self.scope_combo.currentData()
@@ -476,11 +516,25 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
         self.btn_preview.setEnabled(False)
         self.btn_apply.setEnabled(False)
         self.preview_list.clear()
+        # 记住本次预览所用的**条件**：执行时必须与之完全一致。
+        # 只存"命中了哪些文档"是不够的 —— 用户预览之后完全可能改动查找框
+        # （清空、换词、开关"按正则"），而 btn_apply 的启用状态只取决于
+        # **上次预览**的 total>0，按钮仍是亮的。此时点执行会用**新条件**
+        # 改**旧清单**里的文档：用户看过的预览彻底失效，改动范围完全不可预期
+        # （最坏档见 _run 里对空查找串的说明）。
+        # 对照 core/batch.py 的既有契约——那里明确要求"执行时必须带上预览得到
+        # 的 plans"，即预览与执行共用同一份计划；本对话框漏了这一条。
+        self._plan_key = None
         self._preview_worker = FnWorker(work, parent=self)
         self._preview_worker.ok.connect(self._on_preview_done)
         self._preview_worker.finished.connect(
             lambda: self.btn_preview.setEnabled(True))
         self._preview_worker.start()
+
+    def _current_key(self) -> tuple:
+        """当前界面上的替换条件（与预览快照比对用）。"""
+        return (self.ed_find.text(), self.ed_repl.text(),
+                bool(self.chk_regex.isChecked()))
 
     def _on_preview_done(self, result):
         rows, total, regex_error = result
@@ -488,26 +542,58 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
             # errmsg.friendly 已给出完整中文可执行文案，不再叠加"正则错误"前缀
             warn(self, regex_error)
             return
+        # 与启动时拍的快照比对（不是与此刻的控件值比）：不一致说明用户在预览
+        # 期间改过条件，本次预览作废。宁可让用户重来一次，也不能按"新条件"去改
+        # "旧清单"里的文档。
+        if getattr(self, "_preview_key", None) != self._current_key():
+            self.preview_list.clear()
+            self._plan_key = None
+            self.btn_apply.setEnabled(False)
+            info(self, "预览期间查找条件有改动，本次预览已作废，请重新预览。")
+            return
         for did, title, n, ctx in rows:
             item = QListWidgetItem(f"{title}（{n} 处）：…{ctx}…")
             item.setData(Qt.UserRole, did)
             self.preview_list.addItem(item)
+        self._plan_key = self._preview_key if total > 0 else None
         self.btn_apply.setEnabled(total > 0)
         info(self, f"预览完成：{len(rows)} 篇文档、{total} 处命中。")
 
     def _apply(self):
+        # 条件漂移检查放在确认框**之前**：先让用户知道"预览已失效"，
+        # 而不是先问"确定执行吗"再拒绝 —— 后者像是程序在耍人。
+        if self._plan_key is None:
+            warn(self, "请先「预览命中」，确认改动范围后再执行。")
+            return
+        if self._current_key() != self._plan_key:
+            self.btn_apply.setEnabled(False)
+            warn(self, "查找/替换内容或「按正则」开关在预览之后被改动，"
+                       "原先的预览结果已失效。\n\n"
+                       "为避免在您没看过的范围内改动，已阻止执行。"
+                       "请重新「预览命中」后再执行替换。")
+            return
+        # 防重入必须在弹确认框**之前**：`QMessageBox.question` 是模态嵌套事件
+        # 循环，它弹着的时候事件仍在派发，按钮也仍是可用的 —— 连按回车/空格
+        # 或极快的双击都能重入本函数，弹出第二个确认框。用户在两个框上都点
+        # "是"就会起两个 worker，对同一批 doc_id 各跑一遍替换（替换文本含
+        # 查找词时结果被叠加成"我的我的…"），且 self._worker 被覆盖、前一个
+        # 失去强引用。旧实现把 setEnabled(False) 放在 ask() 之后，挡不住。
+        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            return
+        self.btn_apply.setEnabled(False)
         if not ask(self, "替换将直接写入资料库（可先备份），确定执行？"):
+            self.btn_apply.setEnabled(True)
             return
         ids = [self.preview_list.item(i).data(Qt.UserRole)
                for i in range(self.preview_list.count())]
         self.progress.setVisible(True)
         self.progress.setRange(0, len(ids))
-        self.btn_apply.setEnabled(False)
+        # 用**预览时的快照**而不是实时控件值喂 worker：两者既然已校验一致，
+        # 传快照能顺带消掉"工作线程读 QObject"这一跨线程访问。
+        find, repl, use_regex = self._plan_key
         # parent=self：无父 QThread 只被 self._worker 强引用，对话框先销毁时
         # 唯一引用被释放会让运行中的线程被 GC 析构 → Qt qFatal 强杀进程。
-        self._worker = _BulkReplaceWorker(ids, self.ed_find.text(),
-                                          self.ed_repl.text(),
-                                          self.chk_regex.isChecked(), parent=self)
+        self._worker = _BulkReplaceWorker(ids, find, repl, use_regex, parent=self)
         self._worker.progress.connect(self.progress.setValue)
         self._worker.done.connect(self._done)
         self._worker.failed.connect(self._failed)
@@ -536,7 +622,8 @@ _MAX_SHOW_HITS = 4000
 
 def _correct_categories() -> list[str]:
     """可选纠错类别：内置规则类别 + 词库里的真实类别（去掉统计占位名）。"""
-    names = {"错别字", "易混词", "标点", "机构沿革", "用户词库"}
+    names = {"错别字", "易混词", "标点", "机构沿革", "用户词库",
+             "语义冗余", "搭配", "关联词", "表达提示", "标点规范"}
     try:
         names |= {c for c, _n in dao.error_pair_categories()
                   if c and c not in ("未分类", "未标注")}
@@ -651,8 +738,8 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
         self.sp_conf.setValue(0.80)
         self.sp_conf.setToolTip(
             "批量写回默认只改高置信命中：精标词库≥0.85，上下文与标点规则 0.85~0.95，"
-            "程序生成的混淆对 0.55，机构沿革对照 0.70。\n"
-            "「数字用法」类只给提示不给替换文本，已整类排除。")
+            "语义冗余/搭配/关联词 0.72~0.90，程序生成的混淆对 0.55，机构沿革对照 0.70。\n"
+            "「数字用法」「表达提示」「标点规范」三类只给提示不给替换文本，已整类排除。")
         self.sp_conf.valueChanged.connect(self._invalidate)
         row.addWidget(self.sp_conf)
         v.addLayout(row)
@@ -732,6 +819,10 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
     def _reset_buttons(self):
         self.progress.setVisible(False)
         self.btn_preview.setEnabled(True)
+        # 「执行」也必须复位：它在 _apply 一开始就被置灰，若只在成功路径
+        # 复位，用户在确认框点"取消"或写回失败后就再也没法重试了（按钮
+        # 永久灰着，只能重开对话框）。启用与否由 _plans 是否非空决定。
+        self.btn_apply.setEnabled(bool(self._plans))
 
     def _on_failed(self, msg: str):
         self._reset_buttons()
@@ -786,12 +877,19 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
         if not self._plans:
             warn(self, "请先「预览命中」，确认要改哪些地方。")
             return
-        hits = sum(p.count for p in self._plans)
-        if not ask(self, f"将修改 {len(self._plans)} 篇文档、共 {hits} 处，"
-                         f"直接写入资料库（每篇改前会留一份历史快照）。\n确定执行？"):
+        # 防重入：`QMessageBox.question` 是模态嵌套事件循环，它弹着的时候按钮
+        # 仍可用 —— 连按回车能重入、起第二个 worker 对同一批文档再改一遍。
+        # 因此必须**在 ask() 之前**置灰（旧实现放在 ask() 之后，挡不住）。
+        if (getattr(self, "_apply_worker", None) is not None
+                and self._apply_worker.isRunning()):
             return
+        hits = sum(p.count for p in self._plans)
         self.btn_preview.setEnabled(False)
         self.btn_apply.setEnabled(False)
+        if not ask(self, f"将修改 {len(self._plans)} 篇文档、共 {hits} 处，"
+                         f"直接写入资料库（每篇改前会留一份历史快照）。\n确定执行？"):
+            self._reset_buttons()
+            return
         self.progress.setRange(0, len(self._plans))
         self.progress.setValue(0)
         self.progress.setVisible(True)
@@ -866,6 +964,13 @@ class SnapshotsDialog(ThreadSafeDialog, QDialog):
             return
         sid = self.list_w.item(row).data(Qt.UserRole)
         s = dao.get_snapshot(sid)
+        if not s:
+            # 快照可能在本对话框开着的时候被裁掉：`dao.add_snapshot` 每次都
+            # `_prune_snapshots`（每文档只留 SNAPSHOT_KEEP=30 条），而编辑器的
+            # 自动快照定时器在模态对话框期间照常触发。`get_snapshot` 返回
+            # dict | None，对 None 取下标会抛 TypeError、功能直接中断。
+            self._fill()
+            return
         from ..core import differ
         html = differ.diff_to_html(s["content"], self.current_text,
                                    f"快照 {s['created_time']}", "当前内容")
@@ -877,6 +982,9 @@ class SnapshotsDialog(ThreadSafeDialog, QDialog):
             return
         sid = self.list_w.item(row).data(Qt.UserRole)
         s = dao.get_snapshot(sid)
+        if not s:
+            self._fill()          # 同上：已被裁剪，重画列表并放弃回滚
+            return
         if ask(self, f"回滚到 {s['created_time']} 的快照？当前未保存内容将替换。"):
             if self.apply_callback:
                 self.apply_callback(s["content"])
@@ -1499,3 +1607,626 @@ class LockDialog(QDialog):
         self.btn.setEnabled(True)
         self.ed_pw.setFocus()
         self.lbl.setText("")
+
+
+# ================================================================ 段落参考（v7）
+class AlignDialog(QDialog):
+    """内容对齐：参考清单 ↔ 当前草稿。
+
+    **只提示，不自动改草稿**。对齐的价值在于"让你看见结构差异"——缺了哪一节、
+    序号跳号、章节顺序颠倒。任何自动插入或移动都会让用户失去对自己文档的掌控，
+    而这恰恰是公文写作里最不能开的口子。
+    """
+
+    def __init__(self, refs, draft_text: str, parent=None):
+        super().__init__(parent)
+        from ..core import paragraph_ref
+        self._refs = list(refs or [])
+        self._draft_text = draft_text or ""
+        self._pr = paragraph_ref
+        self.setWindowTitle("内容对齐（参考清单 ↔ 当前草稿）")
+        _fit_dialog(self, 980, 620)
+        v = QVBoxLayout(self)
+
+        head = QLabel(
+            f"参考段落 {len(self._refs)} 条；只比较**结构与角色**，不比较语义，"
+            f"也不会改动你的草稿。")
+        head.setWordWrap(True)
+        head.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(head)
+
+        split = QSplitter(Qt.Horizontal)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addWidget(QLabel("参考段落"))
+        self.lst_ref = QListWidget()
+        lv.addWidget(self.lst_ref, 1)
+        split.addWidget(left)
+
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(QLabel("当前草稿段落"))
+        self.lst_draft = QListWidget()
+        rv.addWidget(self.lst_draft, 1)
+        split.addWidget(right)
+
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        v.addWidget(split, 2)
+
+        v.addWidget(QLabel("差异与提示"))
+        self.lst_diff = QListWidget()
+        v.addWidget(self.lst_diff, 2)
+
+        self.lbl_sum = QLabel("")
+        self.lbl_sum.setWordWrap(True)
+        v.addWidget(self.lbl_sum)
+
+        btns = QHBoxLayout()
+        btn_re = QPushButton("重新对齐")
+        btn_re.clicked.connect(self.run)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.reject)
+        btns.addStretch(1)
+        btns.addWidget(btn_re)
+        btns.addWidget(btn_close)
+        v.addLayout(btns)
+        self.run()
+
+    def run(self):
+        """执行一次对齐并刷新三个列表。任何异常都降级为"提示文本"，不抛。"""
+        try:
+            draft = self._pr.split_draft(self._draft_text)
+            aligns = self._pr.align_to_draft(self._draft_text, self._refs)
+        except Exception as exc:
+            self.lbl_sum.setText(errmsg.friendly(exc, action="内容对齐"))
+            return
+        self.lst_ref.clear()
+        for r in self._refs:
+            self.lst_ref.addItem(
+                f"第 {r.ordinal + 1} 段 · {r.doc_title}\n    {r.text[:70]}")
+        self.lst_draft.clear()
+        for d in draft:
+            self.lst_draft.addItem(f"第 {d.ordinal + 1} 段\n    {d.text[:70]}")
+
+        self.lst_diff.clear()
+        counts = {}
+        for a in aligns:
+            counts[a.relation] = counts.get(a.relation, 0) + 1
+            if a.relation == "matched":
+                continue              # 已对齐的不占列表；只看需要关注的
+            item = QListWidgetItem(self._mark(a) + a.hint)
+            item.setForeground(QColor(theme.severity_color(
+                "error" if a.relation == "missing" else "warn")))
+            self.lst_diff.addItem(item)
+        self.lbl_sum.setText(
+            f"已对齐 {counts.get('matched', 0)} 项；"
+            f"缺失 {counts.get('missing', 0)} 项、"
+            f"多余 {counts.get('extra', 0)} 项、"
+            f"层级/顺序 {counts.get('level_mismatch', 0) + counts.get('order_swap', 0)} 项。"
+            f"提示仅供参照，需由你决定是否调整。")
+
+    @staticmethod
+    def _mark(a) -> str:
+        return {"missing": "【缺】", "extra": "【多】",
+                "level_mismatch": "【层级/序号】", "order_swap": "【顺序】"}.get(
+            a.relation, "【提示】")
+
+
+class SkeletonFromRefsDialog(QDialog):
+    """从参考段落派生骨架 → 填槽 → 生成草稿（L3）。
+
+    **这不是"AI 代笔"**。系统做的是：把参考段落里能确定识别出的具体值
+    （单位名、事项名、日期、时限、数量、引用公文）抽象成槽位，由**用户**
+    填写，再拼回骨架。系统不产出任何未被用户或参考原文提供的语义内容 ——
+    对话框顶部那句话是刻意写给人看的，避免造成"自动成文"的误解。
+    """
+
+    def __init__(self, refs, parent=None):
+        super().__init__(parent)
+        from ..core import paragraph_ref
+        from ..core import skeletons as sk
+        self._pr = paragraph_ref
+        self._refs = list(refs or [])
+        self._saved = False
+        self.setWindowTitle("从参考段落生成草稿（结构复用 + 槽位填充）")
+        _fit_dialog(self, 980, 660)
+        v = QVBoxLayout(self)
+
+        head = QLabel(
+            "本功能**只复用参考文献的结构骨架**：系统把参考段落里识别到的具体值"
+            "抽成槽位（{org}/{matter}/{date} 等），由你填写后拼回骨架。"
+            "系统不会自动撰写内容，也不编造任何未提供的信息。")
+        head.setWordWrap(True)
+        head.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("骨架名称："))
+        self.ed_name = QLineEdit("从参考派生")
+        row.addWidget(self.ed_name, 1)
+        row.addWidget(QLabel("文种："))
+        self.cmb_kind = QComboBox()
+        self.cmb_kind.addItem("（不限）", "")
+        # 必须逐项显式带 userData：`QComboBox.addItems` 只填文本、**不设 userData**，
+        # 于是 currentData() 恒为 None —— 用户明明选了文种，取到的却是空串
+        # （实测 itemData(1) is None），派生与落库的文种都会静默丢失。
+        for _kind in sk.kinds():
+            self.cmb_kind.addItem(_kind, _kind)
+        row.addWidget(self.cmb_kind, 1)
+        self.cmb_saved = QComboBox()
+        self.cmb_saved.setToolTip("已保存的骨架；选中后点「载入」")
+        row.addWidget(self.cmb_saved, 1)
+        btn_load = QPushButton("载入")
+        btn_load.clicked.connect(self._load_saved)
+        row.addWidget(btn_load)
+        v.addLayout(row)
+
+        v.addWidget(QLabel("骨架模板（可编辑；{名称} 为槽位占位符）"))
+        self.ed_tpl = QPlainTextEdit()
+        v.addWidget(self.ed_tpl, 2)
+        self.ed_tpl.textChanged.connect(self._rebuild_slots)
+
+        v.addWidget(QLabel("槽位（留空则保留 {占位符}，不会静默清空）"))
+        self.slot_host = QWidget()
+        self.slot_form = QVBoxLayout(self.slot_host)
+        self.slot_form.setContentsMargins(0, 0, 0, 0)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(self.slot_host)
+        v.addWidget(area, 1)
+        self._slot_edits: dict[str, QLineEdit] = {}
+
+        v.addWidget(QLabel("生成预览"))
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        v.addWidget(self.preview, 2)
+
+        btns = QHBoxLayout()
+        self.btn_save = QPushButton("保存为骨架")
+        self.btn_save.clicked.connect(self._save)
+        btn_gen = QPushButton("生成到编辑器")
+        btn_gen.clicked.connect(self._generate)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.reject)
+        btns.addStretch(1)
+        btns.addWidget(self.btn_save)
+        btns.addWidget(btn_gen)
+        btns.addWidget(btn_close)
+        v.addLayout(btns)
+
+        self._skeleton = self._pr.derive_skeleton(
+            self._refs, kind=self.cmb_kind.currentData() or "")
+        self._pending_paras = ",".join(str(p) for p in self._skeleton.source_paras)
+        # 槽位示例（参考原值）：模板每次被编辑都要重建表单，而重建是从模板
+        # 文本反推槽位的，示例必须在此留存，否则 placeholder 只剩"请填写"。
+        self._slot_examples: dict[str, str] = {
+            s.name: s.example for s in self._skeleton.slots if s.example}
+        self.ed_tpl.blockSignals(True)
+        self.ed_tpl.setPlainText(self._skeleton.template)
+        self.ed_tpl.blockSignals(False)
+        self._refresh_saved_combo()
+        self._rebuild_slots()
+
+    # -------------------------------------------------- 槽位表单
+    def _rebuild_slots(self):
+        """按模板里的 {占位符} 重建表单，**保留用户已填的值**。
+
+        保留是必须的：用户在"改模板"（比如删掉一段）时，已填好的槽位值
+        不该被清空——那会让每一次微调模板都变成一次重填。
+        """
+        kept = {k: e.text() for k, e in self._slot_edits.items()}
+        while self.slot_form.count():
+            item = self.slot_form.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._slot_edits = {}
+
+        tpl = self.ed_tpl.toPlainText()
+        src = [int(x) for x in (self._pending_paras or "").split(",")
+               if x.strip().isdigit()]
+        skel = self._pr.skeleton_from_template(
+            tpl, source_paras=src, examples=self._slot_examples)
+        self._skeleton = skel
+        # 新出现的槽位若带着示例（模板里手动加了 {org} 且此前抽到过），一并记下
+        for s in skel.slots:
+            if s.example and not self._slot_examples.get(s.name):
+                self._slot_examples[s.name] = s.example
+        if not skel.slots:
+            self.slot_form.addWidget(QLabel("该模板没有槽位（纯结构复用）。"))
+        for s in skel.slots:
+            r = QHBoxLayout()
+            label = f"{s.name}"
+            if s.label:
+                label += f"（{s.label}）"
+            r.addWidget(QLabel(label + "："))
+            ed = QLineEdit(kept.get(s.name, s.example or ""))
+            ed.setPlaceholderText(s.example or "请填写")
+            ed.textChanged.connect(self._refresh_preview)
+            r.addWidget(ed, 1)
+            self._slot_edits[s.name] = ed
+            holder = QWidget()
+            holder.setLayout(r)
+            self.slot_form.addWidget(holder)
+        self.slot_form.addStretch(1)
+        self._refresh_preview()
+
+    def _values(self) -> dict:
+        return {k: e.text() for k, e in self._slot_edits.items()}
+
+    def _refresh_preview(self):
+        try:
+            self.preview.setPlainText(
+                self._pr.render_draft(self.ed_tpl.toPlainText(), self._values()))
+        except Exception as exc:
+            self.preview.setPlainText(errmsg.friendly(exc, action="生成预览"))
+
+    # -------------------------------------------------- 存 / 生成
+    def _save(self):
+        name = self.ed_name.text().strip()
+        if not name:
+            warn(self, "请先填写骨架名称。")
+            return
+        try:
+            dao.save_user_skeleton(
+                name=name,
+                kind=self.cmb_kind.currentData() or "",
+                template=self.ed_tpl.toPlainText(),
+                slots_json=self._pr.to_json_slots(self._skeleton.slots),
+                source_paras=",".join(str(p) for p in self._skeleton.source_paras),
+                note=f"从 {len(self._refs)} 条参考段落派生")
+            self._saved = True
+            self._refresh_saved_combo()
+            info(self, f"已保存骨架「{name}」，下次可在此「载入」。")
+        except Exception as exc:
+            warn(self, errmsg.friendly(exc, action="保存骨架"))
+
+    def _load_saved(self):
+        """载入已保存骨架。
+
+        用下拉框而不是 `QInputDialog.getItem`：模态静态方法在**未 mock 的测试**
+        里会真弹框把整个用例挂死（无报错、日志不增），本项目为此付出过代价。
+        下拉框是普通控件，不引入新的模态入口。
+        """
+        items = self._saved_skeletons()
+        if not items:
+            info(self, "还没有保存过骨架。生成后可点「保存为骨架」。")
+            return
+        idx = self.cmb_saved.currentIndex()
+        if idx < 0 or idx >= len(items):
+            warn(self, "请先在下拉框中选择一个已保存的骨架。")
+            return
+        s = items[idx]
+        self.ed_name.setText(s.name)
+        # 文种必须一起回填：不回填的话，"载入后微调再保存"会按当前下拉框的
+        # 值（多为「不限」）把 kind 静默覆盖成空串，文种标签再也找不回来。
+        kidx = self.cmb_kind.findData(s.kind or "")
+        self.cmb_kind.setCurrentIndex(kidx if kidx >= 0 else 0)
+        self._pending_paras = s.source_paras or ""
+        self.ed_tpl.setPlainText(s.template or "")
+        # 示例随骨架走：载入的应是**这条**骨架自己存的示例，而不是上一次的
+        self._slot_examples = {
+            x.name: x.example
+            for x in self._pr.from_json_slots(s.slots_json or "") if x.example}
+        self._rebuild_slots()
+
+    def _saved_skeletons(self) -> list:
+        try:
+            return dao.list_user_skeletons()
+        except Exception:
+            return []
+
+    def _refresh_saved_combo(self):
+        self.cmb_saved.clear()
+        for s in self._saved_skeletons():
+            self.cmb_saved.addItem(f"{s.name}（{s.kind or '不限'}）")
+
+    def _generate(self):
+        text = self.preview.toPlainText()
+        if not text.strip():
+            warn(self, "生成结果为空，请检查骨架模板。")
+            return
+        self.accept()
+
+    def text(self) -> str:
+        return self.preview.toPlainText()
+
+    def saved(self) -> bool:
+        return self._saved
+
+
+# ================================================================ 公文风格校验
+class StyleCheckDialog(QDialog):
+    """公文风格校验：把写作风格量成指标，对照文体指纹做三层判定。
+
+    **三层，只有第一层算错**：硬冲突（文种识别错误）判错；软提示只提醒；
+    参数对照只展示。理由见 `core/style_profile` 模块头 —— 真实优秀作品个体
+    差异极大，拿均值当合格线会把好作品判成不合格。
+
+    右栏同时给出该文体的**骨架公式**与写作约束（L3：结构复用），
+    可直接填入编辑器 —— 填入的是**带【待补】占位**的结构，不是成文内容。
+    """
+
+    def __init__(self, text_getter, parent=None, insert_cb=None):
+        super().__init__(parent)
+        from ..core import style_data as st_data
+        from ..core import style_profile as st_prof
+        self._st = st_data
+        self._sp = st_prof
+        self._getter = text_getter
+        self._insert_cb = insert_cb
+        self.setWindowTitle("公文风格校验（量化指标 · 对照文体指纹）")
+        _fit_dialog(self, 1080, 660)
+        v = QVBoxLayout(self)
+
+        head = QLabel(
+            "把写作风格量成指标，再对照该文体的语料指纹判断「像不像这个文种」。"
+            "判定分三层：**硬冲突**（文种识别错误）判错，**软提示**只提醒，"
+            "**参数对照**只展示 —— 区间外不等于错：好文章不整齐，整齐的往往是平庸作品。")
+        head.setWordWrap(True)
+        head.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("文种："))
+        self.cmb_style = QComboBox()
+        for s in st_data.STYLES:
+            fam = st_data.FAMILY_OF.get(s, "")
+            self.cmb_style.addItem(f"{s}（{fam}）", s)
+        self.cmb_style.currentIndexChanged.connect(self.run)
+        row.addWidget(self.cmb_style, 1)
+        btn_check = QPushButton("校验当前文本")
+        btn_check.clicked.connect(self.run)
+        row.addWidget(btn_check)
+        self.lbl_stat = QLabel("")
+        row.addWidget(self.lbl_stat, 1)
+        v.addLayout(row)
+
+        split = QSplitter(Qt.Horizontal)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addWidget(QLabel("校验报告（硬冲突 → 软提示 → 参数对照 → 修辞 → 避坑词）"))
+        self.report = QPlainTextEdit()
+        self.report.setReadOnly(True)
+        lv.addWidget(self.report, 1)
+        split.addWidget(left)
+
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(QLabel("骨架公式与写作约束（结构复用，不含成文内容）"))
+        self.skeleton = QPlainTextEdit()
+        self.skeleton.setReadOnly(True)
+        rv.addWidget(self.skeleton, 1)
+        brow = QHBoxLayout()
+        self.btn_insert = QPushButton("把骨架填入编辑器")
+        self.btn_insert.setToolTip("填入结构占位（【待补】），不生成任何成文内容")
+        self.btn_insert.clicked.connect(self._insert_skeleton)
+        brow.addWidget(self.btn_insert)
+        brow.addStretch(1)
+        rv.addLayout(brow)
+        split.addWidget(right)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        v.addWidget(split, 1)
+
+        btns = QHBoxLayout()
+        btn_save = QPushButton("保存报告…")
+        btn_save.clicked.connect(self._save)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.reject)
+        btns.addStretch(1)
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_close)
+        v.addLayout(btns)
+        self.run()
+
+    def style(self) -> str:
+        return self.cmb_style.currentData() or self._st.STYLES[0]
+
+    def run(self):
+        """执行一次校验并刷新两栏。**任何异常都降级为提示文本，不向外抛**。"""
+        style = self.style()
+        try:
+            text = self._getter() or ""
+        except Exception:
+            text = ""
+        try:
+            verdict = self._sp.verdict(text, style)
+        except Exception as exc:
+            self.report.setPlainText(errmsg.friendly(exc, action="风格校验"))
+            return
+        self.report.setPlainText("\n".join(self._sp.report_lines(verdict)))
+        try:
+            self.skeleton.setPlainText(self._sp.skeleton_draft(style))
+        except Exception as exc:
+            self.skeleton.setPlainText(errmsg.friendly(exc, action="骨架生成"))
+        self.lbl_stat.setText(
+            ("✓ 通过硬冲突检查" if verdict.ok
+             else f"✗ 硬冲突 {len(verdict.hard)} 项（判为文种识别错误）")
+            + f"；软提示 {len(verdict.soft)} 项")
+        self.btn_insert.setEnabled(bool(self._insert_cb))
+
+    def _insert_skeleton(self):
+        if not self._insert_cb:
+            return
+        text = self.skeleton.toPlainText()
+        if not text.strip():
+            return
+        try:
+            self._insert_cb(text)
+        except Exception as exc:
+            warn(self, errmsg.friendly(exc, action="填入骨架"))
+
+    def _save(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存风格校验报告", "风格校验报告.txt", "文本文件 (*.txt)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.report.toPlainText(), encoding="utf-8")
+            info(self, f"已保存：{path}")
+        except OSError as exc:
+            warn(self, errmsg.friendly(exc, action="保存报告"))
+
+
+# ================================================================ 写作提示与灵感
+class WritingHintsDialog(QDialog):
+    """写作提示与灵感建议：**只给建议，不改正文**。
+
+    三个能力：
+      ① **写作提示** —— 对照文种骨架指出缺失要素、结构问题、文风偏离；
+      ② **文种识别** —— 复用风格量化指纹回答"这篇更像哪个文种"；
+      ③ **灵感建议** —— 离线句式库（按写作环节分组）＋ 资料库/词典可借鉴写法。
+
+    与「文字纠错」的边界（结构性守住的约束）：本对话框**不提供任何写入编辑器
+    的入口**。纠错命中是错误、可自动替换；写作建议不是错误、只能由人决定是否
+    采用。需要套用句式时用「复制选中建议」自行粘贴。
+    """
+
+    def __init__(self, text_getter, parent=None, kinds=None, topic: str = ""):
+        super().__init__(parent)
+        from ..core import writing_hints as wh
+        self._wh = wh
+        self._getter = text_getter
+        self.setWindowTitle("写作提示与灵感建议（只给建议，不改正文）")
+        _fit_dialog(self, 1080, 660)
+        v = QVBoxLayout(self)
+
+        head = QLabel(
+            "写作辅助与文字纠错是两件事：纠错指出「写错了」，可以自动改；"
+            "这里指出「还缺什么、可以怎么写」，**只作建议，绝不改动正文**。"
+            "灵感来自内置公文句式库与本地资料库，全程离线。")
+        head.setWordWrap(True)
+        head.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("文种："))
+        self.cmb_kind = QComboBox()
+        self.cmb_kind.addItem("不限", "")
+        for k in (kinds if kinds is not None else wh.available_kinds()):
+            self.cmb_kind.addItem(k, k)
+        row.addWidget(self.cmb_kind, 1)
+        row.addWidget(QLabel("主题/关键词："))
+        self.ed_topic = QLineEdit(topic)
+        self.ed_topic.setPlaceholderText("填写后可检索本地资料库中的可借鉴写法（可留空）")
+        row.addWidget(self.ed_topic, 2)
+        btn_hint = QPushButton("生成写作提示")
+        btn_hint.clicked.connect(self.run_hints)
+        row.addWidget(btn_hint)
+        btn_idea = QPushButton("获取灵感建议")
+        btn_idea.clicked.connect(self.run_ideas)
+        row.addWidget(btn_idea)
+        v.addLayout(row)
+
+        split = QSplitter(Qt.Horizontal)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addWidget(QLabel("写作提示（结构 / 要素 / 衔接 / 文风）"))
+        self.report = QPlainTextEdit()
+        self.report.setReadOnly(True)
+        lv.addWidget(self.report, 1)
+        split.addWidget(left)
+
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(QLabel("灵感建议（句式库 / 本地资料）"))
+        self.ideas = QListWidget()
+        rv.addWidget(self.ideas, 1)
+        irow = QHBoxLayout()
+        btn_copy = QPushButton("复制选中建议")
+        btn_copy.setToolTip("只复制到剪贴板，由你决定是否使用（本对话框不写入正文）")
+        btn_copy.clicked.connect(self._copy_idea)
+        irow.addWidget(btn_copy)
+        irow.addStretch(1)
+        rv.addLayout(irow)
+        split.addWidget(right)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        v.addWidget(split, 1)
+
+        btns = QHBoxLayout()
+        self.lbl_stat = QLabel("")
+        btns.addWidget(self.lbl_stat, 1)
+        btn_save = QPushButton("保存提示…")
+        btn_save.clicked.connect(self._save)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.reject)
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_close)
+        v.addLayout(btns)
+        self.run_hints()
+        self.run_ideas()
+
+    # ------------------------------------------------------------ 取文本
+    def kind(self) -> str:
+        return self.cmb_kind.currentData() or ""
+
+    def _text(self) -> str:
+        try:
+            return self._getter() or ""
+        except Exception:
+            return ""
+
+    # ------------------------------------------------------------ 提示
+    def run_hints(self):
+        """生成写作提示。**任何异常都降级为提示文本，绝不向外抛。**"""
+        text = self._text()
+        try:
+            hs = self._wh.hints(text, self.kind())
+            lines = self._wh.report_lines(hs)
+            warn_n = sum(1 for h in hs if h.level == "warn")
+        except Exception as exc:
+            self.report.setPlainText(errmsg.friendly(exc, action="写作提示"))
+            return
+        self.report.setPlainText("\n".join(lines))
+        self.lbl_stat.setText(f"提示 {len(lines)} 条" + (f"（其中缺失项 {warn_n} 条）"
+                                                        if warn_n else ""))
+
+    # ------------------------------------------------------------ 灵感
+    def run_ideas(self):
+        try:
+            items = self._wh.inspiration(self.ed_topic.text().strip(),
+                                         self.kind(), limit=8)
+        except Exception as exc:
+            self.ideas.clear()
+            self.ideas.addItem(errmsg.friendly(exc, action="灵感建议"))
+            return
+        self.ideas.clear()
+        for it in items:
+            label = f"[{it.source}·{it.label}]" if it.label else f"[{it.source}]"
+            item = QListWidgetItem(f"{label} {it.text}")
+            item.setData(Qt.UserRole, it.text)
+            item.setToolTip(it.text)
+            self.ideas.addItem(item)
+
+    def _copy_idea(self):
+        rows = self.ideas.selectedItems()
+        if not rows:
+            info(self, "请先在右侧选中一条建议。")
+            return
+        text = "\n".join(str(r.data(Qt.UserRole) or r.text()) for r in rows)
+        try:
+            QGuiApplication.clipboard().setText(text)
+            self.lbl_stat.setText("已复制到剪贴板（是否使用由你决定）")
+        except Exception as exc:
+            warn(self, errmsg.friendly(exc, action="复制建议"))
+
+    def _save(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存写作提示", "写作提示.txt", "文本文件 (*.txt)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.report.toPlainText(), encoding="utf-8")
+            info(self, f"已保存：{path}")
+        except OSError as exc:
+            warn(self, errmsg.friendly(exc, action="保存提示"))
+

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import docxgen
 from .compiler import load_trees
+from .corrector import ADVISORY_CATEGORIES
 from .template import DocTemplate
 from ..db import dao
 
@@ -87,10 +88,11 @@ def batch_compile_each(doc_ids: list[int], template: DocTemplate, out_dir: str,
 
 
 # ------------------------------------------------------------------ 批量纠错
-# 「数字用法」类命中给出的 suggestion 是提示标签（如"阿拉伯数字年份"）而不是
-# 可替换文本，批量写回会把正文改成标签本身，故整类排除 ——
-# 与 reference_panel 单篇「全部替换」的既有约定保持一致。
-ADVISORY_CATEGORIES = ("数字用法",)
+# 提示类类别（数字用法 / 表达提示 / 标点规范）的清单来自
+# `corrector.ADVISORY_CATEGORIES`（已在文件顶部导入）：这些类别给出的 suggestion
+# 是提示标签（如"阿拉伯数字年份""删其一"）而不是可替换文本，批量写回会把正文
+# 改成标签本身，故整类排除 —— 与单篇「全部替换」的既有约定保持一致。
+# 此处**只转出、不再自己维护一份清单**（两份清单手工同步必然漂移）。
 
 
 @dataclass

@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 """GB/T 9704 公文格式体检。
 
-两级检查：
+三级检查：
   - inspect_text：纯文本级（标题编号链条、成文日期、发文字号、结束语与文种匹配等）
   - inspect_docx：docx 级（页边距、正文字体字号行距、标题字体、页码域）
+  - style_findings：**文体风格级**（量化指标对照七文体语料指纹，见 core/style_profile）
+
 输出 Finding 列表：severity = error/warn/info。
+
+⚠ `style_findings` 是**独立一类**，刻意不并入 `inspect_text`：
+版式合规（GB/T 9704）与文体风格是两件事 —— 前者是"格式对不对"（有国标可依，
+违规即错），后者是"像不像这个文种"（区间外不等于错，好文章不整齐）。
+两者混在一张清单里，会让"风格偏离"看起来和"格式违规"一样严重。
 """
 from __future__ import annotations
 
@@ -68,6 +75,10 @@ _ENTITY_RE = re.compile(
     r"局|委|办|厅|部|处|科|院|所|站|队))")
 # 实体数超过该值就不做两两比较：O(n²) 在长文上会拖慢体检
 _MAX_ENTITIES = 200
+# 实体名**前导**连接字（见 _check_consistency 的"前导连接字修剪"）。
+# 只收连接词/介词/指代这类闭合小类；像"推""办"这类动词是开放类，
+# 收进来会把「推进科」这类正常词剪坏。
+_ENTITY_LEAD_TRIM = "与和及同跟由在为各该经对向从到请让使是了很他她它此根据按照为了"
 # 最多报几组疑似变体，避免长文刷屏
 _MAX_ENTITY_VARIANTS = 8
 
@@ -161,8 +172,6 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
                                f"直接跳到 {_CHAIN[lv][1]}，层级不连贯"))
         if lv not in seen_kinds:
             seen_kinds.append(lv)
-        if lv < seen_kinds[-1] and lv + 1 < len(counters):
-            pass
 
     # ---- 发文字号 ----
     for m in re.finditer(r"[〔\[（(]\s*(\d{4})\s*[〕\]）)]", text):
@@ -463,11 +472,19 @@ def _check_consistency(lines: list[str]) -> list[Finding]:
     **只报并列、不判对错**：不告诉用户哪个写法正确（可能两个都不对，
     或本就是两个不同主体），只把并存事实与各自出现次数摆出来。
     超过 _MAX_ENTITY_VARIANTS 条时截断，避免长文刷屏。
+
+    前导连接字修剪（第五轮深审）：`_ENTITY_RE` 是"懒惰前缀 + 机构后缀"，
+    匹配从上一个非实体字符后就地开始，于是「县应急局与县应急管理局联合
+    执法」里第二个实体取到的是「与县应急管理局」——带着连接词的名字与
+    「县应急局」做变体比对必然失败，而"简称与全称并存"恰恰最常见的
+    出现场景就是被「与/和/及」连在一起（本函数 docstring 的招牌用例实测
+    漏报）。修剪是确定性的小闭合集合（连接词/介词，不是开放类动词），
+    只影响统计口径，不改变原文。
     """
     text = "\n".join(lines)
     counts: dict[str, int] = {}
     for m in _ENTITY_RE.finditer(text):
-        name = m.group(1)
+        name = (m.group(1) or "").lstrip(_ENTITY_LEAD_TRIM)
         if name:
             counts[name] = counts.get(name, 0) + 1
     names = sorted(counts)
@@ -542,6 +559,45 @@ def _check_style(lines: list[str]) -> list[Finding]:
         if long_sentences >= 3:
             break
     return out[: _MAX_STYLE_FINDINGS]
+
+
+def style_findings(text: str, style: str) -> list[Finding]:
+    """文体风格检查：量化指标对照语料指纹，转成 Finding 列表。
+
+    **独立一类**（item 统一为「文体风格」），不并入 `inspect_text` —— 理由见模块头。
+
+    严重度映射遵循 `core/style_profile` 的三层纪律：
+      · 硬冲突（文种识别错误）→ `error`
+      · 软提示 / 标点修辞 / 避坑词 / 力度词超配额 / 跨族误配 → `warn`
+      · 全部通过 → 一条 `info` 汇总（给出身份证参数，便于确认"文种没写偏"）
+
+    区间外的参数对照项**不转成 Finding**：它们只是对照，展示在风格校验面板里；
+    把几十条"偏离"塞进体检清单会把真正需要处理的问题淹掉。
+    """
+    from . import style_profile as sp
+    from . import style_data as sd
+
+    v = sp.verdict(text, style)
+    out: list[Finding] = []
+    for f in v.hard:
+        out.append(Finding("error", "文体风格",
+                           f"{f.message}（实测 {f.field_key}={f.value}；依据：{f.basis}）"))
+    for f in v.soft:
+        out.append(Finding("warn", "文体风格",
+                           f"{f.message}（实测 {f.field_key}={f.value}；{f.basis}）"))
+    if v.family_warn:
+        out.append(Finding("warn", "文体风格", v.family_warn))
+    for p in v.punct:
+        out.append(Finding("warn", "文体风格", p))
+    for w, why in v.bad_words:
+        out.append(Finding("warn", "文体风格", f"避坑词「{w}」：{why}"))
+    if v.quota_warn:
+        out.append(Finding("warn", "文体风格", v.quota_warn))
+    if not out:
+        out.append(Finding("info", "文体风格",
+                           f"「{style}」参数未见硬冲突。身份证参数："
+                           f"{sd.ID_PARAM.get(style, '')}"))
+    return out
 
 
 def inspect_docx(path: str) -> list[Finding]:
