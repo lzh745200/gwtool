@@ -1084,7 +1084,7 @@ class SecurityDialog(QDialog):
         outer.addWidget(scroll, 1)
 
         g1 = QLabel("口令锁（启动程序时需输入口令）")
-        g1.setStyleSheet("font-weight:bold;")
+        g1.setStyleSheet(theme.group_title_style())
         v.addWidget(g1)
         row = QHBoxLayout()
         self.ed_pw = QLineEdit()
@@ -1109,7 +1109,7 @@ class SecurityDialog(QDialog):
             v.addWidget(self.lbl_pw_state)
 
         g2 = QLabel("自动备份")
-        g2.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        g2.setStyleSheet(theme.group_title_style(spaced=True))
         v.addWidget(g2)
         self.chk_auto_backup = QCheckBox("退出程序时自动备份（保留最近 20 份）")
         self.chk_auto_backup.setChecked(dao.get_setting("auto_backup", "1") == "1")
@@ -1165,7 +1165,7 @@ class SecurityDialog(QDialog):
         v.addWidget(self.lbl_backup_limit)
 
         g3 = QLabel("OCR（扫描件识别，需已安装 Tesseract）")
-        g3.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        g3.setStyleSheet(theme.group_title_style(spaced=True))
         v.addWidget(g3)
         row3 = QHBoxLayout()
         self.ed_tess = QLineEdit(dao.get_setting("tesseract_path", ""))
@@ -1179,7 +1179,7 @@ class SecurityDialog(QDialog):
         v.addWidget(self.lbl_tess)
 
         g4 = QLabel("外观")
-        g4.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        g4.setStyleSheet(theme.group_title_style(spaced=True))
         v.addWidget(g4)
         self.chk_dark = QCheckBox("跟随系统深浅色（重启生效）")
         self.chk_dark.setChecked(dao.get_setting("follow_system_theme", "0") == "1")
@@ -1188,7 +1188,7 @@ class SecurityDialog(QDialog):
         v.addWidget(self.chk_dark)
 
         g5 = QLabel("朗读校对（语速/音色）")
-        g5.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        g5.setStyleSheet(theme.group_title_style(spaced=True))
         v.addWidget(g5)
         self.sp_tts_rate = QSpinBox()
         self.sp_tts_rate.setRange(-10, 10)
@@ -1221,7 +1221,7 @@ class SecurityDialog(QDialog):
         v.addLayout(row_tts)
 
         g6 = QLabel("文字纠错 —— 精度增强（可选）")
-        g6.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        g6.setStyleSheet(theme.group_title_style(spaced=True))
         v.addWidget(g6)
         self.lbl_neural_help = QLabel(
             "纠错默认走「精确词表 → 上下文规则 → 词边界保护」三级流水线，"
@@ -1254,7 +1254,7 @@ class SecurityDialog(QDialog):
         self._refresh_pack_groups()
 
         g7 = QLabel("数据维护")
-        g7.setStyleSheet("font-weight:bold;margin-top:8pt;")
+        g7.setStyleSheet(theme.group_title_style(spaced=True))
         v.addWidget(g7)
         self.lbl_fts = QLabel("全文检索异常（搜不到已导入材料）时可重建索引。")
         self.lbl_fts.setStyleSheet(f"color:{theme.MUTED};")
@@ -1328,7 +1328,7 @@ class SecurityDialog(QDialog):
         v.setContentsMargins(0, 6, 0, 0)
 
         lbl = QLabel(title)
-        lbl.setStyleSheet("font-weight:bold;")
+        lbl.setStyleSheet(theme.group_title_style())
         v.addWidget(lbl)
 
         chk = QCheckBox(checkbox_text)

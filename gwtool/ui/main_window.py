@@ -5,7 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, QThread, QTimer, Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
-                               QMainWindow, QPushButton, QSplitter, QStatusBar)
+                               QMainWindow, QPushButton, QSplitter, QStatusBar,
+                               QToolButton)
 
 from .. import APP_NAME, __version__, logs
 from ..core.backup import (MODE_AUTO, MODE_MANUAL, create_backup_detailed,
@@ -26,8 +27,10 @@ from .material_dialogs import RecycleBinDialog
 from .reference_panel import ReferencePanel
 from .receive_dialog import ReceiveDialog
 from .registry_dialog import RegistryDialog
+from . import theme
 from .template_editor import TemplateEditor
-from .widgets import (ask, info, missing_official_fonts, wait_for_threads, warn)
+from .widgets import (StatusBarToast, ask, info, make_primary_tool_button,
+                      missing_official_fonts, wait_for_threads, warn)
 
 log = logs.get_logger("ui.main")
 
@@ -280,11 +283,21 @@ class MainWindow(QMainWindow):
         split.setStretchFactor(2, 0)
         for i in range(3):
             split.setCollapsible(i, False)
+        # 三档密度与右栏折叠（UI 方案 §3.2/§9.1，P2）：splitter/工具栏引用
+        # 供 resizeEvent 的分档逻辑使用；setCollapsible(2, True) 允许把右栏
+        # 压到 0 宽（折叠态），左中两栏仍不可折叠。
+        self._split = split
+        split.setCollapsible(2, True)
+        self._density = None
+        self._layout_dirty = False
+        self._right_collapsed = False
+        self._right_width = 380       # 折叠前记住宽度，展开时还原
         self.setCentralWidget(split)
 
         tb = self.addToolBar("主工具栏")
         tb.setMovable(False)
         tb.setIconSize(QSize(24, 24))
+        self._tb = tb                  # 三档密度切换工具栏样式（§3.2）
         from . import icons
         act_new = QAction("新建公文", self)
         act_new.setShortcut("Ctrl+Shift+N")
@@ -329,28 +342,29 @@ class MainWindow(QMainWindow):
         act_anydoc.triggered.connect(self.open_anydoc_correct)
         # tooltip 是离线内网里唯一的"这是什么"来源（没有在线文档、没有客服）：
         # 用户只能靠悬停判断该点哪个按钮。18 个动作此前只有 3 个有提示。
+        # 分组按 UI 方案 §3.1 的四区排布：高频（新建/导入/汇编）→ 材料与词典
+        # → 校对 → 台账与维护；"汇编"用主色实底按钮（高频区主视觉）。
         for a, ic, tip in (
                 (act_new, "new_doc", "新建公文：按文种骨架（通知/请示/报告…）起稿"),
                 (act_import, "import", "导入材料：Word/PDF/图片扫描件等，可批量"),
                 (act_compile, "compile", "一键汇编：勾选材料合并成一份正式公文（Ctrl+N）"),
+                ("SEP", "", ""),
                 (act_tpl, "template", "模板管理：自定义字体、字号、页边距与版式"),
+                (act_clip, "clipboard", "剪贴板入库：把刚复制的内容直接存进资料库"),
+                (act_fmt, "cleanup", "排版微调：清理多余空格、空行与全半角混排"),
+                (act_dict, "book", "词典与词库：维护自定义词、行业术语与保护词"),
+                (act_compare, "compare", "文档对比：查看两篇材料的差异"),
                 ("SEP", "", ""),
                 (act_check, "check", "文字纠错：查错别字、标点、数字用法（F7）"),
                 (act_anydoc, "anydoc",
                  "任意文档纠错：任意格式或粘贴文本，标记视图逐处修正（Ctrl+Shift+F7）"),
                 (act_inspect, "inspect", "格式体检：按 GB/T 9704 检查版式与要素（F8）"),
-                ("SEP", "", ""),
                 (act_tts, "tts", "朗读/停止：逐句朗读便于听校（F9）"),
-                (act_clip, "clipboard", "剪贴板入库：把刚复制的内容直接存进资料库"),
-                (act_fmt, "cleanup", "排版微调：清理多余空格、空行与全半角混排"),
                 ("SEP", "", ""),
-                (act_compare, "compare", "文档对比：查看两篇材料的差异"),
-                (act_dict, "book", "词典与词库：维护自定义词、行业术语与保护词"),
                 (act_registry, "registry",
                  "发文登记台账：登记、查询、统计、导出（Ctrl+R）"),
                 (act_receive, "registry",
                  "收文登记台账：来文签收、拟办、批示、承办、办结与归档（Ctrl+Shift+R）"),
-                ("SEP", "", ""),
                 (act_backup, "backup", "备份/恢复：整库打包或从备份包还原")):
             if a == "SEP":
                 tb.addSeparator()
@@ -361,7 +375,12 @@ class MainWindow(QMainWindow):
             if tip:
                 a.setToolTip(tip)
                 a.setStatusTip(tip)
-            tb.addAction(a)
+            if a is act_compile:
+                # 高频区主视觉：主色实底（§3.1）。defaultAction 关联既有动作，
+                # 触发/快捷键/遍历触发测试的行为全部不变。
+                tb.addWidget(make_primary_tool_button(a))
+            else:
+                tb.addAction(a)
         tb.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
 
         self.status = QStatusBar()
@@ -369,6 +388,10 @@ class MainWindow(QMainWindow):
         # 常驻信息（不会被瞬态 showMessage 覆盖）
         self._perm_label = QLabel()
         self.status.addPermanentWidget(self._perm_label)
+        # 轻提示条（§7.7）：已保存/已忽略/已复制这类成功与次要反馈走这里，
+        # 不再用 QMessageBox 打断；4 秒自清，QTimer 随组件销毁。
+        self._toast = StatusBarToast(self.status)
+        self.status.addPermanentWidget(self._toast)
         # 督办角标：启动时算一次、点开才拉清单，不做后台轮询
         # （理由见 core/reminder 模块说明：常驻定时器伤续航且对"天"级业务无意义）
         self._reminder_btn = QPushButton()
@@ -376,6 +399,11 @@ class MainWindow(QMainWindow):
         self._reminder_btn.setCursor(Qt.PointingHandCursor)
         self._reminder_btn.setToolTip("点击查看待办收文清单")
         self._reminder_btn.clicked.connect(self.open_reminders)
+        # 胶囊徽标视觉（§6.1）：DANGER 底白字圆角，仅在有逾期时出现
+        self._reminder_btn.setStyleSheet(
+            f"QPushButton {{ background:{theme.DANGER}; color:white; border:none;"
+            f"border-radius:9px; padding:2px 10px; font-size:{theme.SMALL}pt; }}"
+            f"QPushButton:hover {{ background:{theme.PRIMARY_DIM}; }}")
         self._reminder_btn.hide()
         self.status.addPermanentWidget(self._reminder_btn)
         # 缺字体角标（N7）：公文字体缺失会让 Word/WPS 静默替换字体，版心
@@ -388,6 +416,63 @@ class MainWindow(QMainWindow):
         self._font_btn.clicked.connect(self.show_font_notice)
         self._font_btn.hide()
         self.status.addPermanentWidget(self._font_btn)
+        # 右栏折叠开关（§3.2/P2）：写作参考面板在小屏上让位给编辑器。
+        # 放状态栏最右——折叠后按钮仍在，随时可展开（不藏在被折叠的面板里）。
+        self._btn_toggle_right = QToolButton()
+        self._btn_toggle_right.setAutoRaise(True)   # QToolButton 无 setFlat
+        self._btn_toggle_right.setToolTip("折叠/展开右侧「写作参考」面板")
+        self._btn_toggle_right.setText("▸")
+        self._btn_toggle_right.setCursor(Qt.PointingHandCursor)
+        self._btn_toggle_right.clicked.connect(self._toggle_right_panel)
+        self.status.addPermanentWidget(self._btn_toggle_right)
+
+    # ------------------------------------------------ 三档密度（§3.2/P2）
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_density(self.width())
+
+    def _apply_density(self, width: int) -> None:
+        """按窗口宽度切三档：紧凑 / 标准 / 宽屏。只动布局参数（分档宽度、
+        工具栏样式、右栏折叠），不创建/销毁任何控件，也不碰业务逻辑。
+
+        只在**档位变化**或折叠状态变化时调整（`_layout_dirty` 标记），
+        避免用户手动拖动 splitter 后被普通窗口缩放覆盖。
+        """
+        split = getattr(self, "_split", None)
+        if split is None:
+            return                          # 构造期 resize（控件未就绪）
+        if width < 1180:
+            tier, lib_w, ref_w = "compact", 190, 240
+        elif width <= 1600:
+            tier, lib_w, ref_w = "standard", 260, 300
+        else:
+            tier, lib_w, ref_w = "wide", 320, 340
+        tier_changed = tier != getattr(self, "_density", None)
+        if not tier_changed and not getattr(self, "_layout_dirty", False):
+            return
+        self._density = tier
+        self._layout_dirty = False
+        if tier_changed:
+            self._tb.setToolButtonStyle(
+                Qt.ToolButtonTextOnly if tier == "compact"
+                else Qt.ToolButtonTextUnderIcon)
+        eff_ref = 0 if getattr(self, "_right_collapsed", False) else ref_w
+        total = max(1, split.width() - split.handleWidth() * 2)
+        mid = max(360, total - lib_w - eff_ref)
+        split.setSizes([lib_w, mid, eff_ref])
+        self._btn_toggle_right.setText("◂" if self._right_collapsed else "▸")
+
+    def _toggle_right_panel(self) -> None:
+        """折叠/展开右侧面板；折叠前记住宽度，展开时还原。"""
+        if self._right_collapsed:
+            self._right_collapsed = False
+        else:
+            sizes = self._split.sizes()
+            if sizes[2] > 40:               # 有实际宽度才值得记
+                self._right_width = sizes[2]
+            self._right_collapsed = True
+        self._layout_dirty = True
+        self._apply_density(self.width())
 
     def _menu_action(self, menu, text: str, slot, tip: str, shortcut=None):
         """菜单项 + 悬停说明（tooltip 与状态栏提示各设一份）。
@@ -1036,7 +1121,7 @@ class MainWindow(QMainWindow):
         did = dao.add_document(dao.Document(title=title, content_text=text))
         self.library.reload()
         if did > 0:
-            info(self, f"已入库：{title}")
+            self.toast(f"已入库：{title}")
         else:
             info(self, "剪贴板内容此前已入库（重复）。")
         self._update_status()
@@ -1392,6 +1477,18 @@ class MainWindow(QMainWindow):
             f"资料 {n} 篇 | 纠错库 {pairs} 条 | 完全离线运行{mode}")
         self.status.showMessage(
             f"输出目录：{export_dir()} | 数据目录：{db_path().parent}", 10000)
+
+    def toast(self, text: str, kind: str = "success",
+              seconds: int | None = None) -> None:
+        """状态栏轻提示（§7.7"轻提示"通道）：非模态、定时自清。
+
+        适用：已保存/已入库/已忽略这类成功与次要反馈；
+        需要用户逐字读的失败仍走 warn()，危险/不可逆仍走 ask()。
+        """
+        try:
+            self._toast.show_message(text, kind, seconds)
+        except Exception:
+            pass      # 轻提示失效绝不能影响主流程
 
     # ------------------------------------------------ 关闭
     def showEvent(self, event):

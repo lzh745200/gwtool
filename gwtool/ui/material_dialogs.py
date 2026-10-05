@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog,
 
 from ..core import attachments
 from ..db import dao
-from .widgets import ThreadSafeDialog, ask, info, warn
+from .widgets import EmptyState, ThreadSafeDialog, ask, info, warn
 
 # 附件表格列（右对齐与否在 _set_cell 调用处指定）
 ATT_COLUMNS = ("文件名", "大小", "添加时间", "状态")
@@ -276,6 +276,11 @@ class RecycleBinDialog(QDialog):
         self.table = QTableWidget(0, len(BIN_COLUMNS))
         _fill_table(self.table, BIN_COLUMNS)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # 空状态（UI 方案 §7.6"回收站"）：覆盖层，无按钮 → 对鼠标透明
+        self._empty = EmptyState(
+            "inbox", "回收站是空的",
+            hint="删除的材料会先移到这里（正文与附件都保留），"
+                 "确认不再需要才「彻底删除」").mount(self.table)
         root.addWidget(self.table, 1)
 
         ops = QHBoxLayout()
@@ -318,6 +323,7 @@ class RecycleBinDialog(QDialog):
             _set_cell(self.table, r, 3, str(counts.get(d.id, 0)), right=True)
             _set_cell(self.table, r, 4, d.deleted_time or "")
         self.table.resizeColumnsToContents()
+        self._empty.set_visible(not self._rows)
         self.lbl_count.setText(f"回收站内 {len(self._rows)} 篇材料")
 
     def _selected_ids(self) -> list[int]:

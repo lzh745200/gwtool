@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
 
 from ..core import corrector, reference
 from ..db import dao
+from .widgets import EmptyState
 
 # 粒度取值（与 QComboBox 的插入顺序一一对应）
 MODE_PARAGRAPH = "paragraph"
@@ -73,6 +74,11 @@ class ReferencePanel(QWidget):
 
         self.corr_list = QListWidget()
         self.corr_list.itemDoubleClicked.connect(self._apply_one)
+        # 空状态（UI 方案 §7.6"纠错结果"，行动=重新检查）：覆盖层不占条目
+        self._empty_corr = EmptyState(
+            "check", "还没有纠错结果",
+            hint="点「检查当前文档」开始纠错（错别字/易混词/标点/语义冗余/搭配）",
+            actions=[("立即检查", self.run_check)]).mount(self.corr_list)
         v1.addWidget(self.corr_list, 1)
         bar2 = QHBoxLayout()
         btn_apply = QPushButton("替换所选")
@@ -304,6 +310,22 @@ class ReferencePanel(QWidget):
             self.corr_list.addItem(item)
             shown += 1
         self.lbl_count.setText(f"共 {len(self._corrections)} 项，显示 {shown} 项")
+        # 空状态三态（§8.6：每个列表必须四态齐备）
+        if shown:
+            self._empty_corr.set_visible(False)
+        else:
+            if self._corrections:            # 有命中但被置信度门槛滤掉
+                self._empty_corr.lbl_text.setText("没有达到当前置信度门槛的建议")
+                self._empty_corr.lbl_hint.setText(
+                    "可调低左上角的置信度阈值后重新检查")
+            elif getattr(self, "_checked_text", ""):
+                self._empty_corr.lbl_text.setText("未检出需要修改的文字")
+                self._empty_corr.lbl_hint.setText("")
+            else:                            # 还没检查过
+                self._empty_corr.lbl_text.setText("还没有纠错结果")
+                self._empty_corr.lbl_hint.setText(
+                    "点「检查当前文档」开始纠错")
+            self._empty_corr.set_visible(True)
 
     def _selected_corrections(self) -> list[corrector.Correction]:
         idxs = [item.data(Qt.UserRole) for item in self.corr_list.selectedItems()]

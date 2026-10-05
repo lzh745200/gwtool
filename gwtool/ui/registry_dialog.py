@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
 
 from ..core import registry
 from ..db import dao
-from .widgets import ask, info, warn
+from . import theme
+from .widgets import EmptyState, ask, info, warn
 
 # 台账表格列：(字段名, 表头)
 TABLE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -186,7 +187,7 @@ class RegisterFromCompileDialog(DispatchForm):
             "标题已自动填好，不必重填。\n"
             "保存后可在台账中随时修改或删除。")
         note.setWordWrap(True)
-        note.setStyleSheet("color:#555;")
+        note.setStyleSheet(f"color:{theme.MUTED};")
         layout = self.layout()
         if layout is not None:
             layout.insertWidget(0, note)
@@ -273,6 +274,12 @@ class RegistryDialog(QDialog, SourceOpenMixin):
         self.table.setHorizontalHeaderLabels([h for _k, h in TABLE_COLUMNS])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # 空状态（UI 方案 §7.6"台账表格"）：覆盖层，无按钮 → 对鼠标透明，
+        # 表头排序等既有交互不受影响
+        self._empty = EmptyState(
+            "registry", "还没有发文登记记录",
+            hint="点上方「新增登记」录入第一件；或用「汇编产物登记」自动回填"
+        ).mount(self.table)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -377,6 +384,7 @@ class RegistryDialog(QDialog, SourceOpenMixin):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(r, c, item)
         self.table.resizeColumnsToContents()
+        self._empty.set_visible(not self._rows)
         total = dao.count_dispatch()
         self.lbl_count.setText(
             f"共 {total} 条登记" + (f"，当前筛出 {len(self._rows)} 条"

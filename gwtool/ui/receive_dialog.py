@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
 
 from ..core import receive
 from ..db import dao
-from .widgets import ask, info, warn
+from .widgets import EmptyState, ask, info, warn
 
 # 台账列表展示的列（顺序即列顺序）：只挑经办人最常看的几列，
 # 全 25 列挤在表格里反而看不清。完整字段走导出。
@@ -267,6 +267,11 @@ class ReceiveDialog(QDialog):
         self.tbl.setHorizontalHeaderLabels([label for _k, label in _COLUMNS])
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # 空状态（UI 方案 §7.6"台账表格"）：覆盖层，无按钮 → 对鼠标透明
+        self._empty = EmptyState(
+            "registry", "还没有收文登记记录",
+            hint="点上方「签收登记」录入第一件来文；已办结的可批量归档"
+        ).mount(self.tbl)
         self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl.doubleClicked.connect(lambda *_: self.edit_selected())
         self.tbl.horizontalHeader().setSectionResizeMode(
@@ -352,6 +357,7 @@ class ReceiveDialog(QDialog):
                     item.setText((r.due_date or "") + "（已逾期）")
                 self.tbl.setItem(i, j, item)
         self.lbl_count.setText(f"共 {len(self._rows)} 条")
+        self._empty.set_visible(not self._rows)
 
     def _selected_ids(self) -> list[int]:
         ids = []

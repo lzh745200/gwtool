@@ -96,6 +96,12 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
+        # 阶段文案（UI 方案 §7.5 阶段式）：显示当前第几篇与文件名，
+        # 扫描件 OCR 时带页级进度（数据来自 ImportWorker.progress 既有信号，
+        # 仅 UI 呈现，不动线程与信号契约）。
+        self.lbl_stage = QLabel("")
+        self.lbl_stage.setVisible(False)
+        layout.addWidget(self.lbl_stage)
 
         btns = QHBoxLayout()
         self.btn_start = QPushButton("开始导入")
@@ -171,12 +177,15 @@ class ImportDialog(ThreadSafeDialog, QDialog):
             pass
         self.progress.setVisible(True)
         self.progress.setRange(0, len(files))
+        self.lbl_stage.setVisible(True)
         self.btn_start.setEnabled(False)
         cat_id = self.cat_combo.currentData() or 0
         self._worker = ImportWorker(files, cat_id, self)
         self._worker.progress.connect(
             lambda i, total, p: (self.progress.setValue(i),
-                                 self.setWindowTitle(f"导入中 {i}/{total}")))
+                                 self.setWindowTitle(f"导入中 {i}/{total}"),
+                                 self.lbl_stage.setText(
+                                     f"正在导入 {i}/{total}：{Path(p).name}")))
         self._worker.finished_ok.connect(self._done)
         self._worker.finished_detail.connect(self._done_detail)
         self._worker.failed.connect(self._failed)
@@ -186,6 +195,7 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         # 必须复位按钮与进度条，否则一次失败后对话框永久卡在“导入中”，无法重试
         self.btn_start.setEnabled(True)
         self.progress.setVisible(False)
+        self.lbl_stage.setVisible(False)
         info(self, f"导入出错：{msg}")
 
     def _done(self, ok: int, skip: int):
@@ -202,6 +212,7 @@ class ImportDialog(ThreadSafeDialog, QDialog):
     def _finish_common(self, ok: int, skip: int, failures):
         self.btn_start.setEnabled(True)
         self.progress.setVisible(False)
+        self.lbl_stage.setVisible(False)
         text = f"导入完成：成功 {ok} 篇；重复/失败/扫描版跳过 {skip} 篇。"
         real_failures = [f for f in (failures or []) if "重复" not in f[1]]
         overflow = 0

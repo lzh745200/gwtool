@@ -80,3 +80,37 @@ def test_lock_recovered_writes(tmp_db):
     lock.rollback()
     lock.close()
     assert dao.add_document(dao.Document(title="锁后文档", content_text="锁后")) > 0
+
+
+# ================================================================ 导出目录重定向
+def test_export_dir_env_override(tmp_path, monkeypatch):
+    """GWTOOL_EXPORT_DIR 重定向后**不得再触碰**用户 Documents。
+
+    背景：全量测试逐用例构造主窗口会高频触发 export_dir 的写探针，
+    真实 Documents 目录在受管控环境下被间歇拦截数十秒（假超时）。
+    测试会话（conftest）据此把导出目录整体重定向——本用例钉住
+    "设置了变量就绝不去摸 documents_dir()" 这条语义。
+    """
+    from gwtool import paths
+    target = tmp_path / "exports"
+    monkeypatch.setenv("GWTOOL_EXPORT_DIR", str(target))
+    calls: list[int] = []
+
+    def _sentinel():
+        calls.append(1)
+        return Path("/__sentinel_docs__")
+
+    monkeypatch.setattr(paths, "documents_dir", _sentinel)
+    out = paths.export_dir()
+    assert out == target and target.is_dir()
+    assert calls == [], "重定向生效后不得再调用 documents_dir()"
+
+
+def test_export_dir_default_uses_documents_dir(tmp_path, monkeypatch):
+    """不设环境变量时行为与既有逐字节一致（走 documents_dir 拼接）。"""
+    from gwtool import paths
+    monkeypatch.delenv("GWTOOL_EXPORT_DIR", raising=False)
+    docs = tmp_path / "docs"
+    (docs / "公文汇编输出").mkdir(parents=True)
+    monkeypatch.setattr(paths, "documents_dir", lambda: docs)
+    assert paths.export_dir() == docs / "公文汇编输出"

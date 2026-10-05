@@ -94,6 +94,29 @@ def _follow_system_theme() -> bool:
         return False
 
 
+def _system_prefers_dark() -> bool:
+    """系统当前是否为深色模式（UI 方案 §4.3/P2）。
+
+    Windows：读注册表 AppsUseLightTheme（与 darkmode 参数同源，**且无需
+    先建 QApplication**——colorScheme() 依赖应用实例，在构造前调用有风险）；
+    其他平台（麒麟）走 Qt styleHints，取不到一律视为浅色。任何异常都按
+    浅色处理——主题判断失败绝不能拦住启动。
+    """
+    try:
+        if sys.platform == "win32":
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return int(value) == 0
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QGuiApplication
+        return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    except Exception:
+        return False
+
+
 def _launch_qapp(argv: list[str]) -> "QApplication | None":
     """构造 QApplication；失败（平台插件初始化异常等）时输出可操作的诊断。"""
     try:
@@ -136,8 +159,14 @@ def run(import_path: str = "") -> int:
     logs.install()
 
     # 高分屏适配：默认强制浅色；设置「跟随系统深浅色」后交由系统决定
-    if sys.platform == "win32" and not _follow_system_theme():
+    follow = _follow_system_theme()
+    if sys.platform == "win32" and not follow:
         sys.argv += ["-platform", "windows:darkmode=0"]
+    # 深色主题（UI 方案 §4.3/P2）：跟随系统且系统为深色 → 切深色调色板。
+    # set_dark 重绑 theme 模块常量，必须发生在**任何窗口创建之前**；
+    # QSS 在下方 build_qss() 时按已重绑的常量生成。
+    from .ui import theme as _theme
+    _theme.set_dark(follow and _system_prefers_dark())
     QApplication.setApplicationName(APP_NAME)
     app = QApplication.instance() or _launch_qapp(sys.argv)
     if app is None:

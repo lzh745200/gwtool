@@ -34,6 +34,10 @@ def _isolate_data_dir(tmp_path_factory):
     data_dir.mkdir(parents=True, exist_ok=True)
     monkey = pytest.MonkeyPatch()
     monkey.setattr(paths, "_override", data_dir)
+    # 导出目录一并重定向（GWTOOL_EXPORT_DIR，见 paths.export_dir）：
+    # 全量测试逐用例构造主窗口会高频触发 export_dir 的写探针，
+    # 真实 Documents 目录在部分环境下被间歇拦截 45~60s，造成假超时。
+    monkey.setenv("GWTOOL_EXPORT_DIR", str(data_dir / "exports"))
     dbconn.configure(data_dir / "gwtool.db")
     # 增强层默认关闭：它的开关存在数据库里，而"是否有增强包"取决于本机
     # ~/…/gwtool/enhance 目录。测试必须与这两者都无关，否则同一份代码

@@ -326,14 +326,16 @@ def test_library_panel_delete_goes_to_bin(tmp_db, qapp, monkeypatch, wait_bg):
         panel.doc_list.item(0).setSelected(True)
         panel._delete_selected()
         assert wait_bg(panel._delete_worker,
-                       cond=lambda: panel.doc_list.count() == 1
-                       and panel.doc_list.item(0).data(Qt.UserRole) is None), \
+                       cond=lambda: panel.doc_list.count() == 0
+                       and panel._empty_no_data.isVisibleTo(panel.doc_list)), \
             "删除任务未在限期内完成并刷新列表"
-        # N8 起空库会显示一条**不可选中**的引导项，所以"删空"不等于"列表为 0 项"。
-        # 真正要断言的是：那篇材料确实不在列表里了，剩下的只是引导文案。
-        item = panel.doc_list.item(0)
-        assert item.data(Qt.UserRole) is None, "被删除的材料仍在列表中"
-        assert "还没有材料" in item.text()
+        # N8→v1.7：空库不再用"引导项"占位（引导项会被当成一条材料参与遍历），
+        # 改用覆盖层空状态。真正要断言的是：那篇材料确实不在列表里了。
+        for i in range(panel.doc_list.count()):
+            assert panel.doc_list.item(i).data(Qt.UserRole) != did, \
+                "被删除的材料仍在列表中"
+        assert "资料库还是空的" in (panel._empty_no_data.lbl_text.text()
+                                + panel._empty_no_data.lbl_hint.text())
         assert panel.count_label.text() == "0 篇"
         assert dao.count_deleted_documents() == 1
         assert dao.get_document(did) is not None

@@ -23,7 +23,7 @@ from ..core.registry import from_compile as registry_from_compile
 from ..core.template import DocTemplate, default_template
 from ..db import dao
 from ..paths import export_dir
-from .widgets import ThreadSafeDialog, ask, info
+from .widgets import StepIndicator, ThreadSafeDialog, ask, info
 from .workers import BookletWorker, CompileWorker, PdfRenderWorker, _close_thread_conn
 
 log = logs.get_logger("compile_wizard")
@@ -64,6 +64,14 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.addPage(self._page_materials())
         self.addPage(self._page_template())
         self.addPage(self._page_output())
+        # 步骤指示器（UI 方案 §6.5/P1）：横向三节点条挂在向导侧边位，
+        # 当前节点主色实心、完成节点描边对勾、未达节点灰。纯自绘、零动画。
+        # QWizard 没有顶部标题位 API（setTitleWidget 不存在），官方提供的
+        # 扩展位是 setSideWidget —— 三个页面的布局不受任何影响。
+        self._steps_bar = StepIndicator(["选材料", "定模板", "出成品"])
+        self.setSideWidget(self._steps_bar)
+        self.currentIdChanged.connect(self._steps_bar.set_current)
+        self._steps_bar.set_current(self.currentId())
 
     # ------------------------------------------------ 第1步：选材料
     def _page_materials(self):

@@ -165,7 +165,18 @@ def export_dir() -> Path:
 
     注意：中文桌面下 ~/Documents 不存在（是 ~/文档），旧实现会直接退到
     Path.home()，把导出散落在家目录根部、用户根本找不到。故改用 documents_dir()。
+
+    环境变量 ``GWTOOL_EXPORT_DIR`` 可整体重定向导出目录（设置后**不再触碰**
+    用户 Documents）。设置方：自动化测试会话（tests/conftest 的会话夹具）与
+    e2e 自检——全量测试逐用例构造主窗口会高频触发 ``_ensure_dir`` 的
+    写探针，在部分受管控环境（杀软/沙箱/漫游配置）下该探针会被间歇拦截
+    数十秒（2026-09/10 实测 45~60s/次），把"测试目录隔离"从 app_data_dir
+    扩展到 export_dir 是消除这类假超时的最小改动。真实用户不设该变量，
+    行为与此前的逐字节一致。
     """
+    override = os.environ.get("GWTOOL_EXPORT_DIR")
+    if override:
+        return _ensure_dir(Path(override))
     d = documents_dir() / "公文汇编输出"
     return _ensure_dir(d)
 

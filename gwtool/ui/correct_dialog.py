@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
 
 from ..core import corrector, importer
 from ..db import dao
-from .theme import MUTED, severity_color
+from . import theme
+from .theme import severity_color
 from .widgets import ThreadSafeDialog
 from .workers import FnWorker
 
@@ -58,7 +59,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self.btn_run = QPushButton("开始纠错")
         self.btn_run.setEnabled(False)
         self.lbl_source = QLabel("未选择内容（支持 docx/doc/pdf/txt/rtf/md/html，或直接粘贴）")
-        self.lbl_source.setStyleSheet(f"color:{MUTED};")
+        self.lbl_source.setStyleSheet(f"color:{theme.MUTED};")
         bar.addWidget(self.btn_file)
         bar.addWidget(self.btn_clip)
         bar.addWidget(self.lbl_source, 1)
@@ -105,7 +106,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         root.addWidget(split, 1)
 
         self.lbl_stat = QLabel("就绪")
-        self.lbl_stat.setStyleSheet(f"color:{MUTED};")
+        self.lbl_stat.setStyleSheet(f"color:{theme.MUTED};")
         root.addWidget(self.lbl_stat)
 
         self.btn_file.clicked.connect(self.pick_file)

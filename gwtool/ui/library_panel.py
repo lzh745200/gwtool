@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QPushButton, QSplitter,
@@ -13,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
                                QWidget)
 
 from ..db import dao
-from ..ui.widgets import ask, info, warn
+from ..ui.widgets import EmptyState, ask, info, warn
 from .material_dialogs import AttachmentDialog, RecycleBinDialog
 
 
@@ -52,6 +51,16 @@ class LibraryPanel(QWidget):
         self.doc_list.itemDoubleClicked.connect(
             lambda item: self.open_document.emit(item.data(Qt.UserRole)))
         self.doc_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # 空状态（UI 方案 §7.6）：覆盖层挂在列表上，不占列表条目、
+        # 不改任何既有布局；显隐由 _add_empty_hint 按数据情况控制。
+        self._empty_no_data = EmptyState(
+            "inbox", "资料库还是空的",
+            hint="① 点上方「导入」把公文/Word/PDF 导入资料库\n"
+                 "② 双击材料打开编辑\n"
+                 "③ 用「一键汇编」生成正式公文").mount(self.doc_list)
+        self._empty_no_match = EmptyState(
+            "search", "没有匹配的材料",
+            hint="换个关键词试试？").mount(self.doc_list)
 
         split = QSplitter(Qt.Vertical)
         split.addWidget(self.cat_tree)
@@ -198,21 +207,16 @@ class LibraryPanel(QWidget):
         列表区一片空白 —— 用户分不清是"自己没导入"、"被筛掉了"还是"程序坏了"。
         两种空给两种话：库确实是空的（引导导入）／检索没命中（提示换关键词）。
 
+        v1.7 起改用统一空状态组件 ``EmptyState``（覆盖层，不占列表条目），
+        文案与此前逐字一致；组件无行动按钮时对鼠标透明，右键菜单等
+        既有交互不受影响。
+
         注：**不存在"被类型筛选筛空"这一种**——类型下拉的候选项就是按当前
         分类下的材料重建的（`_reload_docs` 内），选中的类型若已无对应材料，
         下拉会自动落回「全部类型」。为此加分支只会得到一段永不执行的代码。
         """
-        text = ("没有匹配的材料。换个关键词试试？"
-                if searching else
-                "还没有材料。\n"
-                "① 点上方「导入」把公文/Word/PDF 导入资料库\n"
-                "② 双击材料打开编辑\n"
-                "③ 用「一键汇编」生成正式公文")
-        item = QListWidgetItem(text)
-        item.setFlags(Qt.NoItemFlags)
-        item.setForeground(QColor("#8a8a8a"))
-        item.setToolTip("这是空状态提示，不是一条材料")
-        self.doc_list.addItem(item)
+        self._empty_no_data.set_visible(not searching)
+        self._empty_no_match.set_visible(bool(searching))
 
     def _show_all(self):
         self.cat_tree.setCurrentItem(self.cat_tree.topLevelItem(0))

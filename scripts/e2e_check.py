@@ -55,6 +55,12 @@ def main() -> int:
     # 0) 数据库（真实目录）
     from gwtool.db import connection as dbconn
     from gwtool import app
+    # 导出目录重定向到临时目录（GWTOOL_EXPORT_DIR，见 paths.export_dir）：
+    # 主窗口构造会触发 export_dir 的写探针，真实 Documents 目录在部分
+    # 受管控环境下被间歇拦截数十秒，造成"主窗口离屏构造"假超时。
+    import os as _os
+    _export_tmp = Path(tempfile.mkdtemp(prefix="gwtool_e2e_export_"))
+    _os.environ["GWTOOL_EXPORT_DIR"] = str(_export_tmp)
     dbconn.configure(__import__("gwtool.paths", fromlist=["db_path"]).db_path())
     t0 = __import__("time").time()
     app.ensure_database_seeded()

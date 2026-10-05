@@ -1,12 +1,28 @@
 # -*- coding: utf-8 -*-
-"""UI 公共组件与工具函数。"""
+"""UI 公共组件与工具函数。
+
+含三个"状态表达"组件（UI 设计方案 §7.6/§7.7/P1）：
+
+  * :class:`EmptyState`      —— 空状态（图标 + 一句话 + 可选行动按钮），
+    以**覆盖层**方式挂到列表/表格上，不侵入宿主的既有布局；
+  * :class:`StatusBarToast`  —— 状态栏轻提示条（非模态，定时自清），
+    落实"能用轻提示就不用弹窗"的反馈分级；
+  * :class:`StepIndicator`   —— 向导步骤指示器（纯 paintEvent 自绘），
+    供 ``QWizard.setTitleWidget`` 使用。
+
+三者都是纯 QWidget 组合：不新增任何弹窗入口（模态框 mock 清单无需同步）、
+不带线程、不碰业务层。
+"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QDoubleSpinBox, QMessageBox, QPushButton, QWidget)
+from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtGui import QFontDatabase, QPainter, QColor, QPen
+from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QDoubleSpinBox,
+                               QLabel, QMessageBox, QPushButton, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ..core.template import FONT_BODY, FONT_HEI, FONT_KAI, FONT_SONG, FONT_XBS
+from . import icons, theme
 
 # 公文常用字体（缺失时在界面上给出提示，仍允许选择）
 OFFICIAL_FONTS = [FONT_XBS, FONT_BODY, FONT_HEI, FONT_KAI, FONT_SONG,
@@ -160,3 +176,211 @@ class ThreadSafeDialog:
             except Exception:
                 pass
         super().closeEvent(event)
+
+
+# ================================================================ 空状态
+class EmptyState(QWidget):
+    """空状态组件：图标 + 一句话 + 说明行 + 行动按钮（可选）。
+
+    用法（覆盖层模式，不侵入宿主布局）::
+
+        empty = EmptyState("inbox", "资料库还是空的",
+                           hint="拖入 docx / pdf / txt，或点击工具栏「导入材料」")
+        empty.mount(host_list_widget)      # 自动跟随宿主尺寸
+        ...
+        empty.set_visible(not rows)        # 数据变化处控制显隐
+
+    设计约定（UI 方案 §7.6）：纯 QWidget 组合、不引资源文件、
+    图标复用 icons.py 的线性风格；**没有按钮也能用**（actions 可省）。
+    """
+
+    def __init__(self, icon_name: str, text: str, hint: str = "",
+                 actions: "list[tuple[str, object]] | None" = None,
+                 parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(theme.MARGIN, theme.MARGIN, theme.MARGIN, theme.MARGIN)
+        v.addStretch(1)
+        self._icon = QLabel()
+        ic = icons.icon(icon_name)
+        if not ic.isNull():
+            self._icon.setPixmap(ic.pixmap(48, 48))
+        self._icon.setAlignment(Qt.AlignHCenter)
+        v.addWidget(self._icon)
+        self.lbl_text = QLabel(text)
+        self.lbl_text.setAlignment(Qt.AlignHCenter)
+        self.lbl_text.setWordWrap(True)
+        v.addWidget(self.lbl_text)
+        self.lbl_hint = QLabel(hint)
+        self.lbl_hint.setAlignment(Qt.AlignHCenter)
+        self.lbl_hint.setWordWrap(True)
+        self.lbl_hint.setStyleSheet(f"color:{theme.MUTED};"
+                                    f"font-size:{theme.SMALL}pt;")
+        self.lbl_hint.setVisible(bool(hint))
+        v.addWidget(self.lbl_hint)
+        if actions:
+            row = QHBoxLayout()
+            for label, cb in actions:
+                btn = QPushButton(label)
+                btn.clicked.connect(cb)
+                row.addWidget(btn)
+            row.addStretch(1)
+            v.addLayout(row)
+        else:
+            # 无行动按钮时对鼠标完全透明：不挡宿主的右键菜单/双击等既有交互
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        v.addStretch(2)
+
+    # ---- 覆盖层：跟随宿主尺寸 ----
+    def mount(self, host: QWidget) -> "EmptyState":
+        """把自己变成 host 的子控件并铺满它（宿主 resize 时自动跟随）。
+
+        通过 eventFilter 监听宿主 Resize，**不改宿主的任何布局与行为**——
+        这是它能把空状态带进"已经定型的页面"而不动布局的原因。
+        """
+        self.setParent(host)
+        self.setGeometry(host.rect())
+        host.installEventFilter(self)
+        self.hide()
+        return self
+
+    def eventFilter(self, obj, event):
+        # Resize：跟随宿主尺寸；Show：宿主显示时也要重铺一次——
+        # Qt 对**未显示**的 widget 不投递 Resize 事件（推迟到 show），
+        # 只听 Resize 会让"构造期挂载、显示后才有正确尺寸"的路径漏铺。
+        if obj is self.parent() and event.type() in (QEvent.Type.Resize,
+                                                     QEvent.Type.Show):
+            self.setGeometry(self.parent().rect())
+        return super().eventFilter(obj, event)
+
+    # ---- 显隐 ----
+    def set_visible(self, shown: bool) -> None:
+        """空状态只在"确实没数据"时出现；show/hide 同时收起宿主焦点。"""
+        self.setVisible(bool(shown))
+        if shown:                       # 重新铺一次，防宿主在隐藏期间被 resize
+            self.setGeometry(self.parent().rect())
+            self.raise_()
+
+
+# ================================================================ 轻提示条
+def _toast_style(kind: str) -> "tuple[str, str]":
+    """kind -> (底色, 前景色)。**调用期**取 theme 常量（而非 import 期固化）：
+    深色主题下 set_dark 重绑 token 后，新弹出的提示自动跟随。未知 kind
+    降级为 info（绝不因参数抛异常）。"""
+    table = {
+        "success": (theme.SUCCESS_BG, theme.SUCCESS),
+        "info": (theme.INFO_BG, theme.INFO),
+        "warn": (theme.WARN_BG, theme.WARN),
+        "danger": (theme.DANGER_BG, theme.DANGER),
+    }
+    return table.get(kind, table["info"])
+
+
+class StatusBarToast(QLabel):
+    """状态栏轻提示条：SUCCESS/INFO 底色 + 定时自清（默认 4 秒）。
+
+    反馈分级（§7.7）的"轻提示"通道——已保存/已忽略/已复制这类
+    成功与次要反馈不再用 QMessageBox 打断。放在
+    ``statusBar().addPermanentWidget``，不会被瞬态 showMessage 覆盖。
+
+    QTimer 以 self 为 parent：随窗口销毁自动清理（红线 §11.2，
+    参考 main_window 右键菜单的 deleteLater 纪律）。
+    """
+
+    def __init__(self, parent=None, seconds: int = 4000):
+        super().__init__(parent)
+        self._seconds = int(seconds)
+        self.hide()
+        self._timer = QTimer(self)          # parent=self → 随组件销毁
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._clear)
+
+    def show_message(self, text: str, kind: str = "success",
+                     seconds: int | None = None) -> None:
+        """显示一条轻提示；未知 kind 降级为 info（绝不因参数抛异常）。"""
+        bg, fg = _toast_style(kind)
+        self.setText(text)
+        self.setStyleSheet(
+            f"background:{bg};color:{fg};border-radius:9px;"
+            f"padding:2px 10px;font-size:{theme.SMALL}pt;")
+        self.adjustSize()
+        self.show()
+        self._timer.start(self._seconds if seconds is None else int(seconds))
+
+    def _clear(self) -> None:
+        self.clear()
+        self.hide()
+
+
+# ================================================================ 步骤指示器
+class StepIndicator(QWidget):
+    """横向步骤指示器：已完成（描边对勾）→ 当前（实心）→ 未达（灰）。
+
+    供 ``QWizard.setTitleWidget`` 使用（不侵入向导既有布局），
+    纯 paintEvent 自绘、零动画依赖（§9.1 便携/低端机约束）。
+    """
+
+    def __init__(self, steps: "list[str]", parent=None):
+        super().__init__(parent)
+        self._steps = list(steps)
+        self._current = 0
+        self.setFixedHeight(34)
+        self.setMinimumWidth(max(260, 110 * len(steps)))
+
+    def set_current(self, index: int) -> None:
+        self._current = max(0, min(int(index), len(self._steps) - 1))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        n = len(self._steps)
+        if not n:
+            return
+        w = self.width()
+        # 节点圆心均匀分布，留出两侧文字余量
+        xs = [int(w * (i + 0.5) / n) for i in range(n)]
+        cy = 15
+        r = 9
+        p.setFont(self.font())
+        for i, name in enumerate(self._steps):
+            x = xs[i]
+            done, cur = i < self._current, i == self._current
+            # 连接线：连接相邻节点，颜色随完成度推进
+            if i:
+                p.setPen(QPen(QColor(theme.PRIMARY if i <= self._current
+                                     else theme.BORDER), 2))
+                p.drawLine(xs[i - 1] + r + 4, cy, x - r - 4, cy)
+            # 节点
+            p.setPen(QPen(QColor(theme.PRIMARY if (done or cur)
+                                 else theme.BORDER), 2))
+            p.setBrush(QColor(theme.PRIMARY if cur else theme.BG))
+            p.drawEllipse(x - r, cy - r, 2 * r, 2 * r)
+            p.setPen(QColor("white" if cur else
+                            (theme.PRIMARY if done else theme.MUTED)))
+            fw = p.fontMetrics().horizontalAdvance("✓")
+            p.drawText(x - fw / 2, cy + 4, "✓" if done else str(i + 1))
+            # 名称
+            p.setPen(QColor(theme.PRIMARY if cur else theme.MUTED))
+            tw = p.fontMetrics().horizontalAdvance(name)
+            p.drawText(x - tw / 2, cy + r + 14, name)
+        p.end()
+
+
+def make_primary_tool_button(action) -> QToolButton:
+    """把 QAction 包装成主色实底的 QToolButton（工具栏"汇编"主入口，§3.1）。
+
+    用 defaultAction 关联既有动作：动作的 trigger/快捷键/菜单引用全部保持，
+    测试遍历 QAction 触发的行为不变。
+    """
+    btn = QToolButton()
+    btn.setObjectName("btn_primary_action")
+    btn.setDefaultAction(action)
+    btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+    btn.setStyleSheet(
+        f"QToolButton#btn_primary_action {{ background:{theme.PRIMARY};"
+        f"border:1px solid {theme.PRIMARY}; border-radius:3px; padding:2px 8px; }}"
+        f"QToolButton#btn_primary_action:hover {{ background:{theme.PRIMARY_DIM}; }}"
+        f"QToolButton#btn_primary_action:pressed {{ background:{theme.HEADING_BG}; }}")
+    return btn

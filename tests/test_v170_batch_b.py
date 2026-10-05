@@ -139,9 +139,21 @@ class TestDocumentsDir:
         home = tmp_path / "home"
         (home / "文档").mkdir(parents=True)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        # conftest 会话夹具会把 GWTOOL_EXPORT_DIR 指向临时目录（测试环境
+        # 隔离，见 paths.export_dir）；本测试要验证的是**默认路径解析**，
+        # 必须摘掉这个环境变量才能测到 documents 分支。
+        monkeypatch.delenv("GWTOOL_EXPORT_DIR", raising=False)
 
         d = paths.export_dir()
         assert d == home / "文档" / "公文汇编输出"
+        assert d.is_dir()
+
+    def test_export_dir_env_override(self, tmp_path, monkeypatch):
+        """GWTOOL_EXPORT_DIR 设置后整体重定向，不再触碰用户 Documents。"""
+        target = tmp_path / "自定义导出"
+        monkeypatch.setenv("GWTOOL_EXPORT_DIR", str(target))
+        d = paths.export_dir()
+        assert d == target
         assert d.is_dir()
 
 
@@ -675,17 +687,17 @@ class TestEmptyStateGuidance:
     """N8：空库/空检索必须给出下一步，而不是一片空白。"""
 
     def test_empty_library_shows_guidance(self, qapp, tmp_db):
-        from PySide6.QtCore import Qt
-
         from gwtool.ui.library_panel import LibraryPanel
         panel = LibraryPanel()
         try:
-            assert panel.doc_list.count() == 1, "空库应给出且只给一条引导项"
-            item = panel.doc_list.item(0)
-            text = item.text()
-            assert "还没有材料" in text and "导入" in text and "一键汇编" in text
-            assert item.flags() == Qt.NoItemFlags, "引导项不得被选中（它不是材料）"
-            assert item.data(Qt.UserRole) is None
+            # v1.7 起空库不再往列表里塞"引导项"（它会被当成一条材料参与
+            # 各种遍历），改用覆盖层 EmptyState：列表条目为 0、空状态可见。
+            assert panel.doc_list.count() == 0, "空库列表不应再有占位条目"
+            assert panel._empty_no_data.isVisibleTo(panel.doc_list), \
+                "空库应显示空状态引导"
+            text = (panel._empty_no_data.lbl_text.text()
+                    + panel._empty_no_data.lbl_hint.text())
+            assert "资料库还是空的" in text and "导入" in text and "一键汇编" in text
         finally:
             panel.close()
 
@@ -697,7 +709,8 @@ class TestEmptyStateGuidance:
         panel = LibraryPanel()
         try:
             assert panel.doc_list.count() == 1
-            assert "还没有材料" not in panel.doc_list.item(0).text()
+            assert not panel._empty_no_data.isVisibleTo(panel.doc_list), \
+                "有材料时不得显示空状态"
         finally:
             panel.close()
 
@@ -707,9 +720,14 @@ class TestEmptyStateGuidance:
         try:
             panel.search_box.setText("绝不可能命中的关键词zzz")
             panel._on_search()
-            texts = [panel.doc_list.item(i).text()
-                     for i in range(panel.doc_list.count())]
-            assert any("没有匹配的材料" in t for t in texts), texts
+            assert panel.doc_list.count() == 0
+            assert panel._empty_no_match.isVisibleTo(panel.doc_list), \
+                "检索无命中应显示换词提示"
+            text = (panel._empty_no_match.lbl_text.text()
+                    + panel._empty_no_match.lbl_hint.text())
+            assert "没有匹配的材料" in text
+            # 两种空互斥：检索态不得显示"空库引导"
+            assert not panel._empty_no_data.isVisibleTo(panel.doc_list)
         finally:
             panel.close()
 
