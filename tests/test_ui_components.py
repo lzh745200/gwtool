@@ -218,3 +218,51 @@ def test_compile_wizard_has_step_indicator(tmp_db, qapp):
     wiz = CompileWizard()
     assert isinstance(wiz.sideWidget(), SI), "步骤指示器应挂在向导扩展位"
     assert wiz._steps_bar._steps == ["选材料", "定模板", "出成品"]
+
+
+# ---------------------------------------------------------------- 主题一致性护栏
+def test_no_hardcoded_colors_in_ui_strings():
+    """UI 层字符串里不得出现十六进制色值——唯一来源是 theme.py。
+
+    UI 方案 §2「token 单一来源」与 §10 对比度要求的守卫。写死色值的控件
+    不会随深浅主题切换，深色底上就会出现对比度不达标的文字。本轮实测：
+    correct_dialog 的 #757575 在深色底只有 3.77:1、receive_dialog 的
+    #c0392b 只有 3.19:1（要求正文 ≥ 4.5:1）；feature_dialogs 的兜底色
+    写死纯黑，深色底上等于看不见。
+
+    只扫**字符串字面量**（用 ast）：注释里提到色值属于文档，不算违规。
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    ui_dir = Path(__file__).resolve().parent.parent / "gwtool" / "ui"
+    allow = {"theme.py"}          # 调色板定义处（token 的唯一来源）
+    hex_pat = re.compile(r"#[0-9a-fA-F]{6}\b")
+    bad: list[str] = []
+    for path in sorted(ui_dir.glob("*.py")):
+        if path.name in allow:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if hex_pat.search(node.value):
+                    bad.append(f"{path.name}:{node.lineno}: {node.value[:50]!r}")
+    assert not bad, ("UI 层字符串出现硬编码色值（应取 theme token），"
+                     "深色主题下不会跟随：\n" + "\n".join(bad))
+
+
+def test_hardcoded_color_scanner_detects_violation():
+    """自证：扫描逻辑确实能发现字符串里的色值。
+
+    否则上一条护栏可能是"永远通过"的空壳（改坏了也没人知道）。
+    """
+    import ast
+    import re
+
+    src = 'x = "<p style=\'color:#123456\'>y</p>"'
+    hex_pat = re.compile(r"#[0-9a-fA-F]{6}\b")
+    found = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)
+             and hex_pat.search(n.value)]
+    assert found, "扫描逻辑失效：构造的违例字符串未被识别"

@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
+                               QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QPushButton, QSplitter,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout,
@@ -35,12 +37,28 @@ class LibraryPanel(QWidget):
         layout.setSpacing(4)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("全文检索（回车搜索，F3 聚焦）")
+        self.search_box.setPlaceholderText("全文检索（回车搜索，Esc 清空，F3 聚焦）")
         self.search_box.returnPressed.connect(self._on_search)
+        # §6.3：检索框左侧放大镜图标 + Esc 一键清空
+        from . import icons
+        ic = icons.icon("search")
+        if not ic.isNull():
+            self.search_box.addAction(ic, QLineEdit.LeadingPosition)
+        # 显式两行：PySide6 的 QShortcut 不接受 activated= 关键字（会误传给
+        # QWidget 构造），必须拿到对象后再 connect。
+        self._esc_shortcut = QShortcut(QKeySequence(Qt.Key_Escape),
+                                       self.search_box)
+        self._esc_shortcut.activated.connect(self._clear_search)
         layout.addWidget(self.search_box)
 
         self.cat_tree = QTreeWidget()
-        self.cat_tree.setHeaderLabel("分类")
+        # §6.3：分类树两列（名称 / 篇数右对齐），QSS 用对象名定位选中指示条
+        self.cat_tree.setObjectName("cat_tree")
+        self.cat_tree.setColumnCount(2)
+        self.cat_tree.setHeaderLabels(["分类", "篇数"])
+        self.cat_tree.header().setStretchLastSection(False)
+        self.cat_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.cat_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.cat_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.cat_tree.customContextMenuRequested.connect(self._cat_menu)
         self.cat_tree.itemSelectionChanged.connect(self._reload_docs)
@@ -118,7 +136,7 @@ class LibraryPanel(QWidget):
     # ------------------------------------------------ 内部
     def _fill_categories(self):
         self.cat_tree.clear()
-        root = QTreeWidgetItem(["全部文档"])
+        root = QTreeWidgetItem(["全部文档", ""])
         root.setData(0, Qt.UserRole, None)
         self.cat_tree.addTopLevelItem(root)
         cats = dao.list_categories()
@@ -126,16 +144,36 @@ class LibraryPanel(QWidget):
         for c in cats:
             by_parent.setdefault(c.parent_id, []).append(c)
         nodes: dict[int, QTreeWidgetItem] = {}
+        # 计数（§6.3）：一次查询取各分类在库篇数，再自下而上累加到父节点
+        counts = {}
+        try:
+            counts = dao.count_documents_by_category()
+        except Exception:
+            counts = {}
+        own: dict[int, int] = {c.id: counts.get(c.id, 0) for c in cats}
 
         def add_children(parent_item, parent_id):
             for c in by_parent.get(parent_id, []):
-                node = QTreeWidgetItem([c.name])
+                node = QTreeWidgetItem([c.name, ""])
                 node.setData(0, Qt.UserRole, c.id)
                 parent_item.addChild(node)
                 nodes[c.id] = node
                 add_children(node, c.id)
 
         add_children(root, 0)
+
+        def total(cat_id: int) -> int:
+            return own.get(cat_id, 0) + sum(
+                total(ch.id) for ch in by_parent.get(cat_id, []))
+
+        root.setText(1, str(sum(own.values())))
+        root.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+        for c in cats:
+            node = nodes.get(c.id)
+            if node is None:
+                continue
+            node.setText(1, str(total(c.id)))
+            node.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
         root.setExpanded(True)
         self.cat_tree.setCurrentItem(root)
 
@@ -170,14 +208,19 @@ class LibraryPanel(QWidget):
         except Exception:
             att_counts = {}
         for d in docs:
-            label = f"{d.title}    [{d.file_type or '文本'}] {d.word_count}字"
+            # §6.3：首行标题（列表自动省略），副行放字数/时间等次要信息。
+            # "附件N"等既有信息一并保留在副行（外部依赖其文本，如附件测试）。
+            meta = f"{d.file_type or '文本'} · {d.word_count}字"
             if att_counts.get(d.id):
-                label += f"  附件{att_counts[d.id]}"
+                meta += f" · 附件{att_counts[d.id]}"
+            when = (getattr(d, "updated_time", "") or "")[:16]
+            if when:
+                meta += f" · {when}"
             if d.tags:
-                label += f"  #{d.tags.replace(',', ' #').replace('，', ' #')}"
-            item = QListWidgetItem(label)
+                meta += "  " + d.tags.replace(",", " #").replace("，", " #")
+            item = QListWidgetItem(f"{d.title}\n    {meta}")
             item.setData(Qt.UserRole, d.id)
-            item.setToolTip(f"{d.title}\n标签：{d.tags or '无'}")
+            item.setToolTip(f"{d.title}\n{meta}\n标签：{d.tags or '无'}")
             self.doc_list.addItem(item)
         if not docs:
             self._add_empty_hint()
@@ -220,6 +263,13 @@ class LibraryPanel(QWidget):
 
     def _show_all(self):
         self.cat_tree.setCurrentItem(self.cat_tree.topLevelItem(0))
+
+    def _clear_search(self) -> None:
+        """Esc 一键清空检索条件并回到完整列表（§6.3）。"""
+        if not self.search_box.text():
+            return
+        self.search_box.clear()
+        self._on_search()
 
     def _on_search(self):
         kw = self.search_box.text().strip()

@@ -513,6 +513,20 @@ def count_documents(category_id: int | None = None) -> int:
         (category_id,)).fetchone()[0])
 
 
+def count_documents_by_category() -> dict[int, int]:
+    """各分类的在库文档数（不含回收站），一次查询取全量。
+
+    供分类树显示计数用：逐分类调用 ``count_documents`` 会产生 N 次查询，
+    分类多时界面刷新会明显变慢。
+    """
+    conn = dbconn.get_conn()
+    rows = conn.execute(
+        "SELECT category_id, count(*) FROM documents "
+        "WHERE deleted_time='' AND category_id > 0 "
+        "GROUP BY category_id").fetchall()
+    return {int(r[0]): int(r[1]) for r in rows}
+
+
 def all_simhashes() -> dict[int, int]:
     """全库已持久化的 SimHash（查重粗筛用，避免每次全库重算）。
 

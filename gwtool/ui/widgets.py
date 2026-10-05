@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QFontDatabase, QPainter, QColor, QPen
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QDoubleSpinBox,
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
                                QLabel, QMessageBox, QPushButton, QToolButton,
                                QVBoxLayout, QWidget)
 
@@ -93,10 +93,34 @@ def warn(parent: QWidget | None, text: str, title: str = "注意") -> None:
     QMessageBox.warning(parent, title, text)
 
 
-def ask(parent: QWidget | None, text: str, title: str = "确认") -> bool:
+def ask(parent: QWidget | None, text: str, title: str = "确认",
+        ok_text: str = "") -> bool:
+    """确认框。`ok_text` 非空时用**自定义确认按钮文字**（§6.8）。
+
+    为什么要能自定义：危险/不可逆操作（彻底删除、清空回收站、恢复覆盖当前
+    资料）的确认按钮必须写明后果，按钮写"是/否"时用户根本不知道自己点了什么。
+    默认（`ok_text` 为空）仍走既有的 Yes/No 询问，行为与此前逐字节一致 ——
+    既有调用方与相关测试不受影响。
+    """
+    if ok_text:
+        return _ask_custom(parent, text, title, ok_text)
     ret = QMessageBox.question(parent, title, text,
                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
     return ret == QMessageBox.Yes
+
+
+def _ask_custom(parent: QWidget | None, text: str, title: str,
+                ok_text: str) -> bool:
+    """自定义确认按钮的确认框（独立函数，便于测试整体替换）。"""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle(title)
+    box.setText(text)
+    ok_btn = box.addButton(ok_text, QMessageBox.AcceptRole)
+    cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+    box.setDefaultButton(cancel_btn)      # 危险操作默认落在"取消"上
+    box.exec()
+    return box.clickedButton() is ok_btn
 
 
 def dialog_buttons(parent, *specs) -> QHBoxLayout:
@@ -384,3 +408,100 @@ def make_primary_tool_button(action) -> QToolButton:
         f"QToolButton#btn_primary_action:hover {{ background:{theme.PRIMARY_DIM}; }}"
         f"QToolButton#btn_primary_action:pressed {{ background:{theme.HEADING_BG}; }}")
     return btn
+
+
+# ================================================================ 徽标与横幅
+#: 语义 → (底色, 前景色, 描边色)。全部取自 theme token，禁用新造色值（§7.4）。
+_CHIP_KINDS = {
+    "info": ("INFO_BG", "INFO"),
+    "primary": ("BG", "PRIMARY"),
+    "success": ("SUCCESS_BG", "SUCCESS"),
+    "warn": ("WARN_BG", "WARN"),
+    "danger": ("DANGER_BG", "DANGER"),
+}
+
+
+def make_chip(text: str, kind: str = "info") -> QLabel:
+    """胶囊徽标（UI 方案 §7.4）：圆角 = 高度/2，配色取自语义 token。
+
+    用途：状态徽标（在办/办结/归档）、格式徽标（docx/pdf/扫描）、
+    计数徽标（纠错 N 处 / 督办 N 件逾期）。未知 kind 退化为 info。
+    """
+    bg_name, fg_name = _CHIP_KINDS.get(kind, _CHIP_KINDS["info"])
+    bg, fg = getattr(theme, bg_name), getattr(theme, fg_name)
+    chip = QLabel(text)
+    chip.setAlignment(Qt.AlignCenter)
+    chip.setStyleSheet(
+        f"background:{bg};color:{fg};border:1px solid {fg};"
+        f"border-radius:9px;padding:1px 8px;font-size:{theme.SMALL}pt;")
+    return chip
+
+
+def make_chip_cell(text: str, kind: str = "info") -> QWidget:
+    """把徽标装进"左对齐的容器"，用于表格单元格（cellWidget）。
+
+    为什么不直接把 QLabel 当 cellWidget：cellWidget 会被拉伸填满单元格，
+    胶囊会被拉成方块。容器 + 弹簧让徽标保持自身尺寸。
+    """
+    holder = QWidget()
+    lay = QHBoxLayout(holder)
+    lay.setContentsMargins(theme.ROW_GAP, 2, theme.ROW_GAP, 2)
+    lay.addWidget(make_chip(text, kind))
+    lay.addStretch(1)
+    return holder
+
+
+class Banner(QFrame):
+    """对话框顶部结论横幅（UI 方案 §6.7 / §8.4）：图标 + 一句话 + 统计徽标。
+
+    用法::
+
+        self.banner = Banner()
+        v.addWidget(self.banner)          # 放在对话框内容最上方
+        ...
+        self.banner.show_result("success", "体检通过：未发现必须整改的问题",
+                                [("错误 0", "success"), ("建议 3", "warn")])
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("banner")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(theme.MARGIN, theme.GROUP_GAP,
+                               theme.MARGIN, theme.GROUP_GAP)
+        row.setSpacing(theme.GROUP_GAP)
+        self._icon = QLabel()
+        row.addWidget(self._icon)
+        self._text = QLabel("")
+        self._text.setWordWrap(True)
+        row.addWidget(self._text, 1)
+        self._chip_row = QHBoxLayout()
+        self._chip_row.setSpacing(theme.ROW_GAP)
+        row.addLayout(self._chip_row)
+        self.hide()
+
+    def show_result(self, kind: str, text: str,
+                    chips: "list[tuple[str, str]] | None" = None) -> None:
+        """展示结论。kind: success / warn / danger / info（未知按 info）。"""
+        bg_name, fg_name = _CHIP_KINDS.get(kind, _CHIP_KINDS["info"])
+        bg, fg = getattr(theme, bg_name), getattr(theme, fg_name)
+        self.setStyleSheet(
+            f"QFrame#banner {{ background:{bg};"
+            f"border:1px solid {fg}; border-radius:4px; }}")
+        icon_name = "check" if kind == "success" else "inspect"
+        ic = icons.icon(icon_name)
+        if not ic.isNull():
+            self._icon.setPixmap(ic.pixmap(24, 24))
+        self._text.setText(text)
+        self._text.setStyleSheet(f"color:{fg};")
+        while self._chip_row.count():                 # 清掉上一轮的徽标
+            item = self._chip_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for label, chip_kind in (chips or []):
+            self._chip_row.addWidget(make_chip(label, chip_kind))
+        self.show()
+
+    def clear(self) -> None:
+        self.hide()

@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..core import corrector, reference
@@ -283,6 +283,70 @@ class ReferencePanel(QWidget):
         self.btn_check.setEnabled(True)
         self.lbl_count.setText(f"检查失败：{msg}")
 
+    def _corr_row_widget(self, c, ctx: str, tier: str, item) -> QWidget:
+        """一条纠错结果的行内视图（UI 方案 §6.4）。
+
+        色条(3px, 按严重度) + 原文/建议双列 + 行内「替换/忽略」。
+        整行底色按 severity 取 *_BG。按钮不直接改正文，而是复用既有的
+        `_apply_one` / `_ignore_one`（它们带着"正文已改动则重算"的守卫）。
+        """
+        from . import theme
+        sure = c.confidence >= 0.8
+        sev = "error" if sure else "warn"
+        color = theme.severity_color(sev)
+        bg = theme.DANGER_BG if sure else theme.WARN_BG
+        holder = QWidget()
+        holder.setStyleSheet(f"background:{bg};")
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 2, 6, 2)
+        row.setSpacing(theme.GROUP_GAP)
+        bar = QLabel()
+        bar.setFixedWidth(3)
+        bar.setStyleSheet(f"background:{color};")
+        row.addWidget(bar)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        head = QHBoxLayout()
+        head.setSpacing(theme.ROW_GAP)
+        lbl_wrong = QLabel(c.wrong)
+        lbl_wrong.setStyleSheet(f"color:{color};")
+        lbl_arrow = QLabel("→")
+        lbl_arrow.setStyleSheet(f"color:{theme.MUTED};")
+        lbl_sug = QLabel(c.suggestion)
+        lbl_sug.setStyleSheet(f"color:{color};font-weight:bold;")
+        head.addWidget(lbl_wrong)
+        head.addWidget(lbl_arrow)
+        head.addWidget(lbl_sug)
+        head.addStretch(1)
+        col.addLayout(head)
+        meta = QLabel(f"[{c.category}] {ctx}…  ({c.confidence:.2f}，{tier})")
+        meta.setStyleSheet(f"color:{theme.MUTED};font-size:{theme.SMALL}pt;")
+        col.addWidget(meta)
+        row.addLayout(col, 1)
+        for text, slot in (("替换", lambda: self._row_replace(item)),
+                           ("忽略", lambda: self._row_ignore(item))):
+            btn = QPushButton(text)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(
+                f"QPushButton {{ border:none; color:{theme.PRIMARY};"
+                f"padding:1px 6px; }}"
+                f"QPushButton:hover {{ background:{theme.HOVER_BG}; }}")
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        return holder
+
+    def _row_replace(self, item) -> None:
+        """行内「替换」：与双击同一条路径（含偏移失效守卫）。"""
+        if item is not None:
+            self.corr_list.setCurrentItem(item)
+        self._apply_one()
+
+    def _row_ignore(self, item) -> None:
+        """行内「忽略」：与底部「忽略本次」同一条路径。"""
+        if item is not None:
+            self.corr_list.setCurrentItem(item)
+        self._ignore_one()
+
     def _fill_corr_list(self):
         from . import theme
         min_conf = self.chk_min_conf.value()
@@ -308,6 +372,11 @@ class ReferencePanel(QWidget):
             item.setData(Qt.UserRole, i)
             item.setToolTip(c.reason)
             self.corr_list.addItem(item)
+            # 行内视图（§6.4）：色条 + 原文/建议 + 替换/忽略。
+            # item 文本一字不动（既有断言与"可复制"能力都依赖它），
+            # 行内按钮走与双击/选中同一套语义。
+            self.corr_list.setItemWidget(
+                item, self._corr_row_widget(c, ctx, tier, item))
             shown += 1
         self.lbl_count.setText(f"共 {len(self._corrections)} 项，显示 {shown} 项")
         # 空状态三态（§8.6：每个列表必须四态齐备）
@@ -366,6 +435,22 @@ class ReferencePanel(QWidget):
         to_apply = [c for c in self._corrections
                     if c.confidence >= min_conf
                     and c.category not in corrector.ADVISORY_CATEGORIES]
+        skipped = [c for c in self._corrections
+                   if c.category in corrector.ADVISORY_CATEGORIES]
+        # §8.3：批量改写正文前必须二次确认，并如实列出"改多少、跳过多少"。
+        # 提示类的 suggestion 是标签而不是替换文本（ADVISORY_CATEGORIES 语义），
+        # 必须在这里把它排除在"将改动"的计数之外，否则用户以为它也会被改。
+        from .widgets import ask, info
+        if not to_apply:
+            info(self, "当前没有可自动替换的条目"
+                      + (f"（另有 {len(skipped)} 处属提示类，"
+                         "只给建议、不自动改写）。" if skipped else "。"))
+            return
+        detail = f"将改动正文 {len(to_apply)} 处"
+        if skipped:
+            detail += f"，另有提示类 {len(skipped)} 处不自动替换"
+        if not ask(self, detail + "。\n替换后可随时用 Ctrl+Z 撤销。\n\n是否继续？"):
+            return
         # 从后往前替换：前面的偏移不受影响（同一批内的坐标是自洽的）
         for c in sorted(to_apply, key=lambda x: x.start, reverse=True):
             self.apply_edit.emit(c.start, c.end, c.suggestion)
@@ -424,11 +509,69 @@ class ReferencePanel(QWidget):
             item.setData(Qt.UserRole, it)
             item.setToolTip(self._tooltip(it))
             self.ref_list.addItem(item)
+            # 段落卡片（§6.4）：来源徽标 + 摘要 + 溯源/插入两个次级按钮。
+            # item 文本保留（检索、可复制与既有断言都依赖它）。
+            self.ref_list.setItemWidget(
+                item, self._ref_card_widget(it, self._snippet(it.text, 70), item))
         # 放宽必须如实说明：不告知的话，用户会以为"这些同样精确相关"，
         # 进而对检索结果失去信任——那比少给几条结果更坏。
         note = "（精确命中较少，已放宽为「任一词命中」，排序中已降权）" if relaxed else ""
         self.lbl_ref.setText(
             f"命中 {len(items)} 个段落{note}；双击插入，选中后「加入参考清单」可累积")
+
+    def _ref_card_widget(self, ref, snippet: str, item) -> QWidget:
+        """写作参考的段落卡片（UI 方案 §6.4）：来源徽标 + 摘要 + 次级按钮。"""
+        from . import theme
+        from .widgets import make_chip
+        card = QFrame()
+        card.setObjectName("ref_card")
+        card.setStyleSheet(
+            f"QFrame#ref_card {{ background:{theme.SURFACE};"
+            f"border:1px solid {theme.BORDER}; border-radius:4px; }}")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(theme.GROUP_GAP, theme.ROW_GAP,
+                               theme.GROUP_GAP, theme.ROW_GAP)
+        row.setSpacing(theme.GROUP_GAP)
+        chip = make_chip(f"{ref.source_label}·{ref.kind_label}", "info")
+        row.addWidget(chip, 0, Qt.AlignTop)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        head = QLabel(f"{ref.doc_title}（第 {ref.ordinal + 1} 段）")
+        head.setStyleSheet(theme.group_title_style())
+        col.addWidget(head)
+        body = QLabel(snippet)
+        body.setWordWrap(True)
+        body.setStyleSheet(f"color:{theme.MUTED};font-size:{theme.SMALL}pt;")
+        col.addWidget(body)
+        row.addLayout(col, 1)
+        btn_trace = QPushButton("溯源")
+        btn_trace.setToolTip("跳回原文档并高亮这一段")
+        btn_trace.clicked.connect(lambda _=False, r=ref: self._trace_ref(r))
+        btn_insert = QPushButton("插入")
+        btn_insert.setToolTip("把这一段插入编辑器光标处")
+        btn_insert.clicked.connect(lambda _=False, i=item: self._insert_row(i))
+        for b in (btn_trace, btn_insert):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton {{ border:1px solid {theme.BORDER};"
+                f"color:{theme.PRIMARY}; padding:1px 8px; border-radius:3px; }}"
+                f"QPushButton:hover {{ border-color:{theme.PRIMARY};"
+                f"background:{theme.HOVER_BG}; }}")
+            row.addWidget(b, 0, Qt.AlignTop)
+        return card
+
+    def _trace_ref(self, ref) -> None:
+        """卡片「溯源」：跳回原文档并高亮该段（失败不抛，属锦上添花）。"""
+        try:
+            self.open_source.emit(ref)
+        except Exception:
+            pass
+
+    def _insert_row(self, item) -> None:
+        """卡片「插入」：与双击走同一条路径。"""
+        if item is not None:
+            self.ref_list.setCurrentItem(item)
+        self._insert_ref()
 
     def _fill_document_results(self, q: str):
         items = reference.lookup(q)

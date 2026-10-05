@@ -6,12 +6,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
-                               QLabel, QListWidget, QProgressBar, QPushButton,
-                               QVBoxLayout)
+                               QLabel, QListWidget, QPlainTextEdit,
+                               QProgressBar, QPushButton, QVBoxLayout)
 
 from ..core.importer import IMAGE_EXTS, SUPPORTED_EXTS
 from ..db import dao
-from .widgets import ThreadSafeDialog, info
+from .widgets import Banner, ThreadSafeDialog, info
 from .workers import ImportWorker
 
 FILE_FILTER = ("支持的文件 (*.docx *.doc *.wps *.txt *.rtf *.pdf *.md *.markdown *.html *.htm"
@@ -103,15 +103,45 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         self.lbl_stage.setVisible(False)
         layout.addWidget(self.lbl_stage)
 
+        # 完成横幅与失败明细（UI 方案 §8.1）：结果就地展示、失败逐条可读，
+        # 不再用弹窗打断；对话框由用户点「关闭」收起（与汇编向导结果面板
+        # 同一条纪律）。
+        self.banner = Banner()
+        layout.addWidget(self.banner)
+        self.fail_view = QPlainTextEdit()
+        self.fail_view.setReadOnly(True)
+        self.fail_view.setMaximumHeight(120)
+        self.fail_view.setPlaceholderText("未能导入的文件会逐条列在这里（含原因）")
+        self.fail_view.setVisible(False)
+        layout.addWidget(self.fail_view)
+
         btns = QHBoxLayout()
         self.btn_start = QPushButton("开始导入")
         self.btn_start.clicked.connect(self._start)
+        # 协作式取消（§7.5）：导入是逐篇进行的长任务，必须能中途停下；
+        # 已导入的保留，未处理的标为"未处理"。
+        self.btn_cancel = QPushButton("取消导入")
+        self.btn_cancel.setToolTip("停止后续文件的导入；已经导入的材料会保留")
+        self.btn_cancel.clicked.connect(self._cancel_import)
+        self.btn_cancel.setVisible(False)
+        self._cancel_requested = False
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.reject)
         btns.addStretch(1)
+        btns.addWidget(self.btn_cancel)
         btns.addWidget(self.btn_start)
         btns.addWidget(btn_close)
         layout.addLayout(btns)
+
+    def _cancel_import(self) -> None:
+        """请求取消导入（协作式：worker 在文件循环里检查停止标志）。"""
+        worker = getattr(self, "_worker", None)
+        if worker is None or not worker.isRunning():
+            return
+        self._cancel_requested = True
+        worker.stop()
+        self.btn_cancel.setEnabled(False)
+        self.lbl_stage.setText("正在取消（已导入的材料会保留）…")
 
     def _fill_categories(self):
         self.cat_combo.clear()
@@ -178,6 +208,11 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         self.progress.setVisible(True)
         self.progress.setRange(0, len(files))
         self.lbl_stage.setVisible(True)
+        self.banner.clear()            # 新一轮：收起上一轮结论（§8.1）
+        self.fail_view.setVisible(False)
+        self._cancel_requested = False
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setVisible(True)
         self.btn_start.setEnabled(False)
         cat_id = self.cat_combo.currentData() or 0
         self._worker = ImportWorker(files, cat_id, self)
@@ -213,23 +248,50 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         self.btn_start.setEnabled(True)
         self.progress.setVisible(False)
         self.lbl_stage.setVisible(False)
-        text = f"导入完成：成功 {ok} 篇；重复/失败/扫描版跳过 {skip} 篇。"
+        self.btn_cancel.setVisible(False)
         real_failures = [f for f in (failures or []) if "重复" not in f[1]]
         overflow = 0
+        # 完成横幅（§8.1 / §7.5）：成功 / 跳过 / 失败三段统计；
+        # 若是用户主动取消，结论按"已取消，已完成部分保留"表述。
+        chips = [(f"成功 {ok}", "success")]
+        if skip:
+            chips.append((f"跳过 {skip}", "warn"))
         if real_failures:
-            # 失败清单：让用户知道**哪几份没进、为什么、接下来做什么**。
-            # 逐条列出（至多 8 条），超出部分写入导出目录的文本文件留档。
+            chips.append((f"失败 {len(real_failures)}", "danger"))
+        cancelled = getattr(self, "_cancel_requested", False)
+        self._cancel_requested = False
+        if cancelled:
+            headline = (f"已取消，已完成部分保留：成功 {ok} 篇"
+                        + (f"，跳过 {skip} 篇" if skip else "") + "。")
+            self.banner.show_result("warn", headline, chips)
+        elif real_failures:
+            self.banner.show_result(
+                "danger",
+                f"导入完成：成功 {ok} 篇；重复/失败/扫描版跳过 {skip} 篇。",
+                chips)
+        elif skip:
+            self.banner.show_result(
+                "warn", f"导入完成：成功 {ok} 篇；重复/扫描版跳过 {skip} 篇。",
+                chips)
+        else:
+            self.banner.show_result("success", f"导入完成：成功 {ok} 篇。", chips)
+        # 失败明细就地可读（原先只在弹窗里列，关了对话框就没法回看）。
+        # 逐条列出（至多 8 条），超出部分写入导出目录的文本文件留档。
+        if real_failures:
             preview = real_failures[:8]
             overflow = len(real_failures) - len(preview)
-            lines = "\n".join(f"  · {name}：{why}" for name, why in preview)
+            lines = [f"· {name}：{why}" for name, why in preview]
             if overflow > 0:
-                lines += f"\n  …另有 {overflow} 份，完整清单见导出目录"
-            text += "\n\n以下文件未能导入：\n" + lines
-        info(self, text)
+                lines.append(f"…另有 {overflow} 份，完整清单见导出目录")
+            self.fail_view.setPlainText("以下文件未能导入：\n" + "\n".join(lines))
+            self.fail_view.setVisible(True)
+        else:
+            self.fail_view.clear()
+            self.fail_view.setVisible(False)
         if overflow > 0:
             self._export_failure_list(real_failures)
         self.file_list.clear()
-        self.accept()
+        # 不再 accept()：结果面板留在屏幕上，用户看完自己关（§8.1）
 
     def _export_failure_list(self, failures: list) -> None:
         """失败清单落盘：条目多时弹窗列不全，给一份可留存的 TXT。"""

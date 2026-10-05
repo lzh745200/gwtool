@@ -9,12 +9,12 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                               QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPlainTextEdit,
-                               QProgressBar, QPushButton, QRadioButton,
-                               QScrollArea, QSpinBox, QSplitter, QTextBrowser,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QPlainTextEdit, QProgressBar, QPushButton,
+                               QRadioButton, QScrollArea, QSpinBox, QSplitter,
+                               QTextBrowser, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import logs
 from ..core import inspector, simhash
@@ -24,7 +24,7 @@ from ..core.security import clear_password, has_password, set_password
 from ..db import dao
 from . import theme
 from . import errmsg
-from .widgets import ThreadSafeDialog, ask, info, warn
+from .widgets import Banner, ThreadSafeDialog, ask, info, warn
 from .workers import _close_thread_conn
 
 log = logs.get_logger("ui.pack")
@@ -169,6 +169,9 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         # 「是否真的拿到过体检结果」的独立标记：不能用 lbl_stat 文案替代
         # （"体检中…"与"体检未完成"都非空），详见 _export_report。
         self._has_result = False
+        # 结论横幅（UI 方案 §8.4）：通过=绿 / N 项建议=橙 / N 项错误=红
+        self.banner = Banner()
+        v.addWidget(self.banner)
         self.result_list = QListWidget()
         v.addWidget(self.result_list, 1)
         self.lbl_stat = QLabel("")
@@ -213,6 +216,7 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         self.btn_run.setEnabled(False)
         self.btn_export.setEnabled(False)
         self.lbl_stat.setText("体检中…")
+        self.banner.clear()          # 新一轮开始：收起上一轮结论（§8.4）
         self.result_list.clear()
         w = FnWorker(work, parent=self)
         w.ok.connect(lambda findings: self._run_done(findings, source))
@@ -230,16 +234,33 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         colors = {"error": theme.DANGER, "warn": theme.WARN, "info": theme.INFO}
         for f in findings:
             item = QListWidgetItem(f.label)
-            item.setForeground(QColor(colors.get(f.severity, "#000000")))
+            # 未知等级按"提示"色（theme.INFO）：原先兜底写死纯黑，深色底上
+            # 对比度不足 1.2:1，等于看不见
+            item.setForeground(QColor(colors.get(f.severity, theme.INFO)))
             item.setToolTip(f"等级：{f.severity}")
             self.result_list.addItem(item)
             self.result_list.item(self.result_list.count() - 1).setData(
                 Qt.UserRole, f.severity)
         n_err = sum(1 for f in findings if f.severity == "error")
         n_warn = sum(1 for f in findings if f.severity == "warn")
+        n_info = len(findings) - n_err - n_warn
         self.lbl_stat.setText(
-            f"体检完成：问题 {n_err} 项、建议 {n_warn} 项、提示 {len(findings) - n_err - n_warn} 项。"
+            f"体检完成：问题 {n_err} 项、建议 {n_warn} 项、提示 {n_info} 项。"
             + ("" if findings else "未发现问题。"))
+        # 结论横幅（§8.4）：有"问题"判红，只有建议/提示判橙，全无判绿
+        chips: list[tuple[str, str]] = []
+        if n_err:
+            chips.append((f"问题 {n_err}", "danger"))
+        if n_warn:
+            chips.append((f"建议 {n_warn}", "warn"))
+        if n_info:
+            chips.append((f"提示 {n_info}", "info"))
+        if n_err:
+            self.banner.show_result("danger", "体检发现必须整改的问题", chips)
+        elif n_warn or n_info:
+            self.banner.show_result("warn", "体检通过，但有可改进之处", chips)
+        else:
+            self.banner.show_result("success", "体检通过：未发现问题", [("0 项", "success")])
 
     def _run_failed(self, msg: str):
         # 失败必须解锁按钮并改掉"体检中…"：否则用户面对一个永远转着的
@@ -247,6 +268,7 @@ class InspectorDialog(ThreadSafeDialog, QDialog):
         self.btn_run.setEnabled(True)
         self.btn_export.setEnabled(True)
         self.lbl_stat.setText("体检未完成")
+        self.banner.show_result("danger", f"体检未完成：{msg[:80]}")
         warn(self, msg)
 
     def _export_report(self):
@@ -1064,9 +1086,14 @@ class SimilarityDialog(ThreadSafeDialog, QDialog):
 
 # ================================================================ 安全设置
 class SecurityDialog(QDialog):
-    """口令锁、自动备份、OCR 设置。"""
+    """口令锁、自动备份、OCR 设置。
 
-    def __init__(self, parent=None):
+    `on_restore` / `on_recycle` 由主窗口传入：设置页里给出**危险操作的独立
+    分组**（§6.8），点进去直接走各自既有的二次确认流程——本对话框不自己
+    实现恢复/清空，避免出现第二份危险操作实现。
+    """
+
+    def __init__(self, parent=None, on_restore=None, on_recycle=None):
         super().__init__(parent)
         self.setWindowTitle("设置 —— 系统与安全")
         _fit_dialog(self, 640, 720)
@@ -1271,6 +1298,38 @@ class SecurityDialog(QDialog):
         btn_sweep = QPushButton("清理无引用的附件文件")
         btn_sweep.clicked.connect(self._sweep_attachments)
         v.addWidget(btn_sweep, 0, Qt.AlignLeft)
+
+        # 危险区（§6.8）：独立分组 + DANGER 描边，点进去走各自既有的二次确认
+        # （确认按钮写明后果）。这里**不重复实现**恢复/清空逻辑。
+        g_danger = QGroupBox("危险操作（不可逆）")
+        g_danger.setStyleSheet(theme.danger_group_style())
+        dv = QVBoxLayout(g_danger)
+        dv.setContentsMargins(theme.GROUP_GAP, theme.GROUP_GAP,
+                              theme.GROUP_GAP, theme.GROUP_GAP)
+        lbl_danger = QLabel("恢复备份会覆盖当前全部资料；彻底删除的材料无法找回。")
+        lbl_danger.setWordWrap(True)
+        lbl_danger.setStyleSheet(f"color:{theme.MUTED};font-size:{theme.SMALL}pt;")
+        dv.addWidget(lbl_danger)
+        drow = QHBoxLayout()
+        btn_restore = QPushButton("从备份恢复…")
+        btn_restore.setStyleSheet(theme.danger_button_style())
+        btn_restore.setToolTip("选择备份包并恢复；确认框会写明覆盖后果")
+        if on_restore is not None:
+            btn_restore.clicked.connect(lambda: (self.accept(), on_restore()))
+        else:
+            btn_restore.setEnabled(False)
+        btn_recycle = QPushButton("打开回收站…")
+        btn_recycle.setStyleSheet(theme.danger_button_style())
+        btn_recycle.setToolTip("查看、恢复或彻底删除已移除的材料")
+        if on_recycle is not None:
+            btn_recycle.clicked.connect(lambda: (self.accept(), on_recycle()))
+        else:
+            btn_recycle.setEnabled(False)
+        drow.addWidget(btn_restore)
+        drow.addWidget(btn_recycle)
+        drow.addStretch(1)
+        dv.addLayout(drow)
+        v.addWidget(g_danger)
 
         v.addStretch(1)
         # 「关闭」放在滚动区**外**：内容再长也始终可见，不必滚到底才能关窗。

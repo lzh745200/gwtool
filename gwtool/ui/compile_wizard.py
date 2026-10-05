@@ -12,9 +12,10 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QProgressBar, QPushButton, QWizard, QWizardPage, QVBoxLayout)
+                               QProgressBar, QPushButton, QVBoxLayout, QWizard,
+                               QWizardPage, QWidget)
 
 from .. import config, logs
 from ..core.registry import SECRET_LEVELS, URGENCY_LEVELS
@@ -23,6 +24,7 @@ from ..core.registry import from_compile as registry_from_compile
 from ..core.template import DocTemplate, default_template
 from ..db import dao
 from ..paths import export_dir
+from . import theme
 from .widgets import StepIndicator, ThreadSafeDialog, ask, info
 from .workers import BookletWorker, CompileWorker, PdfRenderWorker, _close_thread_conn
 
@@ -439,6 +441,17 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.lbl_result.setWordWrap(True)
         v.addWidget(self.lbl_result)
 
+        # 产物卡片区（UI 方案 §6.5 第 3 步 / §11.3「向导卡片化」）：
+        # 本轮每份产物一张卡片（标题 + 完整路径 + 打开所在目录）。
+        # 只**新增**展示，`lbl_result` 的状态文案一字不动（既有断言与
+        # 用户习惯的"一句话结果"都保留）。
+        self.products_area = QWidget()
+        self.products_box = QVBoxLayout(self.products_area)
+        self.products_box.setContentsMargins(0, 0, 0, 0)
+        self.products_box.setSpacing(theme.ROW_GAP)
+        self.products_area.setVisible(False)
+        v.addWidget(self.products_area)
+
         self.btn_start = QPushButton("开始生成")
         self.btn_start.clicked.connect(self._start)
         v.addWidget(self.btn_start)
@@ -503,6 +516,7 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.last_pdf = ""
         self.last_booklet = ""
         self._products = []
+        self._clear_product_cards()
         self.btn_register_products.setEnabled(False)
 
         if self.chk_docx.isChecked():
@@ -527,6 +541,7 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         outdir = export_dir() / (self.ed_title.text().strip() or "批量汇编")
         cover = {"org": tpl.cover.org, "date": tpl.cover.date}
         self._products = []
+        self._clear_product_cards()
         self.btn_register_products.setEnabled(False)
 
         class _BatchThread(QThread):
@@ -631,6 +646,52 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         if not path:
             return
         self._products.append((path, Path(path).stem or "汇编产物"))
+        self._add_product_card(path, Path(path).stem or "汇编产物")
+
+    # ------------------------------------------------ 产物卡片（§6.5 / §11.3）
+    def _clear_product_cards(self) -> None:
+        """清掉上一轮的产物卡片（新一轮开始、或重新生成时调用）。"""
+        box = getattr(self, "products_box", None)
+        if box is None:
+            return
+        while box.count():
+            item = box.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self.products_area.setVisible(False)
+
+    def _add_product_card(self, path: str, title: str) -> None:
+        """给一份产物加一张卡片：标题 + 路径 + 打开所在目录。
+
+        卡片只是展示层（不承载业务），构造期取色即可——`set_dark()` 在
+        任何窗口构造之前执行，见 app.py 启动序列。
+        """
+        card = QFrame()
+        card.setObjectName("product_card")
+        card.setStyleSheet(
+            f"QFrame#product_card {{ background:{theme.SURFACE};"
+            f"border:1px solid {theme.BORDER}; border-radius:4px; }}")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(theme.MARGIN, theme.GROUP_GAP,
+                               theme.MARGIN, theme.GROUP_GAP)
+        col = QVBoxLayout()
+        col.setSpacing(theme.ROW_GAP)
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet(theme.group_title_style())
+        col.addWidget(lbl_title)
+        lbl_path = QLabel(str(path))
+        lbl_path.setWordWrap(True)
+        lbl_path.setStyleSheet(f"color:{theme.MUTED};"
+                               f"font-size:{theme.SMALL}pt;")
+        col.addWidget(lbl_path)
+        row.addLayout(col, 1)
+        btn = QPushButton("打开所在目录")
+        btn.setToolTip("在文件管理器里打开这份产物所在的目录")
+        btn.clicked.connect(lambda _=False, p=str(path): self._open_in_file_manager(p))
+        row.addWidget(btn)
+        self.products_box.addWidget(card)
+        self.products_area.setVisible(True)
 
     def _save_products_to_library(self, products=None) -> tuple[list[int], str]:
         """把产物写进资料库，返回 (新入库的 doc_id 列表, 给用户看的一句话)。
@@ -857,3 +918,22 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             subprocess.Popen(["explorer", p])
         else:
             subprocess.Popen(["xdg-open", p])
+
+    def _open_in_file_manager(self, path: str) -> None:
+        """打开某份产物所在目录（卡片上的"打开所在目录"按钮）。
+
+        失败只提示不抛：打开文件管理器属于锦上添花，不能把生成结果页带崩。
+        """
+        try:
+            target = Path(path)
+            if os.name == "nt":
+                if target.exists():
+                    subprocess.Popen(["explorer", "/select,", str(target)])
+                else:
+                    subprocess.Popen(["explorer", str(target.parent)])
+            else:
+                subprocess.Popen(["xdg-open", str(target.parent)])
+        except Exception as exc:
+            log.warning("打开产物目录失败：%s", exc)
+            info(self, "无法调用文件管理器；产物路径见卡片上的完整路径，"
+                       "可手动复制到资源管理器打开。")

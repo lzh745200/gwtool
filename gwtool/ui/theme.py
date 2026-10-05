@@ -122,6 +122,24 @@ def group_title_style(spaced: bool = False) -> str:
     return "font-weight:bold;" + ("margin-top:8pt;" if spaced else "")
 
 
+def danger_button_style() -> str:
+    """危险操作按钮样式（§6.8 / §7.1）：白底 + DANGER 描边与文字，hover 反色。
+
+    仅用于不可逆操作（彻底删除 / 清空回收站 / 恢复覆盖），与主按钮的主色
+    实底形成明确区分。
+    """
+    return (f"QPushButton {{ border:1px solid {DANGER}; color:{DANGER}; }}"
+            f"QPushButton:hover {{ background:{DANGER}; color:white; }}")
+
+
+def danger_group_style() -> str:
+    """危险区分组框样式（§6.8）：DANGER 描边 + 深红标题。"""
+    return (f"QGroupBox {{ border:1px solid {DANGER}; border-radius:4px;"
+            f"margin-top:12px; padding-top:4px; }}"
+            f"QGroupBox::title {{ subcontrol-origin:margin; left:8px;"
+            f"padding:0 4px; color:{DANGER}; font-weight:bold; }}")
+
+
 def build_qss() -> str:
     """全局 QSS（精品浅色）：统一字体/间距/控件外观/交互反馈。"""
     return f"""
@@ -143,6 +161,11 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
 QPlainTextEdit:focus {{
     border: 1px solid {PRIMARY};
+}}
+/* 正文编辑区（§6.2）：白底无边框——描边由外层容器表达，正文区只留纸面 */
+QTextEdit#doc_editor {{
+    border: none;
+    background: {BG};
 }}
 QPushButton {{
     padding: 4px 14px;
@@ -196,6 +219,10 @@ QTableWidget::item:focus {{
 QListWidget::item:hover, QTreeWidget::item:hover,
 QTableWidget::item:hover {{
     background: {HOVER_BG};
+}}
+/* 分类树选中节点：主色左侧 3px 指示条（§6.3） */
+QTreeWidget#cat_tree::item:selected {{
+    border-left: 3px solid {PRIMARY};
 }}
 QHeaderView::section {{
     background: {HEADING_BG};

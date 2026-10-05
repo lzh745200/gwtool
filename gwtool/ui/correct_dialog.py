@@ -25,7 +25,7 @@ from ..core import corrector, importer
 from ..db import dao
 from . import theme
 from .theme import severity_color
-from .widgets import ThreadSafeDialog
+from .widgets import Banner, ThreadSafeDialog
 from .workers import FnWorker
 
 # 逐处确认、不参与"全部应用"的类别（与纠错面板口径一致）。
@@ -65,6 +65,10 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         bar.addWidget(self.lbl_source, 1)
         bar.addWidget(self.btn_run)
         root.addLayout(bar)
+
+        # 结论横幅（UI 方案 §6.7）：顶部全宽，绿色通过 / 橙色警告 / 红色错误
+        self.banner = Banner()
+        root.addWidget(self.banner)
 
         self.input_box = QPlainTextEdit()
         self.input_box.setPlaceholderText(
@@ -233,13 +237,47 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._set_busy(False)
         n = sum(len(x) for x in corrs_by_block)
         self.lbl_stat.setText(f"完成：发现 {n} 处问题" + ("，已按类别标记" if n else ""))
+        self._show_banner(corrs_by_block)
+
+    def _show_banner(self, corrs_by_block) -> None:
+        """刷新结论横幅：按置信度与提示类分档统计（§6.7）。
+
+        提示类（`ADVISORY_CATEGORIES`）单列一档：它们的建议是标签而不是替换
+        文本，必须让用户一眼看出"这些不会被自动改写"。
+        """
+        items = [c for group in corrs_by_block for c in group]
+        sure = sum(1 for c in items
+                   if c.confidence >= 0.85
+                   and c.category not in corrector.ADVISORY_CATEGORIES)
+        maybe = sum(1 for c in items
+                    if 0.55 <= c.confidence < 0.85
+                    and c.category not in corrector.ADVISORY_CATEGORIES)
+        advice = sum(1 for c in items
+                     if c.category in corrector.ADVISORY_CATEGORIES)
+        if not items:
+            self.banner.show_result("success", "未发现问题：正文符合当前词库与规则",
+                                    [("0 处", "success")])
+            return
+        kind = "danger" if sure else "warn"
+        chips = []
+        if sure:
+            chips.append((f"确认错误 {sure}", "danger"))
+        if maybe:
+            chips.append((f"疑似 {maybe}", "warn"))
+        if advice:
+            chips.append((f"提示类 {advice}（不自动替换）", "info"))
+        self.banner.show_result(kind, f"共发现 {len(items)} 处问题，可逐处确认后应用",
+                                chips)
 
     def _on_failed(self, msg: str) -> None:
         self._set_busy(False)
         self.lbl_stat.setText(f"纠错失败：{msg[:120]}")
+        self.banner.show_result("danger", f"纠错未完成：{msg[:80]}")
 
     def _set_busy(self, busy: bool) -> None:
         has = bool(self._blocks)
+        if busy:
+            self.banner.clear()      # 新一轮开始：收起上一轮结论（§6.7）
         for b in (self.btn_run, self.btn_apply_one, self.btn_apply_all,
                   self.btn_ignore, self.btn_docx, self.btn_txt):
             b.setEnabled(has and not busy)
@@ -253,7 +291,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         html_parts: list[str] = []
         if self._title:
             tcs = corrector.check_text(self._title)
-            html_parts.append('<p style="color:#757575;">【标题】</p>'
+            html_parts.append(f'<p style="color:{theme.MUTED};">【标题】</p>'
                               + corrector.to_marked_html(self._title, tcs,
                                                          anchor_prefix="tm")
                               + "<br>")
@@ -261,7 +299,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         for bi, b in enumerate(self._blocks):
             cs = self._corrs[bi] if bi < len(self._corrs) else []
             if b["kind"] == "table":
-                html_parts.append('<p style="color:#757575;">〖表格〗</p>')
+                html_parts.append(f'<p style="color:{theme.MUTED};">〖表格〗</p>')
                 by_cell: dict[tuple[int, int], list] = {}
                 for c in cs:
                     key = getattr(c, "_cell", None) or (0, 0)
@@ -273,7 +311,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
                             continue
                         anchor = f"b{bi}r{ri}c{ci}m"
                         html_parts.append(
-                            f'<p style="color:#757575;">r{ri + 1}c{ci + 1}：</p>'
+                            f'<p style="color:{theme.MUTED};">r{ri + 1}c{ci + 1}：</p>'
                             + corrector.to_marked_html(cell, cc, anchor_prefix=anchor))
                         self._collect_hits(bi, ri, ci, cc, anchor,
                                            f"表格r{ri + 1}c{ci + 1}")

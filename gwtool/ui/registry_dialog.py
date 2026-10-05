@@ -19,7 +19,19 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
 from ..core import registry
 from ..db import dao
 from . import theme
-from .widgets import EmptyState, ask, info, warn
+from .widgets import EmptyState, ask, info, make_chip_cell, warn
+
+
+def _status_chip_kind(status: str) -> str:
+    """发文状态 → 徽标配色（UI 方案 §6.6）：在办=主色描边、已印发=成功、归档=提示。"""
+    s = (status or "").strip()
+    if s == "已印发":
+        return "success"
+    if s == "已归档":
+        return "info"
+    if s in registry.STATUSES:          # 拟稿/核稿/签发 → 都在办
+        return "primary"
+    return "info"
 
 # 台账表格列：(字段名, 表头)
 TABLE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -46,6 +58,7 @@ class DispatchForm(QDialog):
         self.setWindowTitle("编辑发文登记" if record and record.id else "新增发文登记")
         self.setMinimumWidth(520)
         self._fields: dict[str, QWidget] = {}
+        self._field_labels: dict[str, str] = {}   # 字段键 → 中文标签（校验定位用）
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
@@ -61,7 +74,8 @@ class DispatchForm(QDialog):
         no_row.addWidget(btn_auto)
         form.addRow("发文字号：", no_row)
 
-        self._add_text(form, "title", "标题：", self.record.title, "公文标题（必填）")
+        self._add_text(form, "title", "标题：", self.record.title,
+                       "公文标题（必填）", required=True)
         self._add_combo(form, "doc_type", "文种：", registry.doc_types(),
                         self.record.doc_type, editable=True)
         self._add_text(form, "org", "发文机关：", self.record.org, "如 ××市人民政府办公室")
@@ -82,6 +96,14 @@ class DispatchForm(QDialog):
                         self.record.status)
         self._add_text(form, "remark", "备注：", self.record.remark)
 
+        # 表单级错误提示位（§7.3）：校验失败时在此显示红字原因，默认隐藏
+        self.lbl_form_error = QLabel("")
+        self.lbl_form_error.setWordWrap(True)
+        self.lbl_form_error.setStyleSheet(
+            f"color:{theme.DANGER};font-size:{theme.SMALL}pt;")
+        self.lbl_form_error.setVisible(False)
+        form.addRow("", self.lbl_form_error)
+
         btns = QHBoxLayout()
         btns.addStretch(1)
         btn_ok = QPushButton("保存")
@@ -97,18 +119,31 @@ class DispatchForm(QDialog):
         root.addLayout(btns)
 
     # ------------------------------------------------ 表单构件
+    def _record_label(self, key: str, label: str) -> None:
+        """记下字段的中文标签，供校验失败时定位字段（§7.3）。"""
+        self._field_labels[key] = label.rstrip("：").strip()
+
     def _add_text(self, form: QFormLayout, key: str, label: str,
-                  value: str, placeholder: str = "") -> None:
+                  value: str, placeholder: str = "",
+                  required: bool = False) -> None:
         ed = QLineEdit(value or "")
         if placeholder:
             ed.setPlaceholderText(placeholder)
         self._fields[key] = ed
-        form.addRow(label, ed)
+        self._record_label(key, label)
+        if required:
+            # §7.3：必填项在标签前标主色星号（富文本，不改字段名）
+            lbl = QLabel(f'<span style="color:{theme.PRIMARY}">*</span>'
+                         + label.rstrip("：") + "：")
+            form.addRow(lbl, ed)
+        else:
+            form.addRow(label, ed)
 
     def _add_int(self, form: QFormLayout, key: str, label: str, value: int) -> None:
         ed = QLineEdit(str(value or 0))
         ed.setPlaceholderText("0")
         self._fields[key] = ed
+        self._record_label(key, label)
         form.addRow(label, ed)
 
     def _add_combo(self, form: QFormLayout, key: str, label: str,
@@ -123,6 +158,7 @@ class DispatchForm(QDialog):
             else:
                 cb.setEditText(value)
         self._fields[key] = cb
+        self._record_label(key, label)
         form.addRow(label, cb)
 
     def _auto_number(self) -> None:
@@ -157,9 +193,28 @@ class DispatchForm(QDialog):
 
         problems = registry.validate(rec)
         if problems:
+            # §7.3：校验失败把相关输入框标红并在表单下给出原因，
+            # 弹窗保留（用户必须逐字读到问题），二者不互斥。
+            self._show_form_problems(problems)
             warn(self, "登记信息有误：\n" + "\n".join(f"· {p}" for p in problems))
             return
+        self.lbl_form_error.setVisible(False)
         self.accept()
+
+    def _show_form_problems(self, problems: list[str]) -> None:
+        """表单级错误提示：红字列出问题，并把可定位的字段标红（§7.3）。
+
+        字段定位按**构造时记录的中文标签**匹配校验消息（消息是中文、字段键
+        是英文，用键匹配永远匹配不上）。
+        """
+        self.lbl_form_error.setText("请修正：" + "；".join(problems[:3]))
+        self.lbl_form_error.setVisible(True)
+        joined = " ".join(problems)
+        for key, widget in self._fields.items():
+            label = self._field_labels.get(key, "")
+            if (label and label in joined) or key in joined:
+                widget.setStyleSheet(f"border:1px solid {theme.DANGER};")
+                widget.setToolTip("该字段有问题：" + "；".join(problems[:2]))
 
     def value(self) -> dao.Dispatch:
         return self.record
@@ -376,6 +431,8 @@ class RegistryDialog(QDialog, SourceOpenMixin):
 
     def _render_table(self) -> None:
         self.table.setRowCount(len(self._rows))
+        status_col = next((c for c, (key, _h) in enumerate(TABLE_COLUMNS)
+                           if key == "status"), -1)
         for r, rec in enumerate(self._rows):
             for c, (key, _header) in enumerate(TABLE_COLUMNS):
                 item = QTableWidgetItem(str(getattr(rec, key, "") or ""))
@@ -383,6 +440,13 @@ class RegistryDialog(QDialog, SourceOpenMixin):
                 if key in ("pages", "copies"):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(r, c, item)
+            # 状态列胶囊徽标（§6.6）：先清旧 widget，避免重渲染时残留
+            if status_col >= 0:
+                self.table.setCellWidget(r, status_col, None)
+                self.table.setCellWidget(
+                    r, status_col,
+                    make_chip_cell(getattr(rec, "status", "") or "未填写",
+                                   _status_chip_kind(getattr(rec, "status", ""))))
         self.table.resizeColumnsToContents()
         self._empty.set_visible(not self._rows)
         total = dao.count_dispatch()

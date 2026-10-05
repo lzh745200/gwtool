@@ -6,7 +6,7 @@ import re
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QFont, QImage, QPixmap, QShortcut, QKeySequence, \
-    QTextCursor, QTextDocument
+    QTextBlockFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QPushButton, QScrollArea, QTabWidget,
                                QTextBrowser, QTextEdit, QTreeWidget,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu,
 
 from ..core import toolbox
 from ..core.model import DocTree, HEADING, PARAGRAPH
+from . import theme
 from .correction_highlighter import CorrectionHighlighter
 
 _HEADING_RE = re.compile(
@@ -80,13 +81,23 @@ class EditorPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         self.tabs = QTabWidget()
+        # 保存状态指示（§3.1）：标签栏右端圆点，有未保存改动时才出现
+        self.dirty_dot = QLabel("●")
+        self.dirty_dot.setToolTip("有修改尚未保存（Ctrl+S 保存到资料库）")
+        self.dirty_dot.setStyleSheet(
+            f"color:{theme.PRIMARY};font-size:{theme.SMALL}pt;")
+        self.dirty_dot.setVisible(False)
+        self.tabs.setCornerWidget(self.dirty_dot, Qt.TopRightCorner)
 
         # 编辑页：左侧大纲 + 编辑器
         self.outline = QTreeWidget()
         self.outline.setHeaderLabel("大纲")
-        self.outline.setMaximumWidth(210)
+        # §6.2：大纲树宽 200px 吸左（固定宽，不与正文抢空间）
+        self.outline.setFixedWidth(200)
         self.outline.itemClicked.connect(self._jump_to_heading)
         self.editor = QTextEdit()
+        # §6.2：正文编辑区白底无边框（描边交给外层容器），故给对象名由 QSS 定位
+        self.editor.setObjectName("doc_editor")
         self.editor.setPlaceholderText(
             "还没有内容：先在左侧点「导入」把公文/Word/PDF 导入资料库，"
             "再双击材料打开编辑。\n"
@@ -261,7 +272,7 @@ class EditorPanel(QWidget):
     # ------------------------------------------------ 大纲
     def _on_text_changed(self):
         if not self._dirty:
-            self._dirty = True
+            self._set_dirty(True)
             self._update_status("● 修改未保存")
         self._outline_timer.start()
         self._preview_timer.start()
@@ -349,8 +360,9 @@ class EditorPanel(QWidget):
             return
         self.doc_id = doc_id
         self.editor.setPlainText(d.content_text)
+        self._apply_line_spacing()    # §6.2 正文行距 1.5
         self.clear_corrections()      # 换文档：旧波浪线的坐标已无意义
-        self._dirty = False
+        self._set_dirty(False)
         self._update_status(f"已打开：{d.title}")
         self.rebuild_outline()
         self.update_preview()
@@ -372,7 +384,7 @@ class EditorPanel(QWidget):
             self.save_to_db()
             return not self._dirty     # 另存被用户取消等情况则中断
         if clicked is b_discard:
-            self._dirty = False
+            self._set_dirty(False)
             return True
         return False
 
@@ -408,8 +420,8 @@ class EditorPanel(QWidget):
                 blocks_json=self._blocks_json_from_text(text)))
             if did > 0:
                 self.doc_id = did
-                self._dirty = False
-                self._update_status(f"已另存为新文档：{title}")
+                self._set_dirty(False)
+                self._update_status(f"已另存为新文档：{title}", kind="success")
                 self.content_modified.emit()
             else:
                 warn(self, "内容与资料库已有文档重复，未另存。")
@@ -428,8 +440,8 @@ class EditorPanel(QWidget):
         else:
             blocks_json = self._blocks_json_from_text(text)
         dao.update_document_content(self.doc_id, title, text, blocks_json)
-        self._dirty = False
-        self._update_status(f"已保存：{title}")
+        self._set_dirty(False)
+        self._update_status(f"已保存：{title}", kind="success")
 
     def _blocks_json_from_text(self, text: str) -> str:
         """按标题正则把纯文本重建为块结构（编辑器是纯文本形态，表格无法从
@@ -466,9 +478,39 @@ class EditorPanel(QWidget):
         dao.add_snapshot(self.doc_id, "自动快照", text, reason="auto")
         self._update_status("已自动保存快照 ● 修改未保存")
 
-    def _update_status(self, text: str = ""):
+    def _set_dirty(self, flag: bool) -> None:
+        """统一维护"未保存"状态与标签栏角标圆点（UI 方案 §3.1）。"""
+        self._dirty = bool(flag)
+        dot = getattr(self, "dirty_dot", None)
+        if dot is not None:
+            dot.setVisible(bool(flag))
+
+    def _apply_line_spacing(self) -> None:
+        """正文行距 1.5（UI 方案 §6.2）。
+
+        行高只能设在文档层（QSS 管不到 QTextEdit 的行高），故在每次整篇
+        载入后统一套一次；用 mergeBlockFormat 保留其它块格式。
+        """
+        fmt = QTextBlockFormat()
+        # PySide6 的枚举成员不是 int 子类：必须取 .value，否则 TypeError
+        fmt.setLineHeight(150, QTextBlockFormat.ProportionalHeight.value)
+        cursor = self.editor.textCursor()
+        cursor.select(QTextCursor.Document)
+        cursor.mergeBlockFormat(fmt)
+        cursor.clearSelection()
+        self.editor.setTextCursor(cursor)
+
+    def _update_status(self, text: str = "", kind: str = ""):
         n = len(re.sub(r"\s", "", self.editor.toPlainText()))
         self.lbl_status.setText(f"{text}（{n} 字）" if text else f"当前 {n} 字")
+        # §6.2：保存成功用 SUCCESS 色闪现 2 秒（非模态，不弹窗）
+        color = {"success": theme.SUCCESS, "warn": theme.WARN,
+                 "danger": theme.DANGER}.get(kind, theme.MUTED)
+        self.lbl_status.setStyleSheet(f"color:{color};")
+        if kind == "success":
+            QTimer.singleShot(
+                2000,
+                lambda: self.lbl_status.setStyleSheet(f"color:{theme.MUTED};"))
 
     # ------------------------------------------------ 文秘工具箱右键
     def _editor_menu(self, pos):

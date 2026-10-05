@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
                                QFormLayout, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QPushButton, QScrollArea,
@@ -21,7 +22,23 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
 
 from ..core import receive
 from ..db import dao
-from .widgets import EmptyState, ask, info, warn
+from . import theme
+from .widgets import EmptyState, ask, info, make_chip_cell, warn
+
+
+def _status_chip_kind(status: str) -> str:
+    """状态 → 徽标配色（UI 方案 §6.6）：在办=主色描边、办结=成功、归档=提示。
+
+    纯函数，便于单测；未知/空状态按提示色（不猜业务含义）。
+    """
+    s = (status or "").strip()
+    if s in ("已办结",):
+        return "success"
+    if s in ("已归档",):
+        return "info"
+    if s in receive.STATUSES:          # 签收/拟办/批办/承办 → 都在办
+        return "primary"
+    return "info"
 
 # 台账列表展示的列（顺序即列顺序）：只挑经办人最常看的几列，
 # 全 25 列挤在表格里反而看不清。完整字段走导出。
@@ -63,6 +80,7 @@ class ReceiveForm(QDialog):
         self.setMinimumWidth(560)
         self.setMinimumHeight(520)
         self._fields: dict[str, QWidget] = {}
+        self._field_labels: dict[str, str] = {}   # 字段键 → 中文标签（校验定位用）
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
@@ -81,7 +99,8 @@ class ReceiveForm(QDialog):
         self._add_text(form, "incoming_no", "来文字号：", self.record.incoming_no,
                        "如 ×政发〔2026〕12号（可留空）",
                        tip="来文原件上的发文字号，照抄即可；用于检索与引用")
-        self._add_text(form, "title", "标题：", self.record.title, "来文标题")
+        self._add_text(form, "title", "标题：", self.record.title, "来文标题",
+                       required=True)
         self._add_combo(form, "doc_type", "文种：", receive.doc_types_available(),
                         self.record.doc_type, editable=True)
         self._add_text(form, "from_org", "来文机关：", self.record.from_org,
@@ -128,6 +147,14 @@ class ReceiveForm(QDialog):
                        "YYYY-MM-DD")
         self._add_text(form, "remark", "备注：", self.record.remark)
 
+        # 表单级错误提示位（§7.3）：校验失败显示红字原因，默认隐藏
+        self.lbl_form_error = QLabel("")
+        self.lbl_form_error.setWordWrap(True)
+        self.lbl_form_error.setStyleSheet(
+            f"color:{theme.DANGER};font-size:{theme.SMALL}pt;")
+        self.lbl_form_error.setVisible(False)
+        form.addRow("", self.lbl_form_error)
+
         # 字段较多（24 项），不套滚动区在小屏笔记本上会超出屏幕高度
         holder = QWidget()
         holder.setLayout(form)
@@ -150,14 +177,26 @@ class ReceiveForm(QDialog):
         root.addLayout(btns)
 
     # ------------------------------------------------ 表单构件
+    def _record_label(self, key: str, label: str) -> None:
+        """记下字段的中文标签，供校验失败时定位字段（§7.3）。"""
+        self._field_labels[key] = label.rstrip("：").strip()
+
     def _add_text(self, form: QFormLayout, key: str, label: str,
-                  value: str, placeholder: str = "", tip: str = "") -> None:
+                  value: str, placeholder: str = "", tip: str = "",
+                  required: bool = False) -> None:
         ed = QLineEdit(value or "")
         if placeholder:
             ed.setPlaceholderText(placeholder)
         _attach_tip(ed, tip)
         self._fields[key] = ed
-        form.addRow(label, ed)
+        self._record_label(key, label)
+        if required:
+            # §7.3：必填项在标签前标主色星号
+            lbl = QLabel(f'<span style="color:{theme.PRIMARY}">*</span>'
+                         + label.rstrip("：") + "：")
+            form.addRow(lbl, ed)
+        else:
+            form.addRow(label, ed)
 
     def _add_int(self, form: QFormLayout, key: str, label: str, value: int,
                  tip: str = "") -> None:
@@ -165,6 +204,7 @@ class ReceiveForm(QDialog):
         ed.setPlaceholderText("0")
         _attach_tip(ed, tip)
         self._fields[key] = ed
+        self._record_label(key, label)
         form.addRow(label, ed)
 
     def _add_combo(self, form: QFormLayout, key: str, label: str,
@@ -181,6 +221,7 @@ class ReceiveForm(QDialog):
             else:
                 cb.setEditText(value)
         self._fields[key] = cb
+        self._record_label(key, label)
         form.addRow(label, cb)
 
     def _auto_number(self) -> None:
@@ -210,8 +251,17 @@ class ReceiveForm(QDialog):
 
         problems = receive.validate(rec)
         if problems:
+            # §7.3：校验失败标红相关字段并在表单下给出原因；弹窗保留
+            self.lbl_form_error.setText("请修正：" + "；".join(problems[:3]))
+            self.lbl_form_error.setVisible(True)
+            joined = " ".join(problems)
+            for key, widget in self._fields.items():
+                label = self._field_labels.get(key, "")
+                if (label and label in joined) or key in joined:
+                    widget.setStyleSheet(f"border:1px solid {theme.DANGER};")
             warn(self, "登记信息有误：\n" + "\n".join(f"· {p}" for p in problems))
             return
+        self.lbl_form_error.setVisible(False)
         self.accept()
 
     def value(self) -> dao.Receive:
@@ -346,16 +396,34 @@ class ReceiveDialog(QDialog):
 
     def _render_table(self) -> None:
         self.tbl.setRowCount(len(self._rows))
+        status_col = next((j for j, (key, _l) in enumerate(_COLUMNS)
+                           if key == "status"), -1)
         for i, r in enumerate(self._rows):
             values = {"reg_no": r.reg_no, "incoming_no": r.incoming_no,
                       "title": r.title, "from_org": r.from_org,
                       "receive_date": r.receive_date, "due_date": r.due_date,
                       "status": r.status, "handler_dept": r.handler_dept}
+            overdue = receive.is_overdue(r)
             for j, (key, _label) in enumerate(_COLUMNS):
                 item = QTableWidgetItem(str(values.get(key, "") or ""))
-                if key == "due_date" and receive.is_overdue(r):
+                if key == "due_date" and overdue:
                     item.setText((r.due_date or "") + "（已逾期）")
+                    # 逾期行：DANGER_BG 底 + 到期日加粗红字（§6.6）
+                    item.setForeground(QColor(theme.DANGER))
+                    f = item.font()
+                    f.setBold(True)
+                    item.setFont(f)
+                if overdue:
+                    item.setBackground(QColor(theme.DANGER_BG))
                 self.tbl.setItem(i, j, item)
+            # 状态列胶囊徽标（§6.6）：表格单元格必须**先清旧 widget**，
+            # 否则重渲染时旧徽标会残留在上一行的位置上。
+            if status_col >= 0:
+                self.tbl.setCellWidget(i, status_col, None)
+                self.tbl.setCellWidget(
+                    i, status_col,
+                    make_chip_cell(r.status or "未填写",
+                                   _status_chip_kind(r.status)))
         self.lbl_count.setText(f"共 {len(self._rows)} 条")
         self._empty.set_visible(not self._rows)
 
@@ -499,7 +567,7 @@ class ReceiveDialog(QDialog):
 
         head = (f"<p><b>合计</b>：{summ['total']} 件 · 总份数 {summ['copies']} · "
                 f"总页数 {summ['pages']} · 待办 {summ['pending']} 件 · "
-                f"<span style='color:#c0392b'>已逾期 {summ['overdue']} 件</span></p>")
+                f"<span style='color:{theme.DANGER}'>已逾期 {summ['overdue']} 件</span></p>")
         self.lbl_stats.setText(
             head
             + block("按来文机关", summ["by_org"])

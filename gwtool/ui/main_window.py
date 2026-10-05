@@ -1184,11 +1184,12 @@ class MainWindow(QMainWindow):
 
     def _restore_snapshot(self, content: str):
         self.editor.replace_document_text(content)
-        self.editor._dirty = True
+        self.editor._set_dirty(True)      # 同步标签栏"未保存"圆点（§3.1）
         self.editor._update_status("● 已回滚到历史快照（未保存）")
 
     def open_security(self):
-        dlg = SecurityDialog(self)
+        dlg = SecurityDialog(self, on_restore=self._do_restore,
+                             on_recycle=self.open_recycle_bin)
         dlg.exec()
         # 设置里可能改过「定时备份间隔」，关闭后重读并重启定时器，
         # 否则要重启程序才生效（用户会以为改了没用）。
@@ -1377,7 +1378,9 @@ class MainWindow(QMainWindow):
                                           QLineEdit.Password)
             if not ok:
                 return
-        if not ask(self, "恢复将覆盖当前全部数据（恢复前会自动再备份一次），确定继续？"):
+        if not ask(self, "恢复将覆盖当前全部数据（恢复前会自动再备份一次）。\n"
+                         "覆盖后当前库的内容将不可找回。",
+                   ok_text="恢复并覆盖当前资料"):
             return
         # 恢复放后台线程执行（解包 + 自动备份 + 还原附件都是秒级，且最怕
         # "用户以为死机去强杀"——恢复写库到一半被中断比慢几秒危险得多）。

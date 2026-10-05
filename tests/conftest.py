@@ -83,6 +83,23 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_confirm(monkeypatch):
+    """全局屏蔽"自定义确认按钮"的确认框（`ask(..., ok_text=...)`）。
+
+    为什么必须全局：该分支走 ``QMessageBox.exec()``，而 QMessageBox 继承
+    QDialog——各测试文件对 ``QDialog.exec`` 的屏蔽方式并不一致（有的根本没
+    屏蔽），漏掉的地方会**真的弹出模态框**，在无人值守环境下把整个测试会话
+    挂死（与 QInputDialog/QFileDialog 静态方法的老问题同源）。
+
+    统一返回 True，与既有 ``QMessageBox.question → Yes`` 的屏蔽语义保持一致：
+    测试里"危险操作的确认"照常成立，不会让依赖"确认后确实执行"的用例变成
+    假失败。
+    """
+    from gwtool.ui import widgets as _widgets
+    monkeypatch.setattr(_widgets, "_ask_custom", lambda *a, **k: True)
+
+
 @pytest.fixture()
 def wait_bg(qapp):
     """等后台 worker 收工，并驱动事件循环把结果信号投递给槽函数。

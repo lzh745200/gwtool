@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog,
 
 from ..core import attachments
 from ..db import dao
+from . import theme
 from .widgets import EmptyState, ThreadSafeDialog, ask, info, warn
 
 # 附件表格列（右对齐与否在 _set_cell 调用处指定）
@@ -292,6 +293,8 @@ class RecycleBinDialog(QDialog):
                            ("清空回收站", self.empty_bin)):
             btn = QPushButton(text)
             btn.clicked.connect(slot)
+            if text != "恢复":          # §6.8：不可逆操作用 DANGER 描边
+                btn.setStyleSheet(theme.danger_button_style())
             ops.addWidget(btn)
         root.addLayout(ops)
 
@@ -359,7 +362,8 @@ class RecycleBinDialog(QDialog):
             warn(self, "请先选中要彻底删除的材料（可多选）。")
             return
         if not ask(self, f"彻底删除选中的 {len(ids)} 篇材料？\n"
-                         "文档正文、历史快照与附件文件都会一并删除，不可恢复。"):
+                         "文档正文、历史快照与附件文件都会一并删除，不可恢复。",
+                   ok_text=f"彻底删除 {len(ids)} 篇"):
             return
         self._purge(ids)
 
@@ -373,7 +377,8 @@ class RecycleBinDialog(QDialog):
             info(self, "回收站已经是空的。")
             return
         if not ask(self, f"清空回收站将彻底删除 {len(ids)} 篇材料"
-                         "（含历史快照与附件文件），不可恢复。确定继续？"):
+                         "（含历史快照与附件文件），不可恢复。",
+                   ok_text=f"清空并删除 {len(ids)} 篇"):
             return
         self._purge(ids)
 
