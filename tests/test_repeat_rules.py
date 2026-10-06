@@ -185,7 +185,16 @@ def _corpus_files():
             capture_output=True, encoding="utf-8", errors="replace",
             check=True).stdout
         names = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        files = [ROOT / n for n in names if (ROOT / n).is_file()]
+
+        def _resolve(n: str):
+            """git 索引路径优先；根目录被并行会话重组进 doc/ 时按名回退。"""
+            p = ROOT / n
+            if p.is_file():
+                return p
+            alt = ROOT / "doc" / Path(n).name
+            return alt if alt.is_file() else None
+
+        files = [p for p in (_resolve(n) for n in names) if p]
         if files:
             return files, names
     except (OSError, subprocess.SubprocessError):

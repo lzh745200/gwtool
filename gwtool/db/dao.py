@@ -295,6 +295,11 @@ def add_document(doc: Document) -> int:
         return _restore_deleted(conn, int(dup["id"]), category_id=doc.category_id)
     if not doc.word_count:
         doc.word_count = len(doc.content_text)
+    if doc.blocks_json is None:
+        # blocks_json 有 NOT NULL 约束：None 直接 INSERT 会抛 IntegrityError，
+        # 被下方兜底吞成 -1，调用方会误以为是"内容重复"。纯文本导入统一
+        # 规范化为空数组，段落索引由 derive_blocks 按 content_text 兜底切段。
+        doc.blocks_json = "[]"
     if doc.simhash is None:
         from ..core.simhash import simhash as _simhash, to_db
         doc.simhash = to_db(_simhash(doc.content_text))
