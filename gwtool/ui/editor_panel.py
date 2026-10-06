@@ -77,6 +77,15 @@ class EditorPanel(QWidget):
         self._preview_dirty = False
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+    def stop_auto_snapshot(self) -> None:
+        """停止自动快照定时器（主窗口 closeEvent 调用）。
+
+        退出流程里的等线程 / 退出备份 / 提示框都会让事件循环继续转，180 秒
+        周期的自动快照若恰好在此刻到点，就会与退出自动备份**并发写同一个库**
+        （SQLite 写-写冲突）。关窗时先把定时器停掉即可，代价为零。
+        """
+        self._auto_timer.stop()
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -91,6 +100,8 @@ class EditorPanel(QWidget):
 
         # 编辑页：左侧大纲 + 编辑器
         self.outline = QTreeWidget()
+        # §6.2：SURFACE 底、无边框由 QSS 按对象名施加（不写死色值）
+        self.outline.setObjectName("outline")
         self.outline.setHeaderLabel("大纲")
         # §6.2：大纲树宽 200px 吸左（固定宽，不与正文抢空间）
         self.outline.setFixedWidth(200)
@@ -502,15 +513,25 @@ class EditorPanel(QWidget):
 
     def _update_status(self, text: str = "", kind: str = ""):
         n = len(re.sub(r"\s", "", self.editor.toPlainText()))
-        self.lbl_status.setText(f"{text}（{n} 字）" if text else f"当前 {n} 字")
-        # §6.2：保存成功用 SUCCESS 色闪现 2 秒（非模态，不弹窗）
+        base = f"{text}（{n} 字）" if text else f"当前 {n} 字"
+        self.lbl_status.setText(base)
         color = {"success": theme.SUCCESS, "warn": theme.WARN,
                  "danger": theme.DANGER}.get(kind, theme.MUTED)
         self.lbl_status.setStyleSheet(f"color:{color};")
         if kind == "success":
-            QTimer.singleShot(
-                2000,
-                lambda: self.lbl_status.setStyleSheet(f"color:{theme.MUTED};"))
+            # §6.2：保存后状态栏右侧闪现 SUCCESS 圆点 2 秒（非模态，不弹窗）。
+            # 回调先比对文本：若这 2 秒内又来了新状态，不能把新状态一起清掉。
+            shown = "● " + base
+            self.lbl_status.setText(shown)
+
+            def _fade():
+                try:
+                    if self.lbl_status.text() == shown:
+                        self.lbl_status.setText(base)
+                        self.lbl_status.setStyleSheet(f"color:{theme.MUTED};")
+                except RuntimeError:
+                    pass      # 面板已销毁，2 秒后的回调无事可做
+            QTimer.singleShot(2000, _fade)
 
     # ------------------------------------------------ 文秘工具箱右键
     def _editor_menu(self, pos):

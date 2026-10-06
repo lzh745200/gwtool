@@ -25,7 +25,7 @@ from ..core.template import DocTemplate, default_template
 from ..db import dao
 from ..paths import export_dir
 from . import theme
-from .widgets import StepIndicator, ThreadSafeDialog, ask, info
+from .widgets import Banner, StepIndicator, ThreadSafeDialog, ask, info
 from .workers import BookletWorker, CompileWorker, PdfRenderWorker, _close_thread_conn
 
 log = logs.get_logger("compile_wizard")
@@ -434,6 +434,11 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             "在成稿末尾附一张表，列出每份材料的标题、原文件名、导入时间与分类")
         v.addWidget(self.chk_sources)
 
+        # 完成横幅（§6.5 第 3 步）：产物份数用 SUCCESS_BG 横幅给出结论，
+        # 未生成时不占位（Banner 自身 hide()）。
+        self.banner = Banner()
+        v.addWidget(self.banner)
+
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         v.addWidget(self.progress)
@@ -500,6 +505,12 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         if not any_output:
             info(self, "请至少勾选一种输出。")
             return
+        # 防重入兜底：按钮虽已 disable，但 docx / pdf / 批量三条分支各自新建
+        # worker，统一在这里再拦一道 —— 旧线程仍在写同一输出文件时被覆盖
+        # 引用会失去句柄（关窗时等不到它）。
+        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            info(self, "上一次生成仍在进行，请稍候。")
+            return
         # 防静默覆盖：同名输出已存在时追加时间戳
         if ((self.chk_docx.isChecked() and Path(stem + ".docx").exists())
                 or (self.chk_pdf.isChecked() and Path(stem + ".pdf").exists())):
@@ -548,13 +559,26 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             progress = Signal(int, int)
             done = Signal(list, list)      # 成功路径, 失败清单[(标题, 原因)]
             error = Signal(str)
+            cancelled = Signal()
+
+            def __init__(self_inner, *args):
+                super().__init__(*args)
+                self_inner._stop = False
+
+            def stop(self_inner):
+                """协作式中断：在下一篇开始前停止（单份 docx 生成不可中断）。"""
+                self_inner._stop = True
 
             def run(self_inner):
                 try:
                     paths, failures = batch_compile_each(
                         ids, tpl, str(outdir), cover=cover,
-                        progress_cb=lambda i, n: self_inner.progress.emit(i, n))
-                    self_inner.done.emit(paths, failures)
+                        progress_cb=lambda i, n: self_inner.progress.emit(i, n),
+                        cancelled=lambda: self_inner._stop)
+                    if self_inner._stop:
+                        self_inner.cancelled.emit()
+                    else:
+                        self_inner.done.emit(paths, failures)
                 except Exception as exc:
                     self_inner.error.emit(str(exc))
                 finally:
@@ -571,6 +595,11 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         def on_prog(i, n):
             self.progress.setValue(i)
             self.lbl_result.setText(f"批量生成中 {i}/{n}…")
+
+        def on_cancelled():
+            self.progress.setVisible(False)
+            self.btn_start.setEnabled(True)
+            self.lbl_result.setText("已取消批量生成（已完成的部分保留在输出目录）。")
 
         def on_done(paths, failures):
             self.progress.setVisible(False)
@@ -606,6 +635,7 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self._batch_worker.progress.connect(on_prog)
         self._batch_worker.done.connect(on_done)
         self._batch_worker.error.connect(on_err)
+        self._batch_worker.cancelled.connect(on_cancelled)
         self._batch_worker.start()
 
     def _after_docx(self, path: str, tpl: DocTemplate, ids):
@@ -647,6 +677,16 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             return
         self._products.append((path, Path(path).stem or "汇编产物"))
         self._add_product_card(path, Path(path).stem or "汇编产物")
+        self._show_done_banner()
+
+    def _show_done_banner(self) -> None:
+        """§6.5：汇编完成后的成功横幅（SUCCESS_BG + 产物份数徽标）。"""
+        banner = getattr(self, "banner", None)
+        if banner is None:
+            return
+        n = len(self._products)
+        banner.show_result("success", f"汇编完成：共生成 {n} 份产物",
+                           [(f"{n} 份", "success")])
 
     # ------------------------------------------------ 产物卡片（§6.5 / §11.3）
     def _clear_product_cards(self) -> None:
@@ -660,6 +700,9 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             if w is not None:
                 w.deleteLater()
         self.products_area.setVisible(False)
+        banner = getattr(self, "banner", None)
+        if banner is not None:
+            banner.clear()          # 新一轮：收起上一轮的成功横幅（§6.5）
 
     def _add_product_card(self, path: str, title: str) -> None:
         """给一份产物加一张卡片：标题 + 路径 + 打开所在目录。

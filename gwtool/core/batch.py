@@ -44,12 +44,15 @@ def safe_filename(name: str) -> str:
 
 def batch_compile_each(doc_ids: list[int], template: DocTemplate, out_dir: str,
                        cover: dict | None = None, progress_cb=None,
+                       cancelled=None,
                        ) -> tuple[list[str], list[tuple[str, str]]]:
     """对每份材料独立生成 docx（同一模板）。
 
     返回 (成功路径列表, 失败清单 [(材料标题, 原因)])。
     cover: 可选 {title,org,date} —— 每份输出使用材料自身标题作封面标题。
     progress_cb(i, n) 在第 i 份完成或失败后回调，与实际进度同步。
+    cancelled: 可选无参 callable，返回真值时在**下一篇开始前**停止（协作式），
+        已完成的部分照常返回 —— 单份 docx 生成不可中断，只能按篇落点。
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -57,6 +60,8 @@ def batch_compile_each(doc_ids: list[int], template: DocTemplate, out_dir: str,
     failures: list[tuple[str, str]] = []
     total = len(doc_ids)
     for i, did in enumerate(doc_ids, 1):
+        if cancelled is not None and cancelled():
+            break
         d = dao.get_document(did)
         title = d.title if d else f"文档{did}"
         try:
@@ -153,7 +158,7 @@ def batch_correct(category_id: int | None = None,
                   plans: list[DocCorrection] | None = None,
                   min_confidence: float = 0.0,
                   categories: tuple[str, ...] = (),
-                  progress_cb=None) -> BatchCorrectResult:
+                  progress_cb=None, cancelled=None) -> BatchCorrectResult:
     """按分类批量纠错：先出命中预览，调用方确认后才真正写回。
 
     apply=False（预览，默认）：扫描 category_id（None=全部分类）或 doc_ids
@@ -167,20 +172,23 @@ def batch_correct(category_id: int | None = None,
     界面侧建议取 0.8 左右 —— 精标词库≥0.85、上下文与标点规则 0.85~0.95、
     程序生成的混淆对 0.55、机构沿革对照 0.7。
     progress_cb(i, total) 每处理完一篇回调一次，供后台线程回报进度；
+    cancelled: 无参 callable，返回真值时在下一篇开始前停止（协作式），
+        已扫描/已写回的部分保留在返回值里 —— 单篇处理不可中断。
     全库扫描务必放在工作线程里跑，别在 UI 线程同步调用。
     """
     if apply:
         if not plans:
             raise ValueError("执行纠错需要先预览得到命中计划（plans 为空）")
-        return _apply_plans(list(plans), progress_cb=progress_cb)
+        return _apply_plans(list(plans), progress_cb=progress_cb,
+                            cancelled=cancelled)
     return _scan(category_id=category_id, doc_ids=doc_ids,
                  min_confidence=min_confidence, categories=tuple(categories or ()),
-                 progress_cb=progress_cb)
+                 progress_cb=progress_cb, cancelled=cancelled)
 
 
 def _scan(category_id: int | None, doc_ids: list[int] | None,
           min_confidence: float, categories: tuple[str, ...],
-          progress_cb=None) -> BatchCorrectResult:
+          progress_cb=None, cancelled=None) -> BatchCorrectResult:
     """预览阶段：惰性逐篇取正文跑纠错，只收集命中，不动数据库。"""
     from .corrector import check_text
 
@@ -192,6 +200,8 @@ def _scan(category_id: int | None, doc_ids: list[int] | None,
     wanted = set(categories)
     for i, row in enumerate(
             dao.iter_documents_content(category_id=category_id, doc_ids=doc_ids), 1):
+        if cancelled is not None and cancelled():
+            break
         title = row["title"] or f"文档{row['id']}"
         try:
             text = row["content_text"] or ""
@@ -409,11 +419,14 @@ def _apply_to_blocks(blocks_json: str, old_text: str,
         return blocks_json
 
 
-def _apply_plans(plans: list[DocCorrection], progress_cb=None) -> BatchCorrectResult:
+def _apply_plans(plans: list[DocCorrection], progress_cb=None,
+                 cancelled=None) -> BatchCorrectResult:
     """执行阶段：按预览计划逐篇写回（写库走 DAO，FTS 索引随之同步）。"""
     result = BatchCorrectResult()
     total = len(plans)
     for i, plan in enumerate(plans, 1):
+        if cancelled is not None and cancelled():
+            break
         title = plan.title or f"文档{plan.doc_id}"
         try:
             if not plan.hits:

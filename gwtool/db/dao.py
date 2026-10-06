@@ -298,13 +298,25 @@ def add_document(doc: Document) -> int:
     if doc.simhash is None:
         from ..core.simhash import simhash as _simhash, to_db
         doc.simhash = to_db(_simhash(doc.content_text))
-    cur = conn.execute(
-        "INSERT INTO documents(title,content_text,blocks_json,file_path,file_type,"
-        "tags,category_id,text_hash,word_count,import_time,updated_time,simhash)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (doc.title, doc.content_text, doc.blocks_json, doc.file_path, doc.file_type,
-         doc.tags, doc.category_id, doc.text_hash, doc.word_count, now(), now(),
-         doc.simhash))
+    try:
+        cur = conn.execute(
+            "INSERT INTO documents(title,content_text,blocks_json,file_path,file_type,"
+            "tags,category_id,text_hash,word_count,import_time,updated_time,simhash)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (doc.title, doc.content_text, doc.blocks_json, doc.file_path, doc.file_type,
+             doc.tags, doc.category_id, doc.text_hash, doc.word_count, now(), now(),
+             doc.simhash))
+    except sqlite3.IntegrityError:
+        # 并发竞态：另一线程恰在本函数的查重 SELECT 与这条 INSERT 之间提交了
+        # 同 text_hash 文档（查重与插入不在同一事务，见下方注释）。唯一索引
+        # 拦下重复是**正确**行为，按"内容重复"语义返回 -1；同时回滚悬挂
+        # 事务，否则该连接后续所有语句都会因 "cannot start a transaction
+        # within a transaction" / 持有写锁而级联失败。
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return -1
     doc_id = int(cur.lastrowid)
     _fts_update_documents(doc_id, doc.title, doc.content_text)
     _paragraph_update(doc_id, doc.blocks_json, doc.content_text,

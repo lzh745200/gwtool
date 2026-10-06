@@ -8,7 +8,8 @@ from ..model import Block, DocTree, HEADING, LIST_ITEM, PARAGRAPH
 
 
 def parse_md(path: str) -> DocTree:
-    text = open(path, "r", encoding="utf-8", errors="replace").read()
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
     return _md_text_to_tree(text)
 
 
@@ -55,7 +56,8 @@ def _clean_md(s: str) -> str:
 
 
 def parse_html(path: str) -> DocTree:
-    html = open(path, "r", encoding="utf-8", errors="replace").read()
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        html = fh.read()
     return html_text_to_tree(html)
 
 

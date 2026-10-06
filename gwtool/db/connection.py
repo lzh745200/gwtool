@@ -29,6 +29,15 @@ _db_file: Path | None = None
 _CONN_LOCK = threading.Lock()
 _OPEN_CONNS: dict[int, threading.Thread] = {}
 
+# 连接初始化串行锁：SQLite 的 busy_timeout 对"写事务升级"场景**不生效**
+# （另一端持写锁时立即返回 SQLITE_BUSY，不进入忙等）。实测两个线程同时首次
+# 连接会在 init_schema 的 `PRAGMA user_version=N`（写操作）处直接抛
+# "database is locked"（13~35ms 内失败），且只要同一时刻有另一线程持着
+# 未提交写事务就必然触发。同进程内用一把进程锁串行化
+# 「建连接 + PRAGMA + init_schema」整段即可根治；跨进程多实例仍由
+# busy_timeout 与 SQLite 自身锁兜底。
+_INIT_LOCK = threading.Lock()
+
 
 def live_connection_threads() -> list[str]:
     """除当前线程外，仍持有打开连接的线程名（已退出的线程即时剔除）。
@@ -63,6 +72,11 @@ def configure(db_file: Path) -> None:
 
     强制关闭当前线程已有连接，防止切换目标文件后仍复用旧连接
     （跨测试/跨配置数据泄漏的根源）。
+
+    无锁说明：本函数只在启动路径与测试夹具中调用（单线程时点），不会与
+    其它线程的 get_conn 交织；而 `_db_file` 的赋值在 CPython 下是原子的，
+    故不加锁，仅保持"先关旧连接、再换路径"的既定顺序（顺序颠倒会让旧连接
+    继续指向新文件）。
     """
     global _db_file
     close_current_thread()
@@ -77,24 +91,26 @@ def get_conn() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
         _db_file.parent.mkdir(parents=True, exist_ok=True)
-        _pre_migrate_backup()
-        conn = sqlite3.connect(str(_db_file), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        try:
-            init_schema(conn)
-        except Exception:
-            # 初始化失败（库版本过新 / 迁移失败）：连接必须在这里关掉 ——
-            # 它既没登记进 _local，也不会被 close_current_thread 收走，
-            # 每次重试都会泄漏一个句柄与一对 -wal/-shm 文件。
+        # 整段初始化持锁（理由见 _INIT_LOCK 注释）
+        with _INIT_LOCK:
+            _pre_migrate_backup()
+            conn = sqlite3.connect(str(_db_file), timeout=30)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             try:
-                conn.close()
-            except sqlite3.Error:
-                pass
-            raise
-        _local.conn = conn
-        _register_conn()
+                init_schema(conn)
+            except Exception:
+                # 初始化失败（库版本过新 / 迁移失败）：连接必须在这里关掉 ——
+                # 它既没登记进 _local，也不会被 close_current_thread 收走，
+                # 每次重试都会泄漏一个句柄与一对 -wal/-shm 文件。
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                raise
+            _local.conn = conn
+            _register_conn()
     return conn
 
 

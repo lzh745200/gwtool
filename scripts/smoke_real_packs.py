@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(r"C:/gwtool")
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gwtool import paths

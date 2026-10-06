@@ -337,6 +337,7 @@ class RegistryDialog(QDialog, SourceOpenMixin):
         ).mount(self.table)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(30)   # §6.6 行高 30px
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemDoubleClicked.connect(lambda _i: self.edit_selected())

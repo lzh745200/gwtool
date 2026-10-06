@@ -338,11 +338,17 @@ class _BulkReplaceWorker(QThread):
     progress = Signal(int, int)
     done = Signal(list)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, doc_ids, find, repl, use_regex, parent=None):
         super().__init__(parent)
         self.doc_ids, self.find, self.repl, self.use_regex = \
             doc_ids, find, repl, use_regex
+        self._stop = False
+
+    def stop(self):
+        """协作式中断：在下一篇开始前停止（单篇替换不可中断）。"""
+        self._stop = True
 
     def run(self):
         # 整段包 try：老实现没有异常通路，任何一次 dao 调用抛错
@@ -375,6 +381,9 @@ class _BulkReplaceWorker(QThread):
             return
         results = []
         for i, did in enumerate(self.doc_ids):
+            if self._stop:
+                self.cancelled.emit()
+                return
             self.progress.emit(i + 1, len(self.doc_ids))
             d = dao.get_document(did)
             if not d:
@@ -619,7 +628,13 @@ class BulkReplaceDialog(ThreadSafeDialog, QDialog):
         self._worker.progress.connect(self.progress.setValue)
         self._worker.done.connect(self._done)
         self._worker.failed.connect(self._failed)
+        self._worker.cancelled.connect(self._cancelled)
         self._worker.start()
+
+    def _cancelled(self):
+        """用户在执行中途关闭对话框：worker 协作退出，这里只做 UI 复位。"""
+        self.progress.setVisible(False)
+        self.btn_apply.setEnabled(True)
 
     def _failed(self, msg: str):
         """替换失败：必须复位按钮/进度条，否则对话框永久卡在忙碌态。"""
@@ -667,12 +682,18 @@ class _BatchScanWorker(QThread):
     progress = Signal(int, int)
     done = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, category_id, min_conf, categories, parent=None):
         super().__init__(parent)
         self.category_id = category_id
         self.min_conf = min_conf
         self.categories = categories
+        self._stop = False
+
+    def stop(self):
+        """协作式中断：在下一篇开始前停止（单篇纠错不可中断）。"""
+        self._stop = True
 
     def run(self):
         from ..core import batch
@@ -680,8 +701,12 @@ class _BatchScanWorker(QThread):
             res = batch.batch_correct(
                 category_id=self.category_id, min_confidence=self.min_conf,
                 categories=self.categories,
-                progress_cb=lambda i, n: self.progress.emit(i, n))
-            self.done.emit(res)
+                progress_cb=lambda i, n: self.progress.emit(i, n),
+                cancelled=lambda: self._stop)
+            if self._stop:
+                self.cancelled.emit()
+            else:
+                self.done.emit(res)
         except Exception as exc:
             traceback.print_exc()
             self.failed.emit(errmsg.friendly(exc, action="批量纠错"))
@@ -697,18 +722,28 @@ class _BatchApplyWorker(QThread):
     progress = Signal(int, int)
     done = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, plans, parent=None):
         super().__init__(parent)
         self.plans = plans
+        self._stop = False
+
+    def stop(self):
+        """协作式中断：在下一篇开始前停止（单篇写回不可中断）。"""
+        self._stop = True
 
     def run(self):
         from ..core import batch
         try:
             res = batch.batch_correct(
                 apply=True, plans=self.plans,
-                progress_cb=lambda i, n: self.progress.emit(i, n))
-            self.done.emit(res)
+                progress_cb=lambda i, n: self.progress.emit(i, n),
+                cancelled=lambda: self._stop)
+            if self._stop:
+                self.cancelled.emit()
+            else:
+                self.done.emit(res)
         except Exception as exc:
             traceback.print_exc()
             self.failed.emit(errmsg.friendly(exc, action="批量纠错"))
@@ -831,6 +866,8 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
         self._scan_worker.progress.connect(self._on_progress)
         self._scan_worker.done.connect(self._on_preview_done)
         self._scan_worker.failed.connect(self._on_failed)
+        self._scan_worker.cancelled.connect(
+            lambda: (self._reset_buttons(), self.lbl.setText("已取消扫描。")))
         self._scan_worker.start()
 
     def _on_progress(self, i: int, total: int):
@@ -920,6 +957,9 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
         self._apply_worker.progress.connect(self._on_progress)
         self._apply_worker.done.connect(self._on_apply_done)
         self._apply_worker.failed.connect(self._on_failed)
+        self._apply_worker.cancelled.connect(
+            lambda: (self._reset_buttons(),
+                     self.lbl.setText("已取消，未写回的文档未被改动。")))
         self._apply_worker.start()
 
     def _on_apply_done(self, res):

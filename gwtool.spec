@@ -161,6 +161,18 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    # UPX 压缩下列 DLL 有已知风险（加载失败 / 杀软误报 / ONNX 运行期崩溃）。
+    # 此前这里是空列表 = 完全交给 UPX 自行判断，等于没有护栏：一旦构建机上
+    # 装了 UPX，Qt/ONNX 的 DLL 就会被压，问题只在用户机器上暴露。
+    upx_exclude=[
+        'Qt6*.dll', 'Qt6*.pyd',        # Qt 运行库
+        'pyside6*.dll',
+        'onnxruntime*.dll',            # ONNX 推理栈
+        'tokenizers*.pyd',
+        'numpy*.pyd',
+        'python3*.dll',
+        'vcruntime*.dll', 'msvcp*.dll', 'concrt*.dll',
+        'api-ms-win-*.dll', 'ucrtbase.dll',
+    ],
     name='gwtool',
 )

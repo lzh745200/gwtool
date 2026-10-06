@@ -100,6 +100,39 @@ def _no_modal_confirm(monkeypatch):
     monkeypatch.setattr(_widgets, "_ask_custom", lambda *a, **k: True)
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_messagebox(monkeypatch):
+    """全局屏蔽 `QMessageBox` 的**静态方法**（真弹框会把整个会话挂死）。
+
+    为什么必须在这里做、而不是各测试文件各写一份：`question` / `information`
+    / `warning` / `critical` 是 C++ 侧静态方法，**不经过 `QDialog.exec`** ——
+    各文件对 `QDialog.exec` 的屏蔽方式对它们完全无效。漏掉任何一个入口，
+    无人值守下就是"无报错、日志十几分钟不增"的挂死，且只有真跑全量才暴露。
+
+    实测（10-05）：reference_panel 的"全部替换"二次确认（§8.3）调用默认分支
+    `ask()` → `QMessageBox.question`，把 1800+ 用例的全量会话卡在 87%；
+    e2e 自检反而是绿的，问题只在 pytest 会话里复现。
+
+    语义与既有屏蔽一致：确认类返回 Yes（"用户点了是"，危险操作的既有用例
+    照常成立），提示类返回 None。
+    """
+    from PySide6.QtWidgets import QMessageBox
+    yes = QMessageBox.StandardButton.Yes
+    # 注意：**不要**在这里连 `widgets.ask` 一起 patch。`ask` 被各模块用
+    # `from .widgets import ask` 值绑定导入，patch 模块属性对它们无效
+    # （对真正会挂起的调用点恰恰无效）；而它会把 `ask` 的**真实现整体短路**，
+    # 使"验证 ask 分发到 _ask_custom / QMessageBox.question"的回归用例
+    # （tests/test_ui_design_specs.py 两条）拿到空记录而假失败。
+    # 屏蔽 C++ 侧静态方法已足够：它们是运行期查类属性，必然生效。
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: yes))
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "critical",
+                        staticmethod(lambda *a, **k: None))
+
+
 @pytest.fixture()
 def wait_bg(qapp):
     """等后台 worker 收工，并驱动事件循环把结果信号投递给槽函数。

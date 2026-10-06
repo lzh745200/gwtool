@@ -327,3 +327,140 @@ def test_chip_kinds_render(qapp, kind):
     chip = make_chip("x", kind)
     assert chip.text() == "x" and "border-radius" in chip.styleSheet()
     assert make_chip_cell("x", kind) is not None
+
+
+# ---------------------------------------------------------------- §6 页面规格的数值落地
+def test_search_box_uses_scoped_qss(qapp):
+    """§6.3：检索框圆角 6px + SURFACE 底，且**不**写死色值（走对象名 QSS）。"""
+    from gwtool.ui import theme
+    from gwtool.ui.library_panel import LibraryPanel
+
+    panel = LibraryPanel()
+    assert panel.search_box.objectName() == "search_box"
+    qss = theme.build_qss()
+    assert "QLineEdit#search_box" in qss, "缺少检索框的定向样式"
+    block = qss.split("QLineEdit#search_box", 1)[1].split("}", 1)[0]
+    assert "6px" in block, "检索框圆角应为 6px"
+    assert theme.SURFACE in block, "检索框底色应取 SURFACE token"
+    panel.deleteLater()
+
+
+def test_doc_list_row_height_floor(qapp):
+    """§6.3：文档列表行高 32px（按对象名施加，不影响其它列表）。"""
+    from gwtool.ui import theme
+    from gwtool.ui.library_panel import LibraryPanel
+
+    panel = LibraryPanel()
+    assert panel.doc_list.objectName() == "doc_list"
+    qss = theme.build_qss()
+    assert "QListWidget#doc_list::item" in qss
+    block = qss.split("QListWidget#doc_list::item", 1)[1].split("}", 1)[0]
+    assert "32px" in block
+    panel.deleteLater()
+
+
+def test_library_bottom_row_counts_multi_selection(tmp_db, qapp):
+    """§6.3：多选计数显示在列表底部工具行（清空选中后回到总数）。"""
+    from gwtool.ui.library_panel import LibraryPanel
+
+    # 两篇必须给不同正文：内容 hash 相同会被 dao 判重并返回 -1（既有语义）
+    _add_doc("甲材料", "甲" + "正文内容" * 10)
+    _add_doc("乙材料", "乙" + "正文内容" * 10)
+    panel = LibraryPanel()
+    panel.reload()
+    assert panel.doc_list.count() == 2
+    assert panel.count_label.text() == "2 篇", "未选中时显示总数"
+
+    panel.doc_list.item(0).setSelected(True)
+    panel.doc_list.item(1).setSelected(True)
+    assert "已选 2" in panel.count_label.text()
+
+    panel.doc_list.clearSelection()
+    assert panel.count_label.text() == "2 篇", "清空选中后必须回到总数"
+    panel.deleteLater()
+
+
+@pytest.mark.parametrize("mod_name,cls_name,attr", [
+    ("gwtool.ui.registry_dialog", "RegistryDialog", "table"),
+    ("gwtool.ui.receive_dialog", "ReceiveDialog", "tbl"),
+])
+def test_ledger_tables_row_height(qapp, mod_name, cls_name, attr):
+    """§6.6：台账表格行高 30px（发文与收文口径一致）。"""
+    import importlib
+
+    mod = importlib.import_module(mod_name)
+    dlg = getattr(mod, cls_name)()
+    assert getattr(dlg, attr).verticalHeader().defaultSectionSize() == 30
+    dlg.deleteLater()
+
+
+def test_editor_success_flash_dot(qapp):
+    """§6.2：保存后状态栏闪现 SUCCESS 圆点；非成功态不得带圆点。"""
+    from gwtool.ui.editor_panel import EditorPanel
+
+    ed = EditorPanel()
+    ed.editor.setPlainText("关于××事项的通知")
+    ed._update_status("已保存", kind="success")
+    assert ed.lbl_status.text().startswith("● "), "成功后应闪现圆点"
+
+    ed._update_status("已打开：某某材料")
+    assert not ed.lbl_status.text().startswith("● "), "普通状态不应带圆点"
+    ed.deleteLater()
+
+
+def test_ref_split_handle_carries_count(qapp):
+    """§6.4：结果计数落在两区之间的折叠把手（tooltip）与常驻标签上。"""
+    from gwtool.ui.reference_panel import ReferencePanel
+
+    panel = ReferencePanel(editor_getter=lambda: "")
+    panel._set_ref_count_text("相关结果 3 条")
+    assert panel.lbl_ref.text() == "相关结果 3 条"
+    assert panel._split.count() > 1
+    assert panel._split.handle(1).toolTip() == "相关结果 3 条"
+    panel.deleteLater()
+
+
+def test_outline_tree_uses_scoped_qss(qapp):
+    """§6.2：大纲树 200px 吸左 + SURFACE 底、无边框（走对象名 QSS）。"""
+    from gwtool.ui import theme
+    from gwtool.ui.editor_panel import EditorPanel
+
+    ed = EditorPanel()
+    assert ed.outline.objectName() == "outline"
+    assert ed.outline.maximumWidth() == 200, "大纲树应固定 200px"
+    qss = theme.build_qss()
+    assert "QTreeWidget#outline" in qss
+    block = qss.split("QTreeWidget#outline", 1)[1].split("}", 1)[0]
+    assert theme.SURFACE in block, "大纲树底色应取 SURFACE"
+    assert "border: none" in block, "大纲树应无边框"
+    ed.deleteLater()
+
+
+def test_wizard_success_banner(tmp_db, qapp, tmp_path):
+    """§6.5：汇编完成后出成功横幅；新一轮开始（清产物）时收起。"""
+    from gwtool.ui.compile_wizard import CompileWizard
+
+    wiz = CompileWizard()
+    assert wiz.banner.isHidden(), "未生成产物时不应显示横幅"
+
+    p = tmp_path / "a.docx"
+    p.write_text("x", encoding="utf-8")
+    wiz._remember_product(str(p))
+    assert not wiz.banner.isHidden(), "生成产物后应出现成功横幅"
+    assert "1 份" in wiz.banner._text.text()
+
+    wiz._clear_product_cards()
+    assert wiz.banner.isHidden(), "新一轮必须收起上一轮横幅"
+    wiz.close()
+
+
+def test_ask_default_branch_is_stubbed(qapp):
+    """`ask()` 默认分支不得真弹框（否则全量会话会挂死）。
+
+    这是"全量卡在 87%"那次事故的回归护栏：conftest 的 autouse 夹具必须屏蔽
+    QMessageBox 静态方法。若该屏蔽被移除，本用例会**挂起**并被 pytest-timeout
+    捕获 —— 挂起本身即是失败信号，不会安静地假绿。
+    """
+    from gwtool.ui.widgets import ask
+
+    assert ask(None, "确认继续？") is True

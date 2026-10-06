@@ -417,6 +417,13 @@ class MigrationFailedError(RuntimeError):
             f"（版本号保持原值）。\n失败语句：{stmt}\n原因：{cause}")
 
 
+def _has_table(cur: sqlite3.Cursor, name: str) -> bool:
+    """表是否存在（init_schema 幂等短路用）。"""
+    return cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """建库建表并执行版本化迁移；设置用户版本号以支持后续迁移。
 
@@ -439,6 +446,21 @@ def init_schema(conn: sqlite3.Connection) -> None:
     old_ver = cur.execute("PRAGMA user_version").fetchone()[0]
     if old_ver > SCHEMA_VERSION:
         raise SchemaTooNewError(old_ver, SCHEMA_VERSION)
+    if old_ver == SCHEMA_VERSION and _has_table(cur, "documents"):
+        # 幂等短路：结构已是最新，直接返回，**不做任何写操作**。
+        #
+        # 必要性：本函数每次新建连接都会被调用（见 connection.get_conn）。
+        # 原实现即使结构已最新也要跑一遍 DDL 并执行 `PRAGMA user_version=N`
+        # ——那是写操作，等于给一条只读用途的连接也强加一个写事务，与正在
+        # 进行的写操作抢锁。实测：主线程持有未提交写事务时，后台线程首次
+        # 连接会在 `PRAGMA user_version=N` 处立即 OperationalError:
+        # database is locked（busy_timeout 对写锁升级不生效，13~35ms 即失败），
+        # 表现为「批量导入/段落回填等后台任务莫名整体失败」。
+        #
+        # 为什么可信：user_version 只在整批 DDL 全部成功后写入并 commit
+        # （见下方注释与 except 分支），故它等于最新版本即说明结构完整；
+        # 再用 documents 表存在性做双保险（防手改过 user_version 的库）。
+        return
     # 显式开启事务：Python sqlite3 的 legacy 模式**只为 DML 隐式开事务**，
     # 而这里全是 DDL —— 不显式 BEGIN 的话，每条 DDL 各自 autocommit，
     # "整批回滚"就无从谈起（SQLite 本身支持事务化 DDL，是驱动层没开）。

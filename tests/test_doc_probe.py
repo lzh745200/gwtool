@@ -15,6 +15,10 @@ sample.doc，由本机 WPS COM 生成并归档），零 mock：
 """
 from __future__ import annotations
 
+import os as _os, pytest as _pytest
+if _os.environ.get("GWTOOL_SKIP_COM_TESTS") == "1":
+    _pytest.skip("GWTOOL_SKIP_COM_TESTS=1：跳过真实 COM 转换探测（无人值守会话会挂死，见排查报告 §三.8）", allow_module_level=True)
+
 import shutil
 import struct
 import sys

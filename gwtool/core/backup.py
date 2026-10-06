@@ -65,6 +65,9 @@ SETTING_LIMIT_MB = "backup_attachment_limit_mb"
 SETTING_AUTO_LIMIT_MB = "backup_auto_attachment_limit_mb"
 
 MANIFEST_NAME = "manifest.json"
+# 加密备份的包内标记：0 字节条目，靠**条目名**（zip 中央目录，明文可读、无需口令）
+# 传递"这是加密包"的信息。恢复/列表据此判定，不再依赖"文件名含 _加密"约定。
+ENC_FLAG_NAME = "ENCRYPTED"
 # 纯 ASCII 文件名：第三方解压器/老系统都能正常显示，内容仍是 UTF-8 中文
 EXCLUDED_LIST_NAME = "excluded_attachments.txt"
 PART_SUFFIX = ".part"
@@ -199,13 +202,24 @@ def _snapshot_db(src: Path) -> Path:
 
 
 def create_backup_detailed(note: str = "", password: str = "",
-                           mode: str = MODE_MANUAL) -> BackupReport:
-    """创建备份并返回明细（含被排除的附件清单），供 UI 提示与日志使用。"""
+                           mode: str = MODE_MANUAL, progress_cb=None) -> BackupReport:
+    """创建备份并返回明细（含被排除的附件清单），供 UI 提示与日志使用。
+
+    progress_cb(msg) 在各阶段回调一行进度文本（后台任务写状态栏用）。
+    """
+    def _report(msg: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
     src = dbconn.current_db_file()
     if not src.exists():
         raise FileNotFoundError("数据库不存在，无可备份内容")
     # 快照放在打包之前：先把数据取成自洽副本，再慢慢压缩，
     # 期间用户继续操作也不会影响包里内容的一致性。
+    _report("正在生成数据库一致性快照…")
     snapshot = _snapshot_db(src)
     # 文件名含微秒，避免同一秒内多次备份互相覆盖
     now = datetime.now()
@@ -220,6 +234,7 @@ def create_backup_detailed(note: str = "", password: str = "",
     # 「看着完整其实截断」的备份包（zip 的中央目录在最后，半截包必然打不开）。
     tmp = out.with_name(out.name + PART_SUFFIX)
     _clean_stale_parts(out.parent)
+    _report(f"正在压缩打包（附件 {len(included)} 个，排除 {len(excluded)} 个）…")
     # manifest 必须在附件之后写：写包失败的附件会被挪进 excluded，清单要如实反映
     manifest_kwargs = dict(stamp=stamp, note=note, mode=mode, limit_bytes=limit,
                            included=included, excluded=excluded)
@@ -231,9 +246,14 @@ def create_backup_detailed(note: str = "", password: str = "",
             except ImportError:
                 raise RuntimeError(
                     "未安装 pyzipper，无法创建加密备份（pip install pyzipper）") from None
+            _report("正在 AES 加密打包…")
             with pyzipper.AESZipFile(tmp, "w", compression=pyzipper.ZIP_DEFLATED,
                                      encryption=pyzipper.WZ_AES) as zf:
                 zf.setpassword(password.encode("utf-8"))
+                # 加密标记：条目**文件名**在 zip 中央目录里是明文，无需口令即可读
+                # （0 字节条目，内容本身也是加密的但为空）。恢复侧据此判断"要不要
+                # 先要口令"，不再依赖"文件名含 _加密"的约定（用户改名就失效）。
+                zf.writestr(ENC_FLAG_NAME, "")
                 zf.write(snapshot, "gwtool.db")
                 _write_templates(zf)
                 _write_attachments(zf, included, excluded)
@@ -489,7 +509,7 @@ def list_backups() -> list[dict]:
     out = []
     for f in sorted(paths.backup_dir().glob("gwtool_backup_*.zip"), reverse=True):
         try:
-            encrypted = "_加密" in f.name
+            encrypted = is_encrypted_backup(f)
             if encrypted:
                 meta = None  # 加密包跳过元信息读取
             else:
@@ -514,6 +534,24 @@ def list_backups() -> list[dict]:
                         "attachments_included": 0,
                         "attachments_excluded": 0})
     return out
+
+
+def is_encrypted_backup(zip_path) -> bool:
+    """判断备份包是否 AES 加密。
+
+    优先读包内 `ENCRYPTED` 明文标记（zip 中央目录的条目名不加密，无需口令）；
+    无标记或读不出标记的（旧版备份包、被用户改过名的包）回退按**文件名**含
+    "_加密"判定 —— 与创建侧的历史命名约定保持兼容。损坏包两路都判不出，
+    返回 False 交给上层报"包损坏"。
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            if ENC_FLAG_NAME in zf.namelist():
+                return True
+    except Exception:
+        pass
+    name = getattr(zip_path, "name", None) or str(zip_path)
+    return "_加密" in name
 
 
 def _read_manifest(zf) -> dict:
@@ -569,12 +607,22 @@ def _guard_content_shrink(tmp: Path, target: Path) -> None:
         _append_log(["恢复内容显著缩减：包内 %d 篇 / 当前 %d 篇" % (in_pack, current)])
 
 
-def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
+def restore_backup_detailed(zip_path: str, password: str = "",
+                            progress_cb=None) -> RestoreReport:
     """恢复并返回明细，重点是 missing：哪些附件没跟着回来、为什么、去哪儿补。
 
     旧格式备份包（无 manifest.json 或 manifest 里没有 attachments 段）完全兼容：
     按「全量」处理，legacy=True，缺失情况改为按恢复后的磁盘实况核对。
+    progress_cb(msg) 在各阶段回调一行进度文本（后台任务写状态栏用）。
     """
+    def _report(msg: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
+    _report("正在读取备份包…")
     if password:
         try:
             import pyzipper
@@ -597,6 +645,7 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
         recorded = [] if legacy else (att_meta.get("excluded") or [])
         # 先备份现状。用自动备份档：恢复只往附件目录里写文件、从不删除，
         # 这个兜底包的价值在数据库，没必要再压一遍全量附件把恢复拖慢。
+        _report("正在做恢复前自动备份…")
         try:
             create_backup(note="恢复前自动备份", mode=MODE_AUTO)
         except Exception as exc:
@@ -618,6 +667,7 @@ def restore_backup_detailed(zip_path: str, password: str = "") -> RestoreReport:
                 "当前数据未被改动。请等这些任务结束后重试，或关闭程序重新打开后再恢复。")
         target = dbconn.current_db_file()
         tmp = target.with_suffix(".restore.tmp")
+        _report("正在解包数据库并校验内容…")
         try:
             with zf.open("gwtool.db") as fsrc, open(tmp, "wb") as fdst:
                 shutil.copyfileobj(fsrc, fdst)

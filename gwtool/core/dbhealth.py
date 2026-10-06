@@ -193,15 +193,23 @@ def _data_dir_text() -> str:
         return "（未知）"
 
 
-def maintenance(rebuild_fts: bool = True) -> dict:
+def maintenance(rebuild_fts: bool = True, progress_cb=None) -> dict:
     """执行 VACUUM + REINDEX（+ 重建 FTS 索引），返回前后对比与结论。
 
+    progress_cb(msg) 在各阶段回调一行进度文本（后台任务写状态栏用）。
     返回字典字段：
       ok       —— 是否成功执行
       reason   —— 失败原因（ok 为 False 时）
       before / after / saved —— 文件占用（字节）
       fts_rows —— 重建的 FTS 行数（未重建时为 -1）
     """
+    def _report(msg: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
     before = _all_file_size()
     free = free_space()
     need = int(before * _VACUUM_SPACE_FACTOR)
@@ -217,8 +225,10 @@ def maintenance(rebuild_fts: bool = True) -> dict:
     try:
         # VACUUM 不能在事务中执行，先确保没有未提交事务
         conn.commit()
+        _report("正在执行 VACUUM（压缩库文件）…")
         conn.execute("VACUUM")
         conn.commit()
+        _report("正在执行 REINDEX…")
         conn.execute("REINDEX")
         conn.commit()
     except sqlite3.DatabaseError as exc:
@@ -226,6 +236,7 @@ def maintenance(rebuild_fts: bool = True) -> dict:
 
     fts_rows = -1
     if rebuild_fts:
+        _report("正在重建全文索引（全库重新分词，耗时最长）…")
         try:
             from ..db import dao
             counts = dao.rebuild_fts()

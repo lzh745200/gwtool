@@ -129,8 +129,18 @@ def _is_regular_file(path: Path) -> bool:
         return False
 
 
-def build(req: ExportRequest) -> dict:
-    """生成移交包，返回统计（文档数、附件数、被排除的附件数、总字节）。"""
+def build(req: ExportRequest, progress_cb=None) -> dict:
+    """生成移交包，返回统计（文档数、附件数、被排除的附件数、总字节）。
+
+    progress_cb(msg) 在打包各阶段回调一行进度文本（后台任务写状态栏用）。
+    """
+    def _report(msg: str) -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
     docs = select_documents(req)
     if not docs:
         raise ValueError("所选范围内没有资料，无需导出")
@@ -140,6 +150,7 @@ def build(req: ExportRequest) -> dict:
     included: list = []
     excluded: list = []
     if req.include_attachments:
+        _report("正在规划附件…")
         included, excluded = _plan_attachments(doc_ids, limit_bytes)
 
     cats = {}
@@ -151,6 +162,7 @@ def build(req: ExportRequest) -> dict:
     entries: list[dict] = []
     seen_paths: set[str] = set()   # O(1) 重名检查：3000 篇 327ms → 2ms（原为线性扫描，占总耗时 54%）
     total = 0
+    _report(f"正在打包 {len(docs)} 篇文档…")
     with zipfile.ZipFile(req.out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for d in docs:
             name, blob, source = _document_payload(d)
@@ -175,6 +187,8 @@ def build(req: ExportRequest) -> dict:
             })
 
         att_rows = []
+        if included:
+            _report(f"正在复制 {len(included)} 个附件…")
         for item in included:
             path = attachments_dir() / Path(
                 item["stored"] or item["name"]).name

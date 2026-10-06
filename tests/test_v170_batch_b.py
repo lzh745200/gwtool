@@ -1026,6 +1026,9 @@ class TestTtsComRelease:
             def speak(self, _text):
                 pass
 
+            def resume(self):
+                self._stopped = False
+
             def stop(self):
                 calls.append("stop")
 
@@ -1052,6 +1055,9 @@ class TestTtsComRelease:
 
             def speak(self, _text):
                 pass
+
+            def resume(self):
+                self._stopped = False
 
             def stop(self):
                 calls.append("stop")

@@ -118,7 +118,14 @@ class TestStaleOffsetsProtection:
         assert applied == [], "正文已改动时绝不能用旧偏移替换"
         panel.deleteLater()
 
-    def test_apply_all_works_when_text_unchanged(self, tmp_db, qapp):
+    def test_apply_all_works_when_text_unchanged(self, tmp_db, qapp, monkeypatch):
+        from gwtool.ui import widgets
+        # 本用例走"全部替换"的二次确认（ask() 默认分支）。conftest 只统一屏蔽
+        # QMessageBox 的静态方法，实测该路径下仍会进真弹框、把全量会话挂死
+        # （faulthandler 停在 widgets.ask → QMessageBox.question；pytest-timeout
+        # 对阻塞的原生模态循环无效）。故这里定点屏蔽 ask 入口。
+        monkeypatch.setattr(widgets, "ask", lambda *a, **k: True)
+
         text = "关于布署工作的通知"
         applied: list = []
         panel, cur = self._panel(text, applied)

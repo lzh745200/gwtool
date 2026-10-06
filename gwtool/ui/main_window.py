@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QLabel,
 
 from .. import APP_NAME, __version__, logs
 from ..core.backup import (MODE_AUTO, MODE_MANUAL, create_backup_detailed,
-                           list_backups, restore_backup_detailed)
+                           is_encrypted_backup, list_backups,
+                           restore_backup_detailed)
 from ..db import dao
 from ..paths import db_path, export_dir
 from .compile_wizard import CompileWizard
@@ -493,23 +494,23 @@ class MainWindow(QMainWindow):
         m_file.menuAction().setStatusTip("新建、导入、保存与退出")
         self._menu_action(m_file, "新建公文（文种骨架）…", self.new_skeleton_doc,
                           "按文种（通知/请示/报告…）套用规范骨架起稿",
-                          "Ctrl+Shift+N")
+                          None)
         self._menu_action(m_file, "导入材料…", self.import_materials,
                           "把 Word/PDF/图片扫描件导入资料库（可批量、扫描件自动 OCR）",
                           "Ctrl+O")
         self._menu_action(m_file, "剪贴板入库", self.import_clipboard,
                           "把刚复制的内容直接存进资料库，不必先存成文件",
-                          "Ctrl+Shift+B")
+                          None)
         self._menu_action(m_file, "一键汇编…", self.open_compile_wizard,
-                          "勾选材料合并成一份正式公文（含封面、目录与页码）", "Ctrl+N")
+                          "勾选材料合并成一份正式公文（含封面、目录与页码）", None)
         self._menu_action(m_file, "保存到资料库",
                           lambda: self.editor.save_to_db(),
                           "把编辑器里的当前内容存成一篇材料", "Ctrl+S")
         self._menu_action(m_file, "发文登记台账…", self.open_registry,
-                          "本单位发文的登记、查询、统计与导出（含发文字号）", "Ctrl+R")
+                          "本单位发文的登记、查询、统计与导出（含发文字号）", None)
         self._menu_action(m_file, "收文登记台账…", self.open_receive,
                           "来文签收、拟办、批示、承办、办结与归档（含办理时限催办）",
-                          "Ctrl+Shift+R")
+                          None)
         m_file.addSeparator()
         self._menu_action(m_file, "退出", self.close,
                           "关闭程序（有任务在跑时会先等它收工）", "Ctrl+Q")
@@ -517,15 +518,15 @@ class MainWindow(QMainWindow):
         m_tool = self.menuBar().addMenu("工具(&T)")
         m_tool.menuAction().setStatusTip("纠错、体检、朗读、批量处理与备份")
         self._menu_action(m_tool, "文字纠错", lambda: self.reference.run_check(),
-                          "对当前文档做文字纠错（错别字、标点、数字用法）", "F7")
+                          "对当前文档做文字纠错（错别字、标点、数字用法）", None)
         self._menu_action(m_tool, "任意文档纠错…", self.open_anydoc_correct,
                           "任意格式文档或粘贴文本，标记视图逐处修正后保结构导出",
-                          "Ctrl+Shift+F7")
+                          None)
         self._menu_action(m_tool, "公文格式体检…", self.open_inspector,
                           "按 GB/T 9704 检查版式与要素（标题、字号、行距、页码…）",
                           "F8")
         self._menu_action(m_tool, "朗读校对 开/停", self.toggle_tts,
-                          "逐句朗读当前文档便于听校，再点一次停止", "F9")
+                          "逐句朗读当前文档便于听校，再点一次停止", None)
         self._menu_action(m_tool, "一键排版微调", lambda: self.editor.run_formatter(),
                           "清理多余空格、空行、全半角混排并统一标点")
         m_tool.addSeparator()
@@ -692,11 +693,10 @@ class MainWindow(QMainWindow):
 
     def _align_with_picks(self, refs):
         dlg = AlignDialog(refs, self.editor.editor.toPlainText(), self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def _generate_from_picks(self, refs):
         dlg = SkeletonFromRefsDialog(refs, self)
-        if dlg.exec() == QDialog.Accepted:
+        if self._exec_dialog(dlg) == QDialog.Accepted:
             text = dlg.text()
             if text:
                 # 只走既有插入信号：直接操作 QTextEdit 会绕过主窗口链路，
@@ -720,8 +720,7 @@ class MainWindow(QMainWindow):
         """
         dlg = StyleCheckDialog(lambda: self.editor.editor.toPlainText(), self,
                               insert_cb=self._insert_at_cursor)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_writing_hints(self):
         """写作提示与灵感建议：按文种给"缺什么/怎么写"，只作建议、不改正文。
 
@@ -729,14 +728,12 @@ class MainWindow(QMainWindow):
         本入口回答"接下来该写什么、可以套用什么句式"（结构提示＋句式推荐）。
         """
         dlg = WritingHintsDialog(lambda: self.editor.editor.toPlainText(), self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def _open_writing_hints(self, topic: str = ""):
         """写作参考面板入口：带上面板里的检索词作为主题（可留空）。"""
         dlg = WritingHintsDialog(lambda: self.editor.editor.toPlainText(), self,
                                  topic=topic or "")
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_generate(self):
         """菜单入口：用当前参考清单派生骨架生成草稿。"""
         refs = self.reference.picks()
@@ -787,7 +784,7 @@ class MainWindow(QMainWindow):
         """
         dlg = RegistryDialog(self)
         dlg.open_document.connect(self._open_from_registry)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self.library.reload()
 
     def _open_from_registry(self, doc_id: int):
@@ -803,7 +800,7 @@ class MainWindow(QMainWindow):
     def open_receive(self):
         """收文登记台账：来文签收、拟办、批示、承办、办结与归档。"""
         dlg = ReceiveDialog(self)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self.refresh_reminders()      # 从台账回来可能已办结若干件
 
     def refresh_reminders(self):
@@ -891,12 +888,15 @@ class MainWindow(QMainWindow):
         # 放后台线程，期间状态栏报进度，窗口仍可交互。
         _status_msg(self, "正在打包移交包…")
         self._handover_worker = _run_bg(
-            lambda: self._guarded(lambda: exporter.build(exporter.ExportRequest(
-                out_path=path, category_id=category_id,
-                include_attachments=include_att,
-                note=f"由 {choice} 导出"))),
+            lambda progress_cb=None: self._guarded(lambda: exporter.build(
+                exporter.ExportRequest(
+                    out_path=path, category_id=category_id,
+                    include_attachments=include_att,
+                    note=f"由 {choice} 导出"),
+                progress_cb=progress_cb)),
             on_ok=lambda result: self._handover_done(path, result),
-            parent=self)
+            on_progress=lambda msg: _status_msg(self, msg),
+            want_progress=True, parent=self)
 
     def _handover_done(self, path: str, result):
         rep, err = result
@@ -1003,8 +1003,11 @@ class MainWindow(QMainWindow):
         # 正写到一半，那是真正可能损坏库的时刻。
         _status_msg(self, "正在维护数据库（VACUUM + 重建索引）…")
         self._maintenance_worker = _run_bg(
-            lambda: self._guarded(dbhealth.maintenance),
-            on_ok=self._maintenance_done, parent=self)
+            lambda progress_cb=None: self._guarded(
+                lambda: dbhealth.maintenance(progress_cb=progress_cb)),
+            on_ok=self._maintenance_done,
+            on_progress=lambda msg: _status_msg(self, msg),
+            want_progress=True, parent=self)
 
     def _maintenance_done(self, result):
         from ..core import dbhealth
@@ -1037,7 +1040,7 @@ class MainWindow(QMainWindow):
 
     def new_skeleton_doc(self):
         dlg = SkeletonDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if self._exec_dialog(dlg) != QDialog.DialogCode.Accepted:
             return
         from ..db import dao
         text = dlg.draft_text
@@ -1054,7 +1057,7 @@ class MainWindow(QMainWindow):
 
     def import_materials(self, category_id: int = 0):
         dlg = ImportDialog(category_id, self)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self.library.reload()
         self._update_status()
 
@@ -1126,62 +1129,68 @@ class MainWindow(QMainWindow):
             info(self, "剪贴板内容此前已入库（重复）。")
         self._update_status()
 
+    def _exec_dialog(self, dlg):
+        """模态执行对话框，结束后立即释放。
+
+        对话框以主窗口为 parent；``exec()`` 返回后 Python 局部引用虽消失，
+        C++ 对象仍挂在 parent 上 —— 反复打开台账/词典/汇编等对话框会让子对象
+        持续累积（实测：3 个入口各开 3 次即累积 21 个 QDialog，长会话内存只涨
+        不落）。deleteLater 在事件循环空闲时安全销毁，不影响 exec() 返回值语义。
+        """
+        try:
+            return dlg.exec()
+        finally:
+            dlg.deleteLater()
+
     def open_compile_wizard(self):
         dlg = CompileWizard(self)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self._update_status()
 
     def open_template_editor(self):
         dlg = TemplateEditor(self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_compare(self):
         from .compare_dialog import CompareDialog
         dlg = CompareDialog(self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_anydoc_correct(self):
         from .correct_dialog import AnyDocCorrectDialog
         dlg = AnyDocCorrectDialog(self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_dict_manager(self):
         dlg = DictManager(self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_inspector(self):
         dlg = InspectorDialog(lambda: self.editor.editor.toPlainText(), self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_bulk_replace(self):
         dlg = BulkReplaceDialog(self.library.current_category(), self)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self.library.reload()
         self.editor.update_preview()
 
     def open_batch_correct(self):
         """按分类批量纠错：先预览命中，用户确认后才写回（后台线程执行）。"""
         dlg = BatchCorrectDialog(self.library.current_category(), self)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self.library.reload()
         self.editor.update_preview()
 
     def open_recycle_bin(self):
         """回收站：恢复或彻底删除已删除的材料。"""
         dlg = RecycleBinDialog(self)
-        dlg.exec()
+        self._exec_dialog(dlg)
         self.library.reload()
         self._update_status()
 
     def open_similarity(self):
         dlg = SimilarityDialog(self)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def open_snapshots(self):
         dlg = SnapshotsDialog(self.editor.doc_id, self.editor.editor.toPlainText(),
                               self, apply_callback=self._restore_snapshot)
-        dlg.exec()
-
+        self._exec_dialog(dlg)
     def _restore_snapshot(self, content: str):
         self.editor.replace_document_text(content)
         self.editor._set_dirty(True)      # 同步标签栏"未保存"圆点（§3.1）
@@ -1190,7 +1199,7 @@ class MainWindow(QMainWindow):
     def open_security(self):
         dlg = SecurityDialog(self, on_restore=self._do_restore,
                              on_recycle=self.open_recycle_bin)
-        dlg.exec()
+        self._exec_dialog(dlg)
         # 设置里可能改过「定时备份间隔」，关闭后重读并重启定时器，
         # 否则要重启程序才生效（用户会以为改了没用）。
         self._setup_backup_timer()
@@ -1314,10 +1323,12 @@ class MainWindow(QMainWindow):
         # 「失败原因按原文分流」的能力（见 _guarded 与 _restore_failure_text）。
         _status_msg(self, "正在备份（整库 + 附件）…")
         self._backup_worker = _run_bg(
-            lambda: self._guarded(lambda: create_backup_detailed(
-                note="手动备份", password=pw, mode=MODE_MANUAL)),
+            lambda progress_cb=None: self._guarded(lambda: create_backup_detailed(
+                note="手动备份", password=pw, mode=MODE_MANUAL,
+                progress_cb=progress_cb)),
             on_ok=lambda result: self._backup_done(result, password=pw),
-            parent=self)
+            on_progress=lambda msg: _status_msg(self, msg),
+            want_progress=True, parent=self)
 
     def _backup_done(self, result, password: str = ""):
         from ..core.attachments import human_size
@@ -1372,7 +1383,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         pw = ""
-        if "_加密" in path:
+        # 加密判定优先读包内明文标记（zip 条目名无需口令）；旧包按文件名约定回退。
+        if is_encrypted_backup(path):
             from PySide6.QtWidgets import QInputDialog, QLineEdit
             pw, ok = QInputDialog.getText(self, "加密备份", "输入备份口令：",
                                           QLineEdit.Password)
@@ -1398,9 +1410,12 @@ class MainWindow(QMainWindow):
             pass
         _status_msg(self, "正在恢复备份…")
         self._restore_worker = _run_bg(
-            lambda: self._guarded(
-                lambda: restore_backup_detailed(path, password=pw)),
-            on_ok=self._restore_done, parent=self)
+            lambda progress_cb=None: self._guarded(
+                lambda: restore_backup_detailed(path, password=pw,
+                                                progress_cb=progress_cb)),
+            on_ok=self._restore_done,
+            on_progress=lambda msg: _status_msg(self, msg),
+            want_progress=True, parent=self)
 
     def _restore_done(self, result):
         rep, err = result
@@ -1544,6 +1559,12 @@ class MainWindow(QMainWindow):
         if not self.editor.confirm_discard_changes():
             event.ignore()
             return
+        # 停掉 180 秒周期的自动快照：下面的等线程 / 退出备份 / 提示都会让事件
+        # 循环继续转，定时器若恰好到点会与退出备份并发写同一个库。
+        try:
+            self.editor.stop_auto_snapshot()
+        except Exception:
+            pass
         # 先停后台线程再备份：备份要独占数据库文件（Windows 上被占住就替换不了），
         # 而且线程若在进程退出时还活着会直接崩掉退出流程。
         stuck = _wait_all_threads(self)

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog,
                                QHBoxLayout, QHeaderView, QLabel, QPushButton,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
+from .. import paths
 from ..core import attachments
 from ..db import dao
 from . import theme
@@ -153,8 +154,14 @@ class AttachmentDialog(ThreadSafeDialog, QDialog):
         if not self.doc_id:
             warn(self, "没有关联的文档，请先在资料库里选中一篇材料。")
             return
+        # 防重入：必须在打开文件对话框**之前**判断 —— 模态对话框会跑嵌套事件
+        # 循环，按钮在这期间仍可点击；判断放到对话框之后等于没判（连点会把
+        # 前一个 self._worker 的引用覆盖掉，前一批复制失去可取消的句柄）。
+        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            warn(self, "正在复制上一批附件，请稍候再试。")
+            return
         picked, _sel = QFileDialog.getOpenFileNames(
-            self, "选择附件（可多选）", str(Path.home()), "所有文件 (*)")
+            self, "选择附件（可多选）", str(paths.documents_dir()), "所有文件 (*)")
         if not picked:
             return
         # 复制大文件可能耗时，交给后台线程，界面不冻结
@@ -217,7 +224,7 @@ class AttachmentDialog(ThreadSafeDialog, QDialog):
             warn(self, "附件文件已丢失，无法另存。")
             return
         dest, _sel = QFileDialog.getSaveFileName(
-            self, "另存附件", str(Path.home() / (att.file_name or src.name)),
+            self, "另存附件", str(paths.documents_dir() / (att.file_name or src.name)),
             "所有文件 (*)")
         if not dest:
             return

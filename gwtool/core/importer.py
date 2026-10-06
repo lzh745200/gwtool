@@ -46,7 +46,8 @@ def parse_any(path: str, ocr_progress_cb=None) -> ImportResult:
             #      四级降级链（COM 探测顺序 kwps/wps 优先，装了 WPS 的机器
             #      保真度最高；LibreOffice 的 libwps 兜 Works；纯解析+原始
             #      扫描兜底）。
-            head = Path(path).open("rb").read(4)
+            with Path(path).open("rb") as fh:
+                head = fh.read(4)
             if head == b"PK" + bytes([3, 4]):  # ZIP 魔数 PK
                 tree = parse_docx(path)
             else:

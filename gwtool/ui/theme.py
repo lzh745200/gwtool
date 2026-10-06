@@ -167,6 +167,22 @@ QTextEdit#doc_editor {{
     border: none;
     background: {BG};
 }}
+/* 资料库检索框（§6.3）：圆角 6px + SURFACE 底，与普通输入框区分 */
+QLineEdit#search_box {{
+    border-radius: 6px;
+    background: {SURFACE};
+}}
+/* 文档列表（§6.3）：行高 32px（标题 1 行 + 副行）。
+   min-height 是**下限**：副行参与排版时自然高度可能略高于 32px，
+   这里保证行不会被压得更矮，命中尺寸与视觉密度都达标。 */
+QListWidget#doc_list::item {{
+    min-height: 32px;
+}}
+/* 编辑器大纲树（§6.2）：SURFACE 底、无边框（当前节高亮走全局选中态） */
+QTreeWidget#outline {{
+    background: {SURFACE};
+    border: none;
+}}
 QPushButton {{
     padding: 4px 14px;
     border: 1px solid {BORDER};

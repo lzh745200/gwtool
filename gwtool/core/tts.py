@@ -55,8 +55,10 @@ def list_voices() -> list[str]:
     except Exception:
         return []
     finally:
-        # N5：显式丢掉 COM 引用。此函数会被设置页反复调用（每次打开都拉一遍
-        # 语音列表），靠 GC 释放的话，COM 端对象会攒到下次 GC 才消失。
+        # 引用释放说明：本函数会被设置页反复调用（每次打开都拉一遍语音列表）。
+        # Dispatch 出的 COM 代理靠**引用计数**在回收时释放；CPython 下函数返回
+        # 即释放局部变量，这里显式置 None 只是把释放点提前到 return 之前。
+        # （此前注释写成“显式丢掉 COM 引用”，读起来像手动释放，容易误导。）
         voice = None
 
 
@@ -121,6 +123,14 @@ class TTSEngine:
                 while self._proc.poll() is None and not self._stopped:
                     import time
                     time.sleep(0.05)
+
+    def resume(self) -> None:
+        """清除停止标志，允许继续朗读。
+
+        逐句朗读场景（TTSWorker）在 stop() 后复用同一引擎实例，每句朗读前
+        重置标志；此前由 worker 直接写 ``self._engine._stopped`` 私有属性实现。
+        """
+        self._stopped = False
 
     def stop(self) -> None:
         self._stopped = True

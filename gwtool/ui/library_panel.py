@@ -2,8 +2,6 @@
 """左侧资料库面板：分类树 + 标签 + 文档列表 + 全文检索 + 附件/回收站入口。"""
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
@@ -13,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                                QWidget)
 
+from .. import paths
 from ..db import dao
 from ..ui.widgets import EmptyState, ask, info, warn
 from .material_dialogs import AttachmentDialog, RecycleBinDialog
@@ -37,6 +36,8 @@ class LibraryPanel(QWidget):
         layout.setSpacing(4)
 
         self.search_box = QLineEdit()
+        # §6.3：圆角 6px + SURFACE 底由 QSS 按对象名施加（不写死色值）
+        self.search_box.setObjectName("search_box")
         self.search_box.setPlaceholderText("全文检索（回车搜索，Esc 清空，F3 聚焦）")
         self.search_box.returnPressed.connect(self._on_search)
         # §6.3：检索框左侧放大镜图标 + Esc 一键清空
@@ -64,11 +65,15 @@ class LibraryPanel(QWidget):
         self.cat_tree.itemSelectionChanged.connect(self._reload_docs)
 
         self.doc_list = QListWidget()
+        # §6.3：行高 32px 下限由 QSS 按对象名施加
+        self.doc_list.setObjectName("doc_list")
         self.doc_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.doc_list.customContextMenuRequested.connect(self._doc_menu)
         self.doc_list.itemDoubleClicked.connect(
             lambda item: self.open_document.emit(item.data(Qt.UserRole)))
         self.doc_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # §6.3：多选计数显示在列表底部工具行（_set_count_text）
+        self.doc_list.itemSelectionChanged.connect(self._on_doc_selection)
         # 空状态（UI 方案 §7.6）：覆盖层挂在列表上，不占列表条目、
         # 不改任何既有布局；显隐由 _add_empty_hint 按数据情况控制。
         self._empty_no_data = EmptyState(
@@ -102,6 +107,7 @@ class LibraryPanel(QWidget):
         self.type_filter.addItem("全部类型")
         self.type_filter.setToolTip("按文件类型过滤")
         self.count_label = QLabel("0 篇")
+        self._count_base = "0 篇"      # §6.3 底部工具行基础文案（多选时追加已选数）
         bottom.addWidget(self.btn_import)
         bottom.addWidget(self.btn_all)
         bottom.addWidget(self.btn_bin)
@@ -224,7 +230,7 @@ class LibraryPanel(QWidget):
             self.doc_list.addItem(item)
         if not docs:
             self._add_empty_hint()
-        self.count_label.setText(f"{len(docs)} 篇")
+        self._set_count_text(f"{len(docs)} 篇")
 
     def select_document(self, doc_id: int) -> bool:
         """在材料列表里选中并滚动到指定文档；找不到返回 False。
@@ -271,6 +277,21 @@ class LibraryPanel(QWidget):
         self.search_box.clear()
         self._on_search()
 
+    def _set_count_text(self, base: str) -> None:
+        """底部工具行计数（§6.3）：基础文案 + 多选时追加「已选 N 篇」。
+
+        基础文案在文档列表与检索结果两种模式下不同（"N 篇" / "检索到 N 处"），
+        故先记下来，选中项变化时按同一基数重算 —— 避免多选计数把另一模式的
+        计数覆盖成不相干的值。
+        """
+        self._count_base = base
+        picked = len(self.doc_list.selectedItems())
+        self.count_label.setText(f"{base}　已选 {picked} 篇" if picked else base)
+
+    def _on_doc_selection(self) -> None:
+        """列表选中项变化 → 刷新底部工具行的多选计数（§6.3）。"""
+        self._set_count_text(getattr(self, "_count_base", "0 篇"))
+
     def _on_search(self):
         kw = self.search_box.text().strip()
         self.doc_list.clear()
@@ -285,7 +306,7 @@ class LibraryPanel(QWidget):
         if not results:
             # 检索无命中与"库是空的"是两回事，提示要能区分开
             self._add_empty_hint(searching=True)
-        self.count_label.setText(f"检索到 {len(results)} 处")
+        self._set_count_text(f"检索到 {len(results)} 处")
 
     # ------------------------------------------------ 右键菜单
     def _cat_menu(self, pos):
@@ -528,7 +549,7 @@ class LibraryPanel(QWidget):
         if not items:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出为 TXT", str(Path.home() / "Documents" / "导出.txt"),
+            self, "导出为 TXT", str(paths.documents_dir() / "导出.txt"),
             "文本文件 (*.txt)")
         if not path:
             return

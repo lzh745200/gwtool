@@ -283,7 +283,7 @@ class TTSWorker(QThread):
                 if self._stop:
                     break
                 self.sentence.emit(i, len(sentences), s)
-                self._engine._stopped = False
+                self._engine.resume()
                 self._engine.speak(s)
             self.finished_ok.emit()
         finally:

@@ -323,6 +323,7 @@ class ReceiveDialog(QDialog):
             hint="点上方「签收登记」录入第一件来文；已办结的可批量归档"
         ).mount(self.tbl)
         self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.verticalHeader().setDefaultSectionSize(30)      # §6.6 行高 30px
         self.tbl.doubleClicked.connect(lambda *_: self.edit_selected())
         self.tbl.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeToContents)

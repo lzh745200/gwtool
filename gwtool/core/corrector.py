@@ -84,8 +84,12 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
             old = patterns.get(p.wrong)
             if old is None or conf > old[2]:
                 patterns[p.wrong] = (p.correct, p.category or "错别字", conf)
-    except Exception:
-        pass  # 数据库不可用时退化为纯内置数据
+    except Exception as exc:
+        # 数据库不可用时退化为纯内置数据 —— 降级本身是设计，但必须留痕：
+        # 零日志会让「自定义词库没生效」完全不可见（用户只会觉得纠错变弱）。
+        from .. import logs
+        logs.get_logger("corrector").warning(
+            "纠错词库加载失败，本次退化为内置数据：%s", exc)
     # 机构沿革对照（提示级，建议核实后替换）
     for wrong, correct in ORG_RENAME_PAIRS:
         old = patterns.get(wrong)
@@ -95,7 +99,10 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
     # 持久忽略名单（用户确认无需提示的词）
     try:
         _RULES_CACHE["ignore"] = dao.all_ignore_words()
-    except Exception:
+    except Exception as exc:
+        from .. import logs
+        logs.get_logger("corrector").warning(
+            "忽略名单加载失败，退化为空集：%s", exc)
         _RULES_CACHE["ignore"] = set()
     return patterns
 
@@ -216,7 +223,9 @@ def _buckets() -> dict[str, list[str]]:
     return buckets
 
 
-_NEG_COMPILED: dict[str, list] = {}
+# 负向上下文正则：模块级缓存（NEGATIVE_CONTEXTS 是静态数据，编译一次反复用；
+# 原先在 _check_exact 内局部 dict，每次调用都要重建，注释声明的“预编译”未兑现）
+_NEG_RX_CACHE: dict[str, list] = {}
 
 
 def _check_exact(text: str) -> list[Correction]:
@@ -229,8 +238,6 @@ def _check_exact(text: str) -> list[Correction]:
     i, n = 0, len(text)
     # 书名号前缀计数：O(n) 预计算，命中处 O(1) 判定（原为每命中 O(n) 全扫）
     q_open = q_close = 0   # text[:i] 中的书名号计数（随 i 推进更新）
-    # 负向上下文预编译（当前仅 1 条规则，模式均为锚定短语）
-    neg_rx: dict[str, list] = {}
     while i < n:
         cands = by_first.get(text[i])
         if cands:
@@ -246,10 +253,10 @@ def _check_exact(text: str) -> list[Correction]:
                 correct, cat, conf = patterns[hit]
                 # 负向上下文：检查命中词之前的文本（窗口 120 字足够——
                 # 模式均为紧邻短语；原实现对全前缀 re.search，O(命中×文本长)）
-                neg = neg_rx.get(hit)
+                neg = _NEG_RX_CACHE.get(hit)
                 if neg is None:
-                    neg = neg_rx[hit] = [re.compile(rx) for rx
-                                         in NEGATIVE_CONTEXTS.get(hit, [])]
+                    neg = _NEG_RX_CACHE[hit] = [re.compile(rx) for rx
+                                                in NEGATIVE_CONTEXTS.get(hit, [])]
                 if any(rx.search(text[max(0, i - 120):i]) for rx in neg):
                     i += 1
                     continue

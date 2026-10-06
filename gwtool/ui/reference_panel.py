@@ -52,6 +52,7 @@ class ReferencePanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         split = QSplitter(Qt.Vertical)
+        self._split = split          # §6.4：两区之间的把手承载结果计数
 
         # ---- 纠错区 ----
         corr_widget = QWidget()
@@ -516,8 +517,20 @@ class ReferencePanel(QWidget):
         # 放宽必须如实说明：不告知的话，用户会以为"这些同样精确相关"，
         # 进而对检索结果失去信任——那比少给几条结果更坏。
         note = "（精确命中较少，已放宽为「任一词命中」，排序中已降权）" if relaxed else ""
-        self.lbl_ref.setText(
+        self._set_ref_count_text(
             f"命中 {len(items)} 个段落{note}；双击插入，选中后「加入参考清单」可累积")
+
+    def _set_ref_count_text(self, text: str) -> None:
+        """写作参考结果计数（UI 方案 §6.4）。
+
+        方案要求计数落在两区之间的折叠把手上。把手高度由全局 QSS 定为 3px，
+        承载不了文字；若硬塞一个子控件进把手，它会吃掉拖拽事件、把分割条
+        手感弄坏。故计数落在两处：把手 tooltip（指向即可见）+ 参考区常驻标签
+        （始终可读）。
+        """
+        self.lbl_ref.setText(text)
+        if self._split.count() > 1:
+            self._split.handle(1).setToolTip(text)
 
     def _ref_card_widget(self, ref, snippet: str, item) -> QWidget:
         """写作参考的段落卡片（UI 方案 §6.4）：来源徽标 + 摘要 + 次级按钮。"""
@@ -581,7 +594,8 @@ class ReferencePanel(QWidget):
             item.setData(Qt.UserRole, it)
             item.setToolTip(it.snippet)
             self.ref_list.addItem(item)
-        self.lbl_ref.setText(f"相关结果 {len(items)} 条（双击插入；按相关度排序）")
+        self._set_ref_count_text(
+            f"相关结果 {len(items)} 条（双击插入；按相关度排序）")
 
     @staticmethod
     def _snippet(text: str, n: int = 80) -> str:
