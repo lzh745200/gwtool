@@ -1,5 +1,9 @@
 # OpenCodeReview 全量代码审查报告（v1.7.3 基线）
 
+> **处置状态（2026-10-07）**：本报告所列 P1×5、P2×12、P3×31 已**全部修复完毕**
+> （提交 7379b37 + a6e9849），新增护栏 tests/test_review_fixes_v173.py 7 项；
+> 回归 ruff 全绿 / e2e 50 项全过 / 全量 1759 passed、16 skipped、0 failed。
+
 ## 一 审查方式
 
 - 工具：`@alibaba-group/open-code-review` v1.12.12（delegate 规则集模式，无 LLM 密钥依赖）
