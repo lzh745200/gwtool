@@ -36,6 +36,10 @@ from xml.etree import ElementTree as ET
 # 解压上限：词表文件不可能有这么大，超过即判异常输入
 _MAX_MEMBER = 64 * 1024 * 1024
 _MAX_TOTAL = 256 * 1024 * 1024
+# 稀疏网格防护：Excel 上限 16384 列，正常公文表格远小于此；
+# 网格补齐总元素数（行×列）也必须有闸，见 read_sheet_rows 尾部注释。
+_MAX_COLS = 512
+_MAX_CELLS = 2_000_000
 
 _CELL_RE = re.compile(r"([A-Z]+)(\d+)")
 
@@ -196,6 +200,8 @@ def read_sheet_rows(zf: zipfile.ZipFile, path: str, shared: list,
             continue
         if r > max_rows:
             raise XlsxError("工作表行数超过 %d，疑似异常文件" % max_rows)
+        if ci >= _MAX_COLS:
+            raise XlsxError("工作表列数超过 %d，疑似异常文件" % _MAX_COLS)
         val = _cell_value(cell, shared)
         rows.setdefault(r, {})
         # 同一格重复出现时以**非空**为准（有的写入器会写一个空占位）
@@ -206,6 +212,12 @@ def read_sheet_rows(zf: zipfile.ZipFile, path: str, shared: list,
     if not rows:
         return []
     top = max(rows)
+    # 稀疏坐标不占解压预算：单格 r="XFD1048576" 就能把下面这层补齐网格
+    # 撑到 行×列 天文数字直接 OOM（完全绕过 _MAX_TOTAL 防护），故对网格
+    # 总元素数再加一道闸。
+    if top * width > _MAX_CELLS:
+        raise XlsxError("工作表规模异常（%d 行 × %d 列），疑似异常文件"
+                        % (top, width))
     return [[rows.get(r, {}).get(i, "") for i in range(width)]
             for r in range(1, top + 1)]
 

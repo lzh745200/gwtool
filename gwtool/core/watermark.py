@@ -2,6 +2,8 @@
 """水印与密级标注：PDF（PyMuPDF 旋转平铺）+ DOCX（页眉 VML 艺术字）。"""
 from __future__ import annotations
 
+from xml.sax.saxutils import escape
+
 try:
     import pymupdf as fitz
 except ImportError:  # pragma: no cover
@@ -88,11 +90,15 @@ def add_watermark_docx(docx_path: str, text: str, out_path: str = "",
     from docx.oxml import parse_xml
 
     doc = Document(docx_path)
+    # 水印文本拼进 XML 属性前必须转义：&、<、>、引号会让 parse_xml
+    # 直接抛 XMLSyntaxError（例如产品名里的 &），整个水印功能失效。
+    safe_text = escape(text, {'"': "&quot;"})
     for i, sec in enumerate(doc.sections):
         header = sec.header
         header.is_linked_to_previous = False
         xml = _VML_TPL % (i + 1, 49 + i, 420, 180, angle,
-                          f"{max(0.0, min(opacity, 1.0)):.2f}", fontsize, text)
+                          f"{max(0.0, min(opacity, 1.0)):.2f}", fontsize,
+                          safe_text)
         header._element.append(parse_xml(xml))
     out = out_path or docx_path
     if out != docx_path:

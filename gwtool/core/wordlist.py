@@ -313,8 +313,6 @@ def _write_one(conn, e: Entry, source: str, role: str, conf_default: float,
         "INSERT OR REPLACE INTO error_pairs(wrong,correct,category,confidence,"
         "enabled,source) VALUES(?,?,?,?,1,?)",
         (e.wrong, e.correct, e.category or category_default, conf, source))
-    if e.role == "terms":
-        pass       # 术语与纠错对同表，仅 category/置信度不同
     out.pairs_added += 1
 
 

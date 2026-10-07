@@ -199,8 +199,10 @@ def test_g4_number_is_protected(tmp_db, monkeypatch):
     src = "本项目于2024年正式启动实施工作。"
     _enable(monkeypatch, {src: "本项目于2025年正式启动实施工作。"})
     out = csc_gec.enhance(src, [])
-    assert all("2024" in src[c.start:c.end] or "2024" not in
-               src[c.start:c.end] for c in out)
+    # G4 拒绝数字位改动：out 可为空；若有命中，区间必须落在数字位上、
+    # 且建议不得引入 2025（原恒真式断言已按此语义改写）
+    for c in out:
+        assert src[c.start:c.end] == "2024"
     assert not any(c.suggestion and "2025" in c.suggestion for c in out)
 
 

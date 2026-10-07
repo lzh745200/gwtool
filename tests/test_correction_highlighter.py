@@ -203,7 +203,7 @@ def test_garbage_corrections_do_not_crash(qapp, doc):
     """非 Correction 对象也不能让高亮器抛异常（防御性）。"""
     hl = CorrectionHighlighter(doc)
     hl.set_corrections([object(), None])      # 内部 try 应吞掉
-    assert hl.corrections() == [] or True     # 关键是没抛异常
+    assert isinstance(hl.corrections(), list)  # 没抛异常且返回结构正常
 
 
 def test_text_is_never_modified(qapp):

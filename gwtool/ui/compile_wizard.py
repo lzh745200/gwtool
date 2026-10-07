@@ -498,6 +498,10 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         # 「报告 v1.2 终稿」→「报告 v1.docx」，用户拿到一个名字莫名其妙
         # 甚至互相覆盖的产物。
         title = self.ed_title.text().strip() or "汇编成果"
+        # 用户输入的标题直接拼输出路径：非法字符（\/:*?"<>|）在 Windows 上
+        # 生成失败或产生意外子目录，统一过一遍 safe_filename 清洗。
+        from ..core.batch import safe_filename
+        title = safe_filename(title) or "汇编成果"
         out_base = export_dir() / title
         out_base.parent.mkdir(parents=True, exist_ok=True)
         stem = str(out_base)
@@ -505,12 +509,15 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         if not any_output:
             info(self, "请至少勾选一种输出。")
             return
-        # 防重入兜底：按钮虽已 disable，但 docx / pdf / 批量三条分支各自新建
-        # worker，统一在这里再拦一道 —— 旧线程仍在写同一输出文件时被覆盖
-        # 引用会失去句柄（关窗时等不到它）。
-        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
-            info(self, "上一次生成仍在进行，请稍候。")
-            return
+        # 防重入兜底：按钮虽已 disable，但 docx / 批量 / PDF 三条分支各自新建
+        # worker，统一在这里把三个 worker 都拦一道 —— 旧线程仍在写同一输出
+        # 文件时被覆盖引用会失去句柄（关窗时等不到它）。
+        for w in (getattr(self, "_worker", None),
+                  getattr(self, "_batch_worker", None),
+                  getattr(self, "_pdf_worker", None)):
+            if w is not None and w.isRunning():
+                info(self, "上一次生成仍在进行，请稍候。")
+                return
         # 防静默覆盖：同名输出已存在时追加时间戳
         if ((self.chk_docx.isChecked() and Path(stem + ".docx").exists())
                 or (self.chk_pdf.isChecked() and Path(stem + ".pdf").exists())):
@@ -545,11 +552,12 @@ class CompileWizard(ThreadSafeDialog, QWizard):
 
     def _run_batch(self, ids: list[int]):
         """批量模式：后台线程逐份生成。"""
-        from ..core.batch import batch_compile_each
+        from ..core.batch import batch_compile_each, safe_filename
         tpl = self.load_template()
         self._apply_cover_fields(tpl)
         tpl.insert_material_titles = False  # 材料标题即公文名，不重复
-        outdir = export_dir() / (self.ed_title.text().strip() or "批量汇编")
+        batch_title = safe_filename(self.ed_title.text().strip() or "批量汇编")
+        outdir = export_dir() / batch_title
         cover = {"org": tpl.cover.org, "date": tpl.cover.date}
         self._products = []
         self._clear_product_cards()
@@ -817,8 +825,9 @@ class CompileWizard(ThreadSafeDialog, QWizard):
             return doc_id
         # -1 = 同内容已在库里。按路径优先、标题兜底找回它，
         # 让后续登记仍能挂上 doc_id（"幂等"的前提就是能找回同一条）。
-        return int(self._find_library_entry(path, title).id
-                   if self._find_library_entry(path, title) else 0)
+        # 单次查询复用：原写法连调两遍，每次内部最多两遍全表扫描。
+        entry = self._find_library_entry(path, title)
+        return int(entry.id if entry else 0)
 
     def _register_from_compile(self, ask_first: bool = True,
                               silent_ok: bool = False) -> bool:

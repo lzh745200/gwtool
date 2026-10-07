@@ -964,6 +964,14 @@ def delete_phrase(phrase_id: int) -> None:
     conn.commit()
 
 
+def get_phrase(phrase_id: int) -> Phrase | None:
+    """按 id 取单条句式（供参考面板整段预览，避免全表遍历）。"""
+    conn = dbconn.get_conn()
+    row = conn.execute(
+        "SELECT * FROM user_phrases WHERE id=?", (phrase_id,)).fetchone()
+    return Phrase(**dict(row)) if row else None
+
+
 def list_phrases(keyword: str = "", limit: int = 500, offset: int = 0) -> list[Phrase]:
     conn = dbconn.get_conn()
     if keyword:
@@ -989,6 +997,11 @@ def save_template(name: str, config_json: str, is_default: bool = False) -> int:
         " is_default=excluded.is_default, updated_time=excluded.updated_time",
         (name, config_json, 1 if is_default else 0, now()))
     conn.commit()
+    # upsert 走 UPDATE 分支时不发生 INSERT，lastrowid 是陈旧值（可能与
+    # save_user_skeleton 同款坑），必须按唯一键回查真实 id。
+    row = conn.execute("SELECT id FROM templates WHERE name=?", (name,)).fetchone()
+    if row is not None:
+        return int(row["id"])
     return int(cur.lastrowid)
 
 

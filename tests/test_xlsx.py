@@ -253,7 +253,6 @@ class TestRegistryAndReportIntegration:
         cells = _sheet_cells(parts)
         assert cells["A1"][1] == "发文字号"
         assert cells["A2"][1] == "×政发〔2026〕12号"
-        assert cells["A2"][1] == "×政发〔2026〕12号"
 
     def test_registry_doc_no_forced_text(self, tmp_path):
         out = tmp_path / "台账.xlsx"

@@ -94,11 +94,10 @@ def document_full_text(ref_id: int) -> str:
 
 
 def phrase_full_text(ref_id: int) -> str:
-    conn_p = dao.list_phrases()
-    for p in conn_p:
-        if p.id == ref_id:
-            return p.context or p.phrase
-    return ""
+    # 按 id 直查：原来遍历 list_phrases()（默认 limit=500），句式超 500 条
+    # 时永远找不到，且每次全表传输。
+    p = dao.get_phrase(ref_id)
+    return (p.context or p.phrase) if p else ""
 
 
 def dictionary_entry(ref_id: int) -> dict:

@@ -553,11 +553,15 @@ class LibraryPanel(QWidget):
             "文本文件 (*.txt)")
         if not path:
             return
-        with open(path, "w", encoding="utf-8") as f:
-            for item in items:
-                d = dao.get_document(item.data(Qt.UserRole))
-                if d:
-                    f.write(d.content_text + "\n\n")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for item in items:
+                    d = dao.get_document(item.data(Qt.UserRole))
+                    if d:
+                        f.write(d.content_text + "\n\n")
+        except OSError as exc:
+            warn(self, f"导出失败：{exc}")
+            return
         info(self, f"已导出到：\n{path}")
 
     def _import(self):

@@ -450,12 +450,12 @@ class DictManager(QDialog):
                 "(SELECT id FROM user_phrases WHERE phrase=? LIMIT 1)",
                 (phrase,))
             get_conn().commit()
-        from ..db.connection import get_conn as gc
-        conn = gc()
-        # 同步 FTS：全量重建 phrases 索引
+        # 同步 FTS：全量重建 phrases 索引（import 提到循环外：至多迭代 10 万次，
+        # 循环内重复 import 既慢又难读；get_conn 直接复用顶部已有导入）
+        conn = get_conn()
         conn.execute("DELETE FROM phrases_fts")
+        from ..db.tokenize import tokenize
         for p in dao.list_phrases(limit=100000):
-            from ..db.tokenize import tokenize
             conn.execute("INSERT INTO phrases_fts(phrase,tokenized,ref_id) VALUES(?,?,?)",
                          (tokenize(p.phrase), tokenize(p.phrase + " " + p.context), p.id))
         conn.commit()

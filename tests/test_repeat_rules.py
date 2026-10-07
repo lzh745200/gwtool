@@ -360,14 +360,16 @@ def test_empty_dictionary_degrades_to_no_report():
     """词典不可用（空库）时宁少报不误报：直接不报。"""
     prev = dbconn.current_db_file()
     corrector.invalidate_cache()
-    # 临时切到空库
+    # 临时切到空库（try/finally 保证失败时也恢复，否则后续用例跑在空库上）
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         dbconn.configure(Path(td) / "empty.db")
-        corrector.invalidate_cache()
-        assert rep("的的") == []            # 无词典 => 不报
-        assert rep("进行行。") == []
-        dbconn.close_current_thread()
-    dbconn.configure(prev)
+        try:
+            corrector.invalidate_cache()
+            assert rep("的的") == []            # 无词典 => 不报
+            assert rep("进行行。") == []
+        finally:
+            dbconn.close_current_thread()
+            dbconn.configure(prev)
     corrector.invalidate_cache()
     assert rep("的的")                       # 恢复后仍工作

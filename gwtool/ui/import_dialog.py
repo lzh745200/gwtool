@@ -203,14 +203,13 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         if not files:
             info(self, "请先添加要导入的文件。")
             return
-        if files and not self.progress.isVisible():
-            pass
         self.progress.setVisible(True)
         self.progress.setRange(0, len(files))
         self.lbl_stage.setVisible(True)
         self.banner.clear()            # 新一轮：收起上一轮结论（§8.1）
         self.fail_view.setVisible(False)
         self._cancel_requested = False
+        self._finished_round = False   # 新一轮：复位完成幂等守卫
         self.btn_cancel.setEnabled(True)
         self.btn_cancel.setVisible(True)
         self.btn_start.setEnabled(False)
@@ -234,17 +233,20 @@ class ImportDialog(ThreadSafeDialog, QDialog):
         info(self, f"导入出错：{msg}")
 
     def _done(self, ok: int, skip: int):
-        # 简版回调（无明细信号时兜底）：与 _done_detail 二选一触发，
-        # 后者覆盖前者后，这里靠 last_detail 标记避免重复弹窗。
-        if getattr(self, "_detail_shown", False):
-            return
+        # 简版回调（无明细信号时兜底）。注意 worker 会先发 finished_ok 再发
+        # finished_detail（见 workers.py ImportWorker.run），两条回调都会到达；
+        # 完成处理只允许执行一次，由 _finish_common 的幂等守卫统一保证。
         self._finish_common(ok, skip, None)
 
     def _done_detail(self, ok: int, skip: int, failures: list):
-        self._detail_shown = True
         self._finish_common(ok, skip, failures)
 
     def _finish_common(self, ok: int, skip: int, failures):
+        # 幂等守卫：finished_ok 与 finished_detail 先后到达（Qt 队列按发射序
+        # 投递），同一轮只处理第一笔；失败清单写盘与结论横幅因此不会重复。
+        if getattr(self, "_finished_round", False):
+            return
+        self._finished_round = True
         self.btn_start.setEnabled(True)
         self.progress.setVisible(False)
         self.lbl_stage.setVisible(False)

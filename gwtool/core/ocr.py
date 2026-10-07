@@ -27,7 +27,7 @@ def _bundled() -> tuple[str, str]:
     """随包捆绑的 (tesseract 可执行文件, TESSDATA_PREFIX)；不存在返回空。"""
     cands: list[tuple[Path, Path]] = []
     exe_dir = Path(sys.executable).resolve().parent
-    # Windows onedir / Inno 安装布局：{app}	esseract	esseract.exe
+    # Windows onedir / Inno 安装布局：{app}/tesseract/tesseract.exe
     cands.append((exe_dir / "tesseract" / "tesseract.exe",
                   exe_dir / "tesseract" / "tessdata"))
     # Linux：{install}/ocr/bin/tesseract（deb 装到 /opt/gwtool，.run/便携随目录）

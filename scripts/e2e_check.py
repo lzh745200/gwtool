@@ -61,10 +61,12 @@ def main() -> int:
     import os as _os
     _export_tmp = Path(tempfile.mkdtemp(prefix="gwtool_e2e_export_"))
     _os.environ["GWTOOL_EXPORT_DIR"] = str(_export_tmp)
-    dbconn.configure(__import__("gwtool.paths", fromlist=["db_path"]).db_path())
-    t0 = __import__("time").time()
+    from gwtool.paths import db_path
+    dbconn.configure(db_path())
+    import time as _t
+    t0 = _t.time()
     app.ensure_database_seeded()
-    seed_t = __import__("time").time() - t0
+    seed_t = _t.time() - t0
     from gwtool.db import dao
     step("首启动种子导入(秒)", seed_t < 15, f"耗时 {seed_t:.1f}s")
     # 启动性能基线（第 18 轮固化）：主窗口离屏构造须秒级，
@@ -82,9 +84,9 @@ def main() -> int:
     _MB.critical = staticmethod(lambda *a, **k: None)
     _MB.question = staticmethod(
         lambda *a, **k: _MB.StandardButton.No)
-    _t0 = __import__("time").time()
+    _t0 = _t.time()
     _win = _mw.MainWindow()
-    _win_t = __import__("time").time() - _t0
+    _win_t = _t.time() - _t0
     _win.close()
     for _m, _f in _saved_mb.items():
         setattr(_MB, _m, _f)
@@ -150,7 +152,8 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
     _qapp = QApplication.instance() or QApplication([])
     from gwtool.core import pdfrender
-    trees = __import__("gwtool.core.compiler", fromlist=["load_trees"]).load_trees(ids, [])
+    from gwtool.core.compiler import load_trees
+    trees = load_trees(ids, [])
     out_pdf = sample_dir / "汇编成果.pdf"
     pdfrender.render_compiled_pdf(trees, tpl, str(out_pdf))
     step("A4 PDF(两遍渲染)", out_pdf.exists() and out_pdf.stat().st_size > 10000,

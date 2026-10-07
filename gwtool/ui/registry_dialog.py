@@ -187,7 +187,7 @@ class DispatchForm(QDialog):
                 try:
                     value = max(0, int(value or 0))
                 except ValueError:
-                    warn(self, f"「{key}」必须是整数。")
+                    warn(self, f"「{self._field_labels.get(key, key)}」必须是整数。")
                     return
             setattr(rec, key, value)
 
@@ -571,24 +571,6 @@ class RegistryDialog(QDialog, SourceOpenMixin):
         info(self, f"已导出 {n} 条登记到：\n{path}\n"
                    f"（含「统计」工作表；发文字号已按文本写入，"
                    f"不会被 Excel 转成科学计数法）")
-
-    def export_csv(self) -> None:
-        if not self._rows:
-            warn(self, "当前没有可导出的登记记录。")
-            return
-        from PySide6.QtWidgets import QFileDialog
-        default = f"发文登记台账_{date.today():%Y%m%d}.csv"
-        path, _sel = QFileDialog.getSaveFileName(self, "导出发文登记台账",
-                                                 default, "CSV 文件 (*.csv)")
-        if not path:
-            return
-        try:
-            n = registry.export_csv(self._rows, path)
-        except OSError as exc:
-            warn(self, f"导出失败：{exc}")
-            return
-        info(self, f"已导出 {n} 条登记到：\n{path}\n"
-                   f"（UTF-8 BOM 编码，Excel 可直接打开）")
 
     def _reset_filters(self) -> None:
         self.ed_keyword.clear()

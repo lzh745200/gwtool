@@ -276,7 +276,6 @@ def main() -> int:
     for s in probe:
         corrector.check_text(s)
     dt = time.perf_counter() - t0
-    ms_per_qian = dt / max(1, probe_chars) * 1000 * 1000 / 1000
     ms_per_qian = dt * 1000 / max(1, probe_chars) * 1000
     results.append(Result(
         "E5", "基础三层耗时", round(ms_per_qian, 1),

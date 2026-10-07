@@ -59,7 +59,6 @@ def main() -> int:
     if data_dir.exists():
         shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(exist_ok=True)
-    fresh = True
     started = time.time()
     proc = subprocess.Popen([str(exe), "--portable"], cwd=str(root),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -90,11 +89,9 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    if fresh:
-        # shutil 已在模块顶部导入：函数内再 import 一次会让函数作用域里的
-        # 名字与全局同名，静态检查（F823）会认为前面那次使用"引用了尚未赋值的
-        # 局部变量"，也容易被后人误读为两套来源。
-        shutil.rmtree(data_dir, ignore_errors=True)
+    # 收尾清理：卸载验收时删掉本次运行产生的数据目录（原 `fresh = True`
+    # 恒真死条件，直接内联执行）
+    shutil.rmtree(data_dir, ignore_errors=True)
 
     print(f"\n===== 安装验收：{len(failures)} 项失败 =====")
     return 1 if failures else 0

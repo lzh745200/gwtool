@@ -234,13 +234,20 @@ def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         outdir = tempfile_dir()
         try:
-            subprocess.run([soffice, "--headless", "--convert-to", "pdf",
-                            "--outdir", outdir, docx_path],
-                           capture_output=True, timeout=180, check=False)
+            result = subprocess.run([soffice, "--headless", "--convert-to",
+                                     "pdf", "--outdir", outdir, docx_path],
+                                    capture_output=True, timeout=180,
+                                    check=False)
             produced = Path(outdir) / (Path(docx_path).stem + ".pdf")
             if produced.exists():
                 shutil.move(str(produced), out_pdf)
                 return out_pdf
+            # 转换失败要留痕：stderr 摘要写日志，否则用户只看到
+            # "未找到可用组件"，误以为缺依赖而非文档本身有问题。
+            from .logs import get_logger
+            get_logger("compile").warning(
+                "LibreOffice 转 PDF 失败（exit=%s）：%s", result.returncode,
+                (result.stderr or b"").decode("utf-8", errors="replace")[:300])
         finally:
             shutil.rmtree(outdir, ignore_errors=True)
     if os.name == "nt":

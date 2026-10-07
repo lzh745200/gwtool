@@ -422,7 +422,10 @@ class ReferencePanel(QWidget):
             from .widgets import info
             info(self, "正文已改动，纠错结果已重新计算，请确认后再替换。")
             return
-        for c in reversed(self._selected_corrections()):
+        # 按 start 降序执行：从后往前替换不破坏前面尚未处理的偏移
+        # （选中顺序可能乱序，直接 reversed 会错位改坏正文；同 _apply_all 口径）。
+        for c in sorted(self._selected_corrections(),
+                        key=lambda c: c.start, reverse=True):
             self.apply_edit.emit(c.start, c.end, c.suggestion)
         self.run_check()
 

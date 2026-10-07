@@ -357,7 +357,6 @@ class _BulkReplaceWorker(QThread):
         try:
             self._run()
         except Exception as exc:
-            import traceback
             traceback.print_exc()
             self.failed.emit(errmsg.friendly(exc, action="批量替换"))
         finally:
@@ -1100,7 +1099,13 @@ class SimilarityDialog(ThreadSafeDialog, QDialog):
         def work():
             """后台：读正文 + 查表 SimHash 粗筛 + 精算 Jaccard。"""
             docs = {d.id: d.title for d in dao.list_documents()}
-            texts = {did: dao.get_document(did).content_text for did in docs}
+            # 列出文档与取正文之间文档可能被删（get_document 契约可返回 None）：
+            # 跳过而非让整个查重 AttributeError 失败（同 _BulkReplaceWorker 口径）。
+            texts = {}
+            for did in docs:
+                d = dao.get_document(did)
+                if d is not None:
+                    texts[did] = d.content_text
             pairs = simhash.find_similar(texts, threshold,
                                          hashes=dao.all_simhashes())
             return docs, pairs

@@ -63,10 +63,20 @@ class DocTree:
     @classmethod
     def from_json(cls, title: str, blocks_json: str) -> "DocTree":
         import json
+
         tree = cls(title=title)
+        # try 收窄到单块：坏块只丢自己并留日志，不再连坐其后所有块
+        # （原来整个循环被吞异常包住，一个坏块 = 后文全部无声消失）。
         try:
-            for d in json.loads(blocks_json or "[]"):
+            data = json.loads(blocks_json or "[]")
+        except Exception:                        # 整段不可解析：按空结构兜底
+            from ..logs import get_logger
+            get_logger("model").warning("blocks_json 解析失败，按空结构兜底")
+            return tree
+        for d in data if isinstance(data, list) else []:
+            try:
                 tree.blocks.append(Block(**d))
-        except Exception:
-            pass
+            except Exception as exc:             # 单块损坏不阻断
+                from ..logs import get_logger
+                get_logger("model").warning("坏块被跳过：%s", exc)
         return tree

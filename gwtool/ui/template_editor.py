@@ -260,7 +260,7 @@ class TemplateEditor(QDialog):
     def _new_template(self):
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "新建模板", "模板名称：",
-                                        text=f"我的模板{dao.list_templates().__len__() + 1}")
+                                        text=f"我的模板{len(dao.list_templates()) + 1}")
         if ok and name.strip():
             base = self._form_to_template()
             clone = base.clone(name.strip())

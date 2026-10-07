@@ -245,13 +245,14 @@ class ReceiveForm(QDialog):
                 try:
                     value = max(0, int(value or 0))
                 except ValueError:
-                    warn(self, f"「{key}」必须是整数。")
+                    warn(self, f"「{self._field_labels.get(key, key)}」必须是整数。")
                     return
             setattr(rec, key, value)
 
         problems = receive.validate(rec)
         if problems:
-            # §7.3：校验失败标红相关字段并在表单下给出原因；弹窗保留
+            # §7.3：校验失败标红相关字段并在表单下给出原因；弹窗保留。
+            # 先清掉上一轮的红框再按最新问题标红，否则已修正的字段仍显示错误态。
             self.lbl_form_error.setText("请修正：" + "；".join(problems[:3]))
             self.lbl_form_error.setVisible(True)
             joined = " ".join(problems)
@@ -259,6 +260,8 @@ class ReceiveForm(QDialog):
                 label = self._field_labels.get(key, "")
                 if (label and label in joined) or key in joined:
                     widget.setStyleSheet(f"border:1px solid {theme.DANGER};")
+                else:
+                    widget.setStyleSheet("")
             warn(self, "登记信息有误：\n" + "\n".join(f"· {p}" for p in problems))
             return
         self.lbl_form_error.setVisible(False)

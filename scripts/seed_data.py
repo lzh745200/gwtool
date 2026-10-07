@@ -63,8 +63,9 @@ def main() -> None:
             continue
         cur.execute("INSERT OR IGNORE INTO error_pairs(wrong,correct,category,confidence,enabled,source)"
                     " VALUES(?,?,?,?,1,'curated')", (wrong, correct, cat, conf))
+        # 统计真实入库数：INSERT OR IGNORE 可能忽略重复，rowcount 才是实数
+        n_curated += max(0, cur.rowcount)
         seen.add((wrong, correct))
-        n_curated += 1
 
     # 常用单字池（按词频取前 3500）
     single_chars = [(w, f) for w, f in freq.items() if len(w) == 1 and f >= 100

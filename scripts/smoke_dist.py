@@ -147,7 +147,6 @@ def main() -> int:
     if data_dir.exists():
         shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(exist_ok=True)
-    fresh = True
 
     env = dict(os.environ)
     if not IS_WIN:
@@ -243,7 +242,7 @@ def main() -> int:
     # Windows 上进程退出后句柄释放有延迟：立即 rmtree 会因 gwtool.db(-wal)
     # 仍被锁定而静默失败（ignore_errors），残留的测试数据库会混进后续的
     # 便携 zip / Inno 安装包。这里带重试的硬删除，全失败则显式报失败。
-    if fresh:
+    if True:  # 原 fresh 恒真（本次校验新建的 Data 目录），保留缩进结构
         removed = False
         for _ in range(6):
             try:

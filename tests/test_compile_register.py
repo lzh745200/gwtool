@@ -518,7 +518,6 @@ def test_register_failure_does_not_raise(wizard, monkeypatch):
 
 def test_batch_compile_does_not_pop_modal_per_item(wizard, monkeypatch):
     """B5.6：批量模式每份材料一个弹框会把用户逼疯 → 全流程至多 1 个模态框。"""
-    import gwtool.ui.compile_wizard as cw
     from gwtool.core import batch
 
     def _fake_batch(ids, tpl, outdir, **k):
@@ -552,14 +551,12 @@ def test_batch_compile_does_not_pop_modal_per_item(wizard, monkeypatch):
         QApplication.processEvents()
         if not worker.isRunning():
             break
-    from PySide6.QtWidgets import QApplication
     for _ in range(5):
         QApplication.processEvents()
 
     assert len(wizard.modal_calls) <= 1, (
         f"批量模式弹了 {len(wizard.modal_calls)} 个模态框（应 ≤1）")
     assert "批量生成完成" in wizard.lbl_result.text()
-    assert cw is not None
 
 
 def test_batch_products_are_saved_to_library(wizard, monkeypatch):

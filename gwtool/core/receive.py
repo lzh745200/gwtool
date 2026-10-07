@@ -185,7 +185,8 @@ def validate(r: dao.Receive) -> list[str]:
                               ("done_date", "办结日期"),
                               ("doc_date", "来文成文日期")):
         value = (getattr(r, field_name) or "").strip()
-        if recv and value and label != "来文成文日期" and value < recv:
+        # 按字段名排除（label 是给用户看的文案，改文案不应悄悄改变校验行为）
+        if recv and value and field_name != "doc_date" and value < recv:
             problems.append(f"{label}早于收到日期")
     return problems
 

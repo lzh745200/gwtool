@@ -459,8 +459,11 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
                                              "纠错后文档.docx", "Word (*.docx)")
         if not out:
             return
-        # 快照后交给后台：worker 里不能再读 self._blocks（主线程可能正在改）
-        blocks, title = list(self._blocks), self._title
+        # 快照后交给后台：worker 里不能再读 self._blocks（主线程可能正在改）。
+        # 必须深拷贝：list() 浅拷贝后 dict 元素仍与主线程共享，导出期间
+        # 用户点「应用此修正」会原地改同一批块，工作线程读到中途状态。
+        import copy as _copy
+        blocks, title = _copy.deepcopy(self._blocks), self._title
 
         def work():
             from ..core.docxgen import generate_docx
@@ -477,7 +480,9 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
                                              "纠错后文档.txt", "文本 (*.txt)")
         if not out:
             return
-        blocks, title = list(self._blocks), self._title
+        # 与 export_docx 同口径：深拷贝快照，防止导出期间主线程原地改块
+        import copy as _copy
+        blocks, title = _copy.deepcopy(self._blocks), self._title
 
         def work():
             parts = [title] if title else []

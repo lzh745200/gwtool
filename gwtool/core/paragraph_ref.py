@@ -907,8 +907,7 @@ def resolve_anchor(ref: ParagraphRef) -> tuple[int, int]:
 
 
 def to_json_slots(slots: list[Slot]) -> str:
-    import json as _json
-    return _json.dumps(
+    return json.dumps(
         [{"name": s.name, "example": s.example, "label": s.label,
           "span": list(s.span)} for s in slots], ensure_ascii=False)
 

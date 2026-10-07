@@ -380,10 +380,10 @@ def enhance(text: str, existing=None) -> list:
             return []
         return _run(eng, text, existing or [])
     except Exception as e:                       # 硬约束：绝不外抛
-        global _ENGINE_ERROR
+        global _ENGINE, _ENGINE_ERROR
         _ENGINE_ERROR = f"推理异常：{e}"
         log.warning("L4 推理异常，本层结果丢弃：%s", e)
-        _ENGINE = None
+        _ENGINE = None                           # 丢弃坏引擎，下次强制重载
         return []
 
 
@@ -416,6 +416,7 @@ def _run(eng: _Engine, text: str, existing) -> list:
     stride = max(8, int(win * _WINDOW_STRIDE_RATIO))
 
     edits: dict[int, tuple[str, float]] = {}
+    names = _output_names(eng.session)       # 输出名跨窗口不变，循环外取一次
     start = 0
     while start < n:
         seg = chars[start:start + win]
@@ -433,18 +434,13 @@ def _run(eng: _Engine, text: str, existing) -> list:
         if not feed:
             break
         outputs = eng.session.run(None, feed)
-        names = _output_names(eng.session)
         det = cor = None
-        for idx, (nm, val) in enumerate(zip(names or [], outputs)):
+        for nm, val in zip(names or [], outputs):
             if eng.det_name and nm == eng.det_name:
                 det = val[0]
             elif eng.cor_name and nm == eng.cor_name:
                 cor = val[0]
-            elif not names:                      # 无名称时按位置约定
-                if idx == 0:
-                    det = val[0]
-                elif idx == 1:
-                    cor = val[0]
+        # 无名称时按位置约定兜底（names 为空时上面 zip 本就不执行）
         if det is None and outputs:
             det = outputs[0][0]
         if cor is None and len(outputs) >= 2:

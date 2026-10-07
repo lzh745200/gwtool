@@ -365,7 +365,7 @@ def enhance(text: str, existing=None) -> list:
 
     `existing` 为 L1–L4 的命中，其覆盖区间会被避让（L4 优先、L5 补漏）。
     """
-    global _ENGINE_ERROR
+    global _ENGINE, _ENGINE_ERROR
     try:
         if not text or not _setting_on():
             return []
@@ -680,9 +680,6 @@ def _diff_spans(src: str, dst: str) -> list[tuple[int, int, str]]:
             else:
                 row[j] = 1 + min(prev[j - 1], prev[j], row[j - 1])
 
-    # 正向重建路径：每一步在「匹配 / 替换 / 删 / 增」里选一个仍然最优的动作。
-    # 把连续的非匹配动作合并成一片改动。每轮必须至少推进一个下标，
-    # 用 `moved` 兜底防死循环。
     # 反向回溯（从 (n,m) 走到 (0,0)）。这是标准做法且无歧义：
     # 每个格子直接读 dp 值决定上一步动作，不需要"猜测"路径是否最优。
     ops: list[tuple[str, int, int, str]] = []      # (op, i, j, dst_char)

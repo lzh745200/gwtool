@@ -189,6 +189,7 @@ def build(req: ExportRequest, progress_cb=None) -> dict:
         att_rows = []
         if included:
             _report(f"正在复制 {len(included)} 个附件…")
+        seen_arc: set[str] = set()
         for item in included:
             path = attachments_dir() / Path(
                 item["stored"] or item["name"]).name
@@ -199,6 +200,14 @@ def build(req: ExportRequest, progress_cb=None) -> dict:
                 excluded.append(item)
                 continue
             arc = f"attachments/{safe_filename(item['name']) or 'file'}"
+            if arc in seen_arc:
+                # 不同文档的同名附件：zip 条目重名会被后者静默顶掉
+                # （ZipFile 按 NameToInfo 取值），与整库备份同口径——
+                # 挪进 excluded 并写明原因，随 manifest 带给用户。
+                item["reason"] = "包内已有同名附件"
+                excluded.append(item)
+                continue
+            seen_arc.add(arc)
             zf.writestr(arc, blob)
             item["path"] = arc
             item["sha256"] = _sha256(blob)

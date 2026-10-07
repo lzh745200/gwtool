@@ -161,10 +161,9 @@ class TestRestoreSurvivesBusyDatabase:
         assert started.wait(timeout=5)
         try:
             backup.restore_backup_detailed(zip_path)
-            blocked = False
         except RuntimeError:
             # 允许"明确报错"，但绝不能是 PermissionError 裸奔或数据被破坏
-            blocked = True
+            pass
         hold.set()
         th.join(timeout=10)
         assert not errors, f"后台线程不该报错：{errors}"
@@ -173,7 +172,6 @@ class TestRestoreSurvivesBusyDatabase:
         # 线程退出后必须能正常恢复
         rep = backup.restore_backup_detailed(zip_path)
         assert rep.ok is True
-        assert blocked in (True, False)       # 两种结果都可接受，重点是行为明确
 
 
 # ============================================================ 3. 坏包校验
@@ -258,7 +256,6 @@ class TestRestoreRejectsUnusableDatabase:
             backup.restore_backup_detailed(zp)
         data_dir = paths.app_data_dir()
         assert not list(data_dir.glob("*.restore.tmp")), "校验失败不能留临时文件"
-        assert not list(data_dir.glob("*.restore.tmp")), ""
 
     def test_required_tables_derived_from_schema(self):
         """必需表清单由 schema 声明推导，新增表自动纳入、不会漂移。"""

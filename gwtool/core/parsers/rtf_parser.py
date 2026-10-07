@@ -8,10 +8,14 @@ from .txt_parser import _HEADING_RE
 
 def parse_rtf(path: str) -> DocTree:
     from striprtf.striprtf import rtf_to_text
-    raw = open(path, "rb").read()
+    with open(path, "rb") as f:
+        raw = f.read()
     try:
         text = rtf_to_text(raw.decode("gb18030", errors="ignore"))
-    except Exception:
+    except Exception as exc:
+        # 静默降级是设计（latin-1 永不失败），但留痕便于排查解码异常原因
+        from ...logs import get_logger
+        get_logger("parse").debug("RTF gb18030 解码后解析失败，回退 latin-1：%s", exc)
         text = rtf_to_text(raw.decode("latin-1", errors="ignore"))
     tree = DocTree()
     first = True
