@@ -219,17 +219,77 @@ def compile_docx(req: CompileRequest) -> str:
 
 
 # ------------------------------------------------------------------ PDF 输出
+# 目录域占位文字（docxgen._add_field 写在 TOC 域的 separate/end 之间）。
+# 转换器若没有更新域，这段文字会原样进 PDF —— 用它判定"目录页码没算出来"。
+_TOC_PLACEHOLDER = "（打开文档后按提示更新目录页码）"
+
+
+def _pdf_has_stale_toc(pdf_path: str) -> bool:
+    """PDF 前 4 页是否仍留着目录域占位串（= 转换器没有更新域）。
+
+    只查前 4 页（目录一定在最前面）；读取失败一律按"无法判定"返回 False ——
+    判定失败不该影响主流程，PDF 本身已经生成好了。
+    """
+    doc = None
+    try:
+        try:
+            import pymupdf as fitz
+        except ImportError:  # pragma: no cover - 老版本 PyMuPDF 的旧别名
+            import fitz  # type: ignore
+        doc = fitz.open(str(pdf_path))
+        for pno in range(min(doc.page_count, 4)):
+            if _TOC_PLACEHOLDER in (doc[pno].get_text("text") or ""):
+                return True
+    except Exception:
+        return False
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+    return False
+
+
+def _update_fields_com(document) -> None:
+    """COM：保存 PDF 前更新域并重排（P1-03）。
+
+    实测（WPS 12.0）：即使 docx 的 settings.xml 写了 `w:updateFields=true`、
+    TOC 域也带 `dirty=true`，COM 直接 `SaveAs2(FileFormat=17)` 得到的 PDF
+    目录页**只有占位文字**「（打开文档后按提示更新目录页码）」。必须显式
+    `Fields.Update()` 让 TOC/PAGE 重算，再 `Repaginate()` 让分页与页码同步。
+
+    两步都各自吞异常：某些版本的 WPS/Word 对空文档或纯文本会拒绝更新域，
+    那只意味着"目录可能仍是占位文字"，不该让整次导出失败。
+    """
+    try:
+        document.Fields.Update()
+    except Exception as exc:
+        logs.get_logger("compile").warning(
+            "更新文档域失败，导出的 PDF 目录可能仍是占位文字：%s", exc)
+    try:
+        document.Repaginate()
+    except Exception:
+        pass  # 重排失败无碍：Update 已按现有分页算过一遍
+
+
 def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
-    """docx -> PDF。离线策略：优先调用本机 Word/WPS COM（Windows），
-    其次 LibreOffice；都不可用则抛出提示（可用内置 PDF 渲染器替代）。
+    """docx -> PDF。离线策略：先 LibreOffice（有则最快），再本机 Word/WPS COM；
+    都不可用则抛出提示（可用内置 PDF 渲染器替代）。
 
     两处收尾都不能省：
       - LibreOffice 分支的临时目录必须 rmtree（老实现每次转 PDF 都在 %TEMP%
         留一个 gwtool_pdf_* 目录，批量转 200 份就是 200 个残留目录）；
       - COM 分支必须 finally 里 Quit + Close，否则 SaveAs2 抛异常时会留下
         看不见的 WPS/Word 后台进程，反复导出后进程越堆越多。
+
+    目录域（P1-03）：LibreOffice 的 headless 转换**不保证**更新域，转出来的
+    PDF 目录页可能只有占位文字；COM 分支则显式 Update 后再存。因此 LibreOffice
+    产物若被判定"目录域未更新"，会先留日志再继续尝试 COM（失败则退回该产物），
+    而不是把一个空目录的 PDF 当成功直接返回。
     """
     out_pdf = out_pdf or str(Path(docx_path).with_suffix(".pdf"))
+    stale_toc_pdf = False
     if shutil.which("soffice") or shutil.which("libreoffice"):
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
         outdir = tempfile_dir()
@@ -241,13 +301,19 @@ def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
             produced = Path(outdir) / (Path(docx_path).stem + ".pdf")
             if produced.exists():
                 shutil.move(str(produced), out_pdf)
-                return out_pdf
-            # 转换失败要留痕：stderr 摘要写日志，否则用户只看到
-            # "未找到可用组件"，误以为缺依赖而非文档本身有问题。
-            from .logs import get_logger
-            get_logger("compile").warning(
-                "LibreOffice 转 PDF 失败（exit=%s）：%s", result.returncode,
-                (result.stderr or b"").decode("utf-8", errors="replace")[:300])
+                if not _pdf_has_stale_toc(out_pdf):
+                    return out_pdf
+                # 目录域没更新：不直接返回，交给下面的 COM 再试一次
+                stale_toc_pdf = True
+                logs.get_logger("compile").warning(
+                    "LibreOffice 转出的 PDF 目录域未更新（目录页仍是占位文字），"
+                    "继续尝试 WPS/Word 转换")
+            else:
+                # 转换失败要留痕：stderr 摘要写日志，否则用户只看到
+                # "未找到可用组件"，误以为缺依赖而非文档本身有问题。
+                logs.get_logger("compile").warning(
+                    "LibreOffice 转 PDF 失败（exit=%s）：%s", result.returncode,
+                    (result.stderr or b"").decode("utf-8", errors="replace")[:300])
         finally:
             shutil.rmtree(outdir, ignore_errors=True)
     if os.name == "nt":
@@ -263,8 +329,13 @@ def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
                     app = win32com.client.Dispatch(progid)
                     app.Visible = False
                     doc = app.Documents.Open(str(Path(docx_path).resolve()), ReadOnly=True)
+                    _update_fields_com(doc)      # P1-03：先更新域，再另存
                     doc.SaveAs2(str(Path(out_pdf).resolve()), FileFormat=17)  # wdFormatPDF
                     if Path(out_pdf).exists():
+                        if _pdf_has_stale_toc(out_pdf):
+                            logs.get_logger("compile").warning(
+                                "%s 转换的 PDF 目录域仍未更新，目录页可能只有占位文字",
+                                progid)
                         return out_pdf
                 except Exception:
                     continue
@@ -280,6 +351,13 @@ def docx_to_pdf(docx_path: str, out_pdf: str = "") -> str:
                             app.Quit()
                         except Exception:
                             pass
+    if stale_toc_pdf and Path(out_pdf).exists():
+        # 只有 LibreOffice 可用且它不更新域：产物本身完整、只是目录是占位文字。
+        # 退回它比抛错更可用（用户仍可打开），但必须把"怎么补救"写清楚。
+        logs.get_logger("compile").warning(
+            "已返回 LibreOffice 转出的 PDF，但其目录页为占位文字；"
+            "补救：用「内置渲染器」导出 PDF，或在 Word/WPS 中「更新域」后另存")
+        return out_pdf
     raise RuntimeError(
         "本机未找到可用的 docx->PDF 转换组件（WPS/Word/LibreOffice）。\n"
         "请使用程序内置的「PDF 预览/导出」功能（内置渲染器直接生成 PDF）。")

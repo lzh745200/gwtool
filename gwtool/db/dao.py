@@ -82,6 +82,23 @@ class SearchResult:
 
 
 @dataclass
+class SearchPage:
+    """一次检索的结果页：`results` 是前 limit 条，`total` 是命中总篇数。
+
+    为什么需要它：UI 只显示前 100 条，若 DAO 也只回传这 100 条，界面就只能写
+    "检索到 100 处"——命中 300 篇的用户会把"截断"误读成"库里只有 100 篇"。
+    `total` 让调用方能如实写"共 N 篇，显示前 M 篇"。
+    """
+    results: list[SearchResult]
+    total: int
+
+    @property
+    def has_more(self) -> bool:
+        """是否还有未显示的结果（total > 本次返回条数）。"""
+        return self.total > len(self.results)
+
+
+@dataclass
 class Dispatch:
     """一条发文登记记录。"""
     id: int = 0
@@ -1072,9 +1089,20 @@ def _prune_snapshots(conn, doc_id: int | None):
         (doc_id, doc_id, SNAPSHOT_KEEP))
 
 
-def list_snapshots(doc_id: int | None = None, limit: int = 200) -> list[dict]:
+def list_snapshots(doc_id: int | None = None, limit: int = 200,
+                   *, all_docs: bool = False) -> list[dict]:
+    """历史快照列表。
+
+    **默认必须指定 doc_id**：旧实现在 doc_id=None 时返回全库快照，而
+    `SnapshotsDialog` 在"还没打开文档"时恰好把 None 传进来 —— 于是对话框会
+    列出全库所有文档的历史版本，用户还能把别篇材料的内容回滚进当前编辑器
+    （串档）。全库列表改为只有显式 `all_docs=True` 才允许；doc_id 为空且未
+    显式要求时返回空列表（调用方据此显示"请先打开文档"）。
+    """
     conn = dbconn.get_conn()
-    if doc_id is None:
+    if not doc_id:
+        if not all_docs:
+            return []
         rows = conn.execute(
             "SELECT * FROM snapshots ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     else:
@@ -1113,6 +1141,41 @@ def all_ignore_words() -> set[str]:
 # ---------------------------------------------------------------- search
 def search_documents(query: str, limit: int = 50) -> list[SearchResult]:
     return _fts_search("documents_fts", "documents", query, limit)
+
+
+def search_documents_page(query: str, limit: int = 50) -> SearchPage:
+    """文档检索 + 命中总篇数，供 UI 如实显示"共 N 篇，显示前 M 篇"。
+
+    total 用与检索完全相同的 MATCH 表达式再 count 一次（FTS 计数在 3000 篇
+    量级实测 0.2 ms，不值得为省这一次查询让文案继续撒谎）。
+    """
+    match = build_match_query(query)
+    if not match:
+        return SearchPage([], 0)
+    results = _fts_search("documents_fts", "documents", query, limit)
+    return SearchPage(results, _fts_count("documents_fts", "documents", match))
+
+
+def _fts_count(fts_table: str, src_table: str, match: str) -> int:
+    """FTS MATCH 命中的行数（documents 表额外排除回收站）。
+
+    畸形查询串一律按 0 处理：与 `_fts_search` 的"检索面板不能被用户输入炸掉"
+    同一约定，绝不把 sqlite 异常抛给界面。
+    """
+    try:
+        conn = dbconn.get_conn()
+        if src_table == "documents":
+            row = conn.execute(
+                f"SELECT count(*) FROM {fts_table} f JOIN {src_table} d"
+                f" ON d.id=f.ref_id WHERE {fts_table} MATCH ?"
+                f" AND d.deleted_time=''", (match,)).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT count(*) FROM {fts_table} WHERE {fts_table} MATCH ?",
+                (match,)).fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    return int(row[0]) if row else 0
 
 
 def search_dictionary(query: str, limit: int = 50) -> list[SearchResult]:
@@ -1431,6 +1494,40 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
             if len(tok) > 9:
                 continue
             best = max(best, int(tok))
+    return best
+
+
+def max_archive_seq(prefix: str, year: str) -> int:
+    """某档号前缀某年度已用的最大流水号；无记录返回 0。
+
+    档号形如「XX局2026-0007」（见 `core.archive.next_archive_no`）。归档若每批
+    都从 0001 重新编，同一年度第二批就会与第一批撞号 —— 起始序号必须接续本
+    年度已用的最大值，所以本函数回答的是"已经用到几号"。
+
+    prefix/year 来自用户输入：`_` 与 `%` 在 LIKE 里是通配符，不转义时
+    prefix='_' 会把任意档号都算进来（与 max_doc_no_serial 同一类风险）。
+    这里显式 ESCAPE；解析序号用 `-(\\d+)$` 只认档号结尾的流水段。
+    """
+    conn = dbconn.get_conn()
+
+    def _esc(text: str) -> str:
+        return (str(text or "").replace("\\", "\\\\")
+                .replace("%", "\\%").replace("_", "\\_"))
+
+    pattern = f"{_esc(prefix)}{_esc(str(year or ''))}-%"
+    rows = conn.execute(
+        "SELECT archive_no FROM receive_register"
+        " WHERE archive_no LIKE ? ESCAPE '\\'", (pattern,)).fetchall()
+    best = 0
+    for r in rows:
+        m = re.search(r"-(\d+)\s*$", (r["archive_no"] or "").strip())
+        if not m:
+            continue
+        tok = m.group(1)
+        # 脏数据（误粘贴的超长数字）只跳过该条，否则起始序号会被顶到天文数字
+        if len(tok) > 9:
+            continue
+        best = max(best, int(tok))
     return best
 
 

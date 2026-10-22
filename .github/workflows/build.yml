@@ -85,6 +85,16 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m pytest tests/ -q --timeout=300
 
+      # 引擎质量门禁（P0-2）：此前 e2e 只验"流水线能跑通"，E1/E2 这类精度指标
+      # 完全没有 CI 拦截——评测脚本本身默认还会因 E4 FAIL 退出 1，等于不可用。
+      # --profile base 只把 E1/E2 作为硬门禁（E3/E5 无 --corpus 时仅示意并标
+      # SKIP，E4/E6 属增强层指标），因此**不需要增强包**即可在两个平台硬化。
+      - name: 纠错评测门禁（--profile base：基础三层，不依赖增强包）
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
+        run: python scripts/eval_corrector.py --profile base
+
       - name: 端到端自检（导入→汇编→PDF→检索→纠错→备份 全流程）
         env:
           QT_QPA_PLATFORM: offscreen
@@ -247,6 +257,15 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONIOENCODING: utf-8
         run: $PYBIN -m pytest tests/ -q --timeout=300
+
+      # 与 Windows job 对齐：引擎质量门禁（--profile base）。
+      # 只把 E1/E2 当硬门禁，E3/E5 无 --corpus 时标"示意·不参与门禁"、
+      # E4/E6 属增强层指标，故本步骤不依赖增强包，两平台都能真实硬化。
+      - name: 纠错评测门禁（--profile base：基础三层，不依赖增强包）
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONIOENCODING: utf-8
+        run: $PYBIN scripts/eval_corrector.py --profile base
 
       - name: 端到端自检（导入→汇编→PDF→检索→纠错→备份 全流程）
         env:

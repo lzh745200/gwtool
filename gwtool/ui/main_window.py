@@ -402,7 +402,7 @@ class MainWindow(QMainWindow):
         self._reminder_btn.clicked.connect(self.open_reminders)
         # 胶囊徽标视觉（§6.1）：DANGER 底白字圆角，仅在有逾期时出现
         self._reminder_btn.setStyleSheet(
-            f"QPushButton {{ background:{theme.DANGER}; color:white; border:none;"
+            f"QPushButton {{ background:{theme.DANGER}; color:{theme.ON_DANGER}; border:none;"
             f"border-radius:9px; padding:2px 10px; font-size:{theme.SMALL}pt; }}"
             f"QPushButton:hover {{ background:{theme.PRIMARY_DIM}; }}")
         self._reminder_btn.hide()

@@ -404,6 +404,7 @@ def make_primary_tool_button(action) -> QToolButton:
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setStyleSheet(
         f"QToolButton#btn_primary_action {{ background:{theme.PRIMARY};"
+        f"color:{theme.ON_PRIMARY};"
         f"border:1px solid {theme.PRIMARY}; border-radius:3px; padding:2px 8px; }}"
         f"QToolButton#btn_primary_action:hover {{ background:{theme.PRIMARY_DIM}; }}"
         f"QToolButton#btn_primary_action:pressed {{ background:{theme.HEADING_BG}; }}")
@@ -414,7 +415,7 @@ def make_primary_tool_button(action) -> QToolButton:
 #: 语义 → (底色, 前景色, 描边色)。全部取自 theme token，禁用新造色值（§7.4）。
 _CHIP_KINDS = {
     "info": ("INFO_BG", "INFO"),
-    "primary": ("BG", "PRIMARY"),
+    "primary": ("BG", "ACCENT_FG"),
     "success": ("SUCCESS_BG", "SUCCESS"),
     "warn": ("WARN_BG", "WARN"),
     "danger": ("DANGER_BG", "DANGER"),

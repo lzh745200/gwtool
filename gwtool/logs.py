@@ -54,8 +54,19 @@ def redact(value) -> str:
 # 动辄数百上千字。阈值取 64 是保守值 —— 短到能整体出现在日志里的
 # 有用信息（函数名、状态码）都不会被误伤。
 _MAX_ARG = 64
-# 格式串本身（无参时即整条消息）的长度上限
-_MAX_MSG = 512
+# 格式串本身（无参时即整条消息）的长度上限。
+# 取值依据（v1.9 P1-34，审计实测：240 字的 f-string 正文可原样落盘）：
+#   * 全仓**最长的一条无参日志**是 74 字（compiler.py 的 LibreOffice 目录页
+#     提示），160 给到 ~2.2 倍余量，正常排障消息不会被误伤；
+#   * 审计泄漏样本是 240 字，160 能把它整条挡下（留 80 字余量）；
+#   * 再放宽回 512 就等于默认"短正文/整段引文"也能落盘，隐私红线失守。
+# 唯一例外是下方 `_MSG_SAFE_ATTR` 标记的**内部摘要**（如崩溃摘要：只含
+# 异常类型 + 长度 + 位置，构造上就不含正文）——绝对路径能把它顶过 160，
+# 若被整条隐去，排障第一步的"异常类型"就丢了。
+_MAX_MSG = 160
+# 内容安全标记：仅 `logs.py` 内部构造、**构造上不含正文**的摘要可以打这个
+# 标记跳过 _MAX_MSG 截断。业务模块一律不得使用（有 AST 门禁测试守着）。
+_MSG_SAFE_ATTR = "_gwtool_content_free"
 
 
 class RedactingFilter(logging.Filter):
@@ -67,9 +78,11 @@ class RedactingFilter(logging.Filter):
 
     处理两类渠道：
     1. **带参日志**（`log("%s", value)`）：`args` 逐个压成长度标记；
-    2. **无参长消息**（f-string 直接拼进 `msg`）：超过 `_MAX_MSG` 截断。
-       —— f-string 拼正文是**编码纪律**问题，过滤器只能兜底（截断），
-       根治靠"传参 + 让本过滤器接管"，这也是新增本过滤器的目的。
+    2. **无参长消息**（f-string 直接拼进 `msg`）：超过 `_MAX_MSG` **整体替换**
+       成长度标记（不截断：截断只丢尾部，标记若落在前 160 字里照样泄漏）。
+       —— f-string 拼正文是**编码纪律**问题，过滤器只能兜底；
+       根治靠"传参 + 让本过滤器接管"，另由 `tests` 里的 AST 门禁禁止新写
+       `logger.xxx(f"...")` 调用。
 
     过滤器自身任何异常都吞掉：日志坏了不能拖垮主流程。
     """
@@ -102,10 +115,11 @@ class RedactingFilter(logging.Filter):
             else:
                 record.args = (cls._short(args),)
         msg = record.msg
-        if isinstance(msg, str) and len(msg) > _MAX_MSG:
+        if (isinstance(msg, str) and len(msg) > _MAX_MSG
+                and not getattr(record, _MSG_SAFE_ATTR, False)):
             # 长消息几乎必然是 f-string 拼了正文。**必须整体替换**而不是
-            # 截断 —— 截断只丢掉后面的，标记若落在前 512 字里照样泄漏
-            # （实测：`导入失败：正文×40` 截到 512 字仍有 20 份标记）。
+            # 截断 —— 截断只丢掉后面的，标记若落在前 160 字里照样泄漏
+            # （实测：`导入失败：正文×40` 截断后仍留 20 份标记）。
             record.msg = redact(msg)
 
 
@@ -233,8 +247,11 @@ def install_excepthooks() -> None:
             # 因此这里**不带参**记录 —— 若作为 %s 参数传入，会被本模块的
             # RedactingFilter 当作"可能带正文的长参数"整体隐去，类型名就丢了
             # （实测：`未捕获异常：<66 字，内容已隐去>`，连 ValueError 都看不到）。
+            # 摘要会用绝对路径拼出 where，路径深时可能超过 _MAX_MSG；它是**构造上
+            # 不含正文**的内容，故显式打 `_MSG_SAFE_ATTR` 跳过消息上限。
             get_logger("crash").error(
-                "未捕获异常：" + _crash_summary(exc_type, exc, tb))
+                "未捕获异常：" + _crash_summary(exc_type, exc, tb),
+                extra={_MSG_SAFE_ATTR: True})
         except Exception:
             pass
         # 保留默认行为，开发态仍能在终端看到
@@ -248,7 +265,8 @@ def install_excepthooks() -> None:
             get_logger("crash").error(
                 "线程未捕获异常（%s）：" % getattr(args, "thread", None)
                 + _crash_summary(args.exc_type, args.exc_value,
-                                 args.exc_traceback))
+                                 args.exc_traceback),
+                extra={_MSG_SAFE_ATTR: True})
         except Exception:
             pass
 

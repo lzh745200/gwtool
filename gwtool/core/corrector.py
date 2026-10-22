@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 
 from . import grammar_rules
@@ -589,18 +590,62 @@ def _dedupe(items: list[Correction]) -> list[Correction]:
     精标集实测因此只有 99.4%（评测 E1 长期红灯）。
     消解是**单向**的——只有 L1 长对能吃掉别人，反向不成立，
     所以规则层自身的命中不会被误伤，重叠语义仍由下面的贪心兜底。
+
+    **v1.9 性能（审计 P1-16）**：原实现的两处都是 O(n²) ——
+      · 包含消解对每个候选遍历全部 lexicon 命中；
+      · 贪心对每个候选遍历**已收**全部区间。
+    实测 500/2000/4000 命中 = 8.1/139/549 ms，命中密集时占 ``check_text``
+    总耗时的 95%（4000 命中 632 ms，见审计报告 §2.2）。
+    这里改成两次「按 start 排序 + 二分」，复杂度降到 O(n log n)：
+
+      · 消解：lexicon 按 start 排序，二分出 ``start <= c.start`` 的右端点后
+        **向前**回溯。被包含的 L1 长对长度 ≤ ``longest``，所以其 start 不可能
+        小于 ``c.start - longest`` —— 回溯步数有常数上界，不随命中数增长；
+      · 贪心：已收区间**彼此不相交**，故按 start 排序后 ends 单调递增。
+        候选 [s,e) 是否与已收区间重叠，只需看 ``bisect_left(starts, e)`` 的
+        **前一个**区间的 end 是否 > s（后一个的 start 必然 ≥ e，不可能重叠）。
+
+    语义与旧实现逐条等价（同样的排序键、同样的贪心顺序、同样的返回排序），
+    由 ``tests/test_rules_guard_v19.py::test_dedupe_same_as_reference_on_random_data``
+    在随机数据上与"朴素参照实现"对拍守住。
     """
+    # ---- ① 包含消解（L1 长对优先）
     lexicon = [c for c in items if c.reason == _REASON_LEXICON]
     if lexicon:
-        items = [c for c in items
-                 if c.reason == _REASON_LEXICON or not any(
-                     e.start <= c.start and c.end <= e.end
-                     and (e.end - e.start) > (c.end - c.start) for e in lexicon)]
-    items = sorted(items, key=lambda c: (c.confidence, c.end - c.start), reverse=True)
+        spans = sorted((e.start, e.end) for e in lexicon)
+        lex_starts = [s for s, _ in spans]
+        longest = max(e - s for s, e in spans)
+        kept: list[Correction] = []
+        for c in items:
+            if c.reason == _REASON_LEXICON:
+                kept.append(c)
+                continue
+            c_len = c.end - c.start
+            j = bisect_left(lex_starts, c.start + 1) - 1   # start <= c.start
+            floor = c.start - longest
+            dominated = False
+            while j >= 0 and lex_starts[j] >= floor:
+                es, ee = spans[j]
+                if ee >= c.end and (ee - es) > c_len:
+                    dominated = True
+                    break
+                j -= 1
+            if not dominated:
+                kept.append(c)
+        items = kept
+
+    # ---- ② 贪心去重（置信度 → 覆盖长度 降序）
+    items = sorted(items, key=lambda c: (c.confidence, c.end - c.start),
+                   reverse=True)
     taken: list[Correction] = []
+    starts: list[int] = []      # 已收区间的 start，升序
+    ends: list[int] = []        # 与 starts 同序；区间互不相交 ⇒ ends 单调递增
     for c in items:
-        if any(not (c.end <= t.start or c.start >= t.end) for t in taken):
-            continue
+        i = bisect_left(starts, c.end)
+        if i and ends[i - 1] > c.start:
+            continue            # 与前一个已收区间重叠
+        starts.insert(i, c.start)
+        ends.insert(i, c.end)
         taken.append(c)
     return sorted(taken, key=lambda c: c.start)
 

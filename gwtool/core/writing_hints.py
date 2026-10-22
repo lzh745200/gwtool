@@ -45,6 +45,17 @@ _LAYER_RE = re.compile(
 _DATE_RE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 # 主送机关行：句末冒号且不含句号（"各市人民政府："这类）
 _RECIPIENT_RE = re.compile(r"^\s*[^\n。；]{2,30}[：:]\s*$", re.M)
+# 完成时限的**文本级**判据（P1-22）。槽位规则只认「N 个工作日内」，而公文
+# 布置任务时更常用日期式写法（「9月20日前」「本月底前」「年底前」）—— 只认
+# 前一种会把最规范的通知判成"未识别到完成时限"。
+# 刻意收得紧：必须有「日＋前/以前/之前」或「月底/年底＋前」，不拿单字「前」
+# 兜底，否则「前期」「前往」「目前」都会让提示静默消失（那是漏报，比误报更坏）。
+_DEADLINE_RE = re.compile(
+    r"(?:(?:\d{4}\s*年\s*)?\d{1,2}\s*月\s*\d{1,2}\s*日"
+    r"|(?:\d{1,2}|本|下|当|今)?\s*月\s*底"
+    r"|(?:今|本)?\s*年\s*底)\s*(?:以前|之前|前(?!后))"
+    r"|[0-9〇零一二三四五六七八九十两]+\s*个\s*工作日",
+    re.M)
 
 # 段落/句子切分：中文句末标点与换行都算断句（与 style_profile 同口径）
 _SENT_SPLIT_RE = re.compile(r"[。！？；!?;]+")
@@ -243,7 +254,12 @@ def _structure_hints(text: str, kind: str) -> list[Hint]:
 
 
 def _element_hints(text: str, kind: str) -> list[Hint]:
-    """要素抽取：复用 paragraph_ref 的槽位规则，缺关键要素时提示。"""
+    """要素抽取：复用 paragraph_ref 的槽位规则，缺关键要素时提示。
+
+    时限判定是"槽位 ＋ 文本级正则"双判据：槽位只认「N 个工作日内」，日期式
+    写法（「9月20日前」「本月底前」「年底前」）由 ``_DEADLINE_RE`` 兜底。
+    两者都判据明确，不拿单字「前」兜底，避免把真缺失静默成"已写"。
+    """
     try:
         from . import paragraph_ref
         slots = paragraph_ref.extract_slots(text)
@@ -258,7 +274,9 @@ def _element_hints(text: str, kind: str) -> list[Hint]:
         out.append(Hint("要素", "未识别到日期",
                         "涉及成文日期、印发日期时建议写明到日", "info"))
     # 时限只在"布置任务"的文种里才要求，避免对报告类无谓提醒
-    if kind in ("通知", "意见", "指示", "决定", "方案") and "deadline" not in names:
+    if (kind in ("通知", "意见", "指示", "决定", "方案")
+            and "deadline" not in names
+            and not _DEADLINE_RE.search(text)):
         out.append(Hint("要素", "未识别到完成时限",
                         "布置工作宜明确时间节点（如「于本月底前完成」）", "info"))
     return out
@@ -468,8 +486,13 @@ def _layer_hints(text: str) -> list[Hint]:
 
     序号可以随上级标题重新开始（每个「一、」下重新用「（一）」「1.」），
     因此出现更浅层级的序号时，把更深层级的期望值复位为 1；没有更浅层标题可
-    依据时，「（一）」「1.」从 1 重新起算视为合法重启（分层文档的常态）。
-    「一是」是段内枚举，下段可重新从「一是」开始，故按行复位。
+    依据时，同层级从 1 重新起算视为合法重启（分层文档的常态）。
+
+    **「一是」（level 4）必须跨行连续判定**（P1-17）：一个「一是」在公文里
+    通常独占一段，按行复位会把「一是…／二是…／三是…」整组判成跳号 —— 那是
+    经验材料、调研报告、经验总结最主要的写法。现在只在出现更浅层级序号
+    （即换了父级）时复位；同一父级内重新从「一是」起算按合法重启处理，
+    与「（一）」「1.」一致，避免对"另起一组枚举"刷假提示。
     """
     out: list[Hint] = []
     markers = _collect_layer_markers(text)
@@ -479,19 +502,12 @@ def _layer_hints(text: str) -> list[Hint]:
     last_val = {1: 0, 2: 0, 3: 0, 4: 0}
     last_label = {1: "", 2: "", 3: "", 4: ""}
     first_seen: dict[int, int] = {}
-    prev_line = -1
 
     for order, (line_no, level, value, _pos, label) in enumerate(markers):
         first_seen.setdefault(level, order)
         if value <= 0:
             continue
-        # 「一是」是段内枚举，允许下一段重新从「一是」起，故按行复位
-        if level == 4 and line_no != prev_line:
-            next_val[4] = 1
-            last_val[4] = 0
-            last_label[4] = ""
-        prev_line = line_no
-        # 出现更浅层级序号 → 更深一层的序号重新从 1 开始
+        # 出现更浅层级序号 → 更深一层的序号重新从 1 开始（父级换了）
         for deeper in range(level + 1, 5):
             next_val[deeper] = 1
             last_val[deeper] = 0
@@ -501,9 +517,10 @@ def _layer_hints(text: str) -> list[Hint]:
             issue = ""
         elif last_val[level] and value == last_val[level]:
             issue = "重号"
-        elif level in (2, 3) and value == 1 and expected > 1:
-            # 「（一）」「1.」常随新章节重新起序号；没有更浅层标题可依据时
-            # 把它当合法重启，避免对分层文档刷假提示
+        elif level in (2, 3, 4) and value == 1 and expected > 1:
+            # 「（一）」「1.」「一是」都可随新章节/新一组枚举重新从 1 起；
+            # 没有更浅层标题可依据时，把它当合法重启，避免对分层文档刷假提示。
+            # 真重号在上一个分支已拦下（重号必是"与上一处相同的值"）。
             issue = ""
         elif value > expected:
             issue = "跳号"

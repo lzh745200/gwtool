@@ -329,7 +329,7 @@ class ReferencePanel(QWidget):
             btn = QPushButton(text)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(
-                f"QPushButton {{ border:none; color:{theme.PRIMARY};"
+                f"QPushButton {{ border:none; color:{theme.ACCENT_FG};"
                 f"padding:1px 6px; }}"
                 f"QPushButton:hover {{ background:{theme.HOVER_BG}; }}")
             btn.clicked.connect(slot)
@@ -570,7 +570,7 @@ class ReferencePanel(QWidget):
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(
                 f"QPushButton {{ border:1px solid {theme.BORDER};"
-                f"color:{theme.PRIMARY}; padding:1px 8px; border-radius:3px; }}"
+                f"color:{theme.ACCENT_FG}; padding:1px 8px; border-radius:3px; }}"
                 f"QPushButton:hover {{ border-color:{theme.PRIMARY};"
                 f"background:{theme.HOVER_BG}; }}")
             row.addWidget(b, 0, Qt.AlignTop)

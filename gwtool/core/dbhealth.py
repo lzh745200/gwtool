@@ -127,15 +127,23 @@ def consistency_check() -> "tuple[list[str], dict]":
     是用户最困惑的故障之一，必须让自检能发现并指路。
 
     三条只读查询，成本都是毫秒级：
-      1. FTS 行数 vs documents 行数（失配 = 有文档搜不到 / 索引有鬼影）
+      1. FTS 行数 vs **在库文档**行数（失配 = 有文档搜不到 / 索引有鬼影）
       2. 附件 doc_id 悬空（指向已不存在的文档）
       3. 快照 doc_id 悬空（「历史版本」里挂着已删除的文档）
+
+    ⚠️ 第 1 条必须用 `deleted_time=''` 的在库文档数：回收站里的文档**没有**
+    FTS 行（`rebuild_fts` 只索引在库文档），拿全表 `count(*)` 与之比较，
+    只要有文档进过回收站就会报"索引不一致"，而且重建索引也治不好 ——
+    实测 2 篇进回收站后启动自检持续告警，用户只能反复重建索引（v1.9 修复）。
     """
     problems: list[str] = []
     stats: dict = {}
     try:
         conn = dbconn.get_conn()
-        docs = int(conn.execute("SELECT count(*) FROM documents").fetchone()[0])
+        docs = int(conn.execute(
+            "SELECT count(*) FROM documents WHERE deleted_time=''").fetchone()[0])
+        docs_trash = int(conn.execute(
+            "SELECT count(*) FROM documents WHERE deleted_time<>''").fetchone()[0])
         fts = int(conn.execute(
             "SELECT count(*) FROM documents_fts").fetchone()[0])
         orphan_att = int(conn.execute(
@@ -146,12 +154,12 @@ def consistency_check() -> "tuple[list[str], dict]":
             "SELECT count(*) FROM snapshots s "
             "WHERE s.doc_id > 0 AND NOT EXISTS "
             "(SELECT 1 FROM documents d WHERE d.id = s.doc_id)").fetchone()[0])
-        stats = {"documents": docs, "fts_rows": fts,
-                 "orphan_attachments": orphan_att,
+        stats = {"documents": docs, "documents_in_trash": docs_trash,
+                 "fts_rows": fts, "orphan_attachments": orphan_att,
                  "orphan_snapshots": orphan_snap}
         if fts != docs:
             problems.append(
-                f"全文索引与文档数不一致（文档 {docs} 篇 / 索引 {fts} 行）——"
+                f"全文索引与在库文档数不一致（在库 {docs} 篇 / 索引 {fts} 行）——"
                 "部分文档可能搜不到。可在「工具 → 数据库维护」中重建全文索引。")
         if orphan_att:
             problems.append(

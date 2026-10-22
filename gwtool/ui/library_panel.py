@@ -23,6 +23,9 @@ class LibraryPanel(QWidget):
     open_document = Signal(int)
     import_requested = Signal(int)          # 导入到该分类
     selection_changed = Signal()
+    # 检索结果单次最多展示的篇数。超出时底部文案会如实写"共 N 篇，显示前 100 篇"
+    # —— 硬截断本身可以接受（列表控件不适合塞几千项），**不告诉用户被截断**不行。
+    _SEARCH_LIMIT = 100
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,7 +175,14 @@ class LibraryPanel(QWidget):
             return own.get(cat_id, 0) + sum(
                 total(ch.id) for ch in by_parent.get(cat_id, []))
 
-        root.setText(1, str(sum(own.values())))
+        # 「全部文档」必须是**在库总篇数**。count_documents_by_category() 按分类
+        # 聚合且只统计 category_id>0，未分类文档不在返回里 —— 用 sum(own) 会让
+        # 根节点少掉所有未分类材料（实测 3000 篇里 1000 篇未分类时显示 2000）。
+        try:
+            root_total = dao.count_documents()
+        except Exception:
+            root_total = sum(own.values())
+        root.setText(1, str(root_total))
         root.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
         for c in cats:
             node = nodes.get(c.id)
@@ -298,7 +308,10 @@ class LibraryPanel(QWidget):
         if not kw:
             self._reload_docs()
             return
-        results = dao.search_documents(kw, limit=100)
+        # 取"前 100 条 + 命中总篇数"：只回传 100 条时界面只能写"检索到 100 处"，
+        # 命中 300 篇的用户会把截断误读成"库里只有 100 篇"。
+        page = dao.search_documents_page(kw, limit=self._SEARCH_LIMIT)
+        results = page.results
         for r in results:
             item = QListWidgetItem(f"{r.title}\n    {r.snippet}")
             item.setData(Qt.UserRole, r.ref_id)
@@ -306,7 +319,11 @@ class LibraryPanel(QWidget):
         if not results:
             # 检索无命中与"库是空的"是两回事，提示要能区分开
             self._add_empty_hint(searching=True)
-        self._set_count_text(f"检索到 {len(results)} 处")
+        if page.has_more:
+            self._set_count_text(
+                f"共 {page.total} 篇，显示前 {len(results)} 篇")
+        else:
+            self._set_count_text(f"共 {page.total} 篇")
 
     # ------------------------------------------------ 右键菜单
     def _cat_menu(self, pos):

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QListWidget,
@@ -48,6 +48,14 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._loading_source = ""       # 后台解析中暂存的文件名（回调里落 _source）
         self._loading = False           # 程序性写输入框时抑制 textChanged 重建
         self._worker: FnWorker | None = None
+        # P0-1 竞态防护：每次扫描绑定一个自增 token + 输入指纹。
+        # 结果回来时两者任一与当前不符，就说明"扫描期间正文变了"——
+        # 此时命中偏移（块内局部 offset）已不能套到新文本上，必须整批丢弃。
+        self._scan_token = 0
+        self._scan_fp: tuple | None = None
+        self._rescan_timer = QTimer(self)
+        self._rescan_timer.setSingleShot(True)
+        self._rescan_timer.timeout.connect(self._rescan_after_stale)
         self._build_ui()
 
     # ------------------------------------------------------------ 界面
@@ -201,12 +209,15 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
 
         程序性写输入框（载入文件/同步修正结果）经由 _loading 抑制，不会走到这里。
 
-        必须同时清掉 `_title`：标题命中也参与纠错（_render 里对 _title 单独
+        必须同时清掉 `_title`：标题命中也参与纠错（_render 里对 `_title` 单独
         check_text 一次），而 `_title` 只代表"载入时那份文档"。用户把输入框
-        清空后 _blocks 变空，_title 却还留着旧文件名 —— 下一次纠错回调里
+        清空后 _blocks 变空，`_title` 却还留着旧文件名 —— 下一次纠错回调里
         `_hit_text(-1, ...)` 去取 `_blocks[-1]`，空列表直接 IndexError，
         异常从 _on_checked 冒出去，结果是**纠错跑完了却什么都不显示**
         （列表空、状态停在"纠错中…"）。
+
+        同时作废旧一轮结果（P0-1）：旧命中的偏移按旧文本算，文本一改即失效。
+        `_scan_fp` 保留旧快照指纹，扫描回调与应用侧据此判定"过期"。
         """
         if self._loading:
             return
@@ -216,6 +227,68 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._source = self._source or "粘贴"
         self._title = ""
         self._hits = []
+        self._corrs = []
+
+    # ------------------------------------------------------------ 竞态防护
+    def _content_fingerprint(self) -> tuple:
+        """当前输入内容的指纹（标题 + 每块 kind/text/rows）。
+
+        只用于判断"扫描时看到的正文"与"现在要应用修正的正文"是否同一份；
+        不持久化，不要求稳定哈希算法 —— tuple 可直接比较。
+        """
+        blocks = tuple(
+            (b.get("kind", ""), b.get("text", "") or "",
+             tuple(tuple(str(cell) for cell in row)
+                   for row in (b.get("rows") or ())))
+            for b in self._blocks)
+        return (self._title or "", blocks)
+
+    def _results_stale(self) -> bool:
+        """当前结果是否已过期（正文在扫描后/扫描期间变过）。"""
+        return (self._scan_fp is not None
+                and self._content_fingerprint() != self._scan_fp)
+
+    def _discard_results(self) -> None:
+        """丢弃当前命中与标记视图（偏移已不可信）。"""
+        self._corrs = []
+        self._hits = []
+        self.listw.clear()
+        self.browser.clear()
+
+    def _reject_if_stale(self) -> bool:
+        """应用修正前的兜底校验；过期则拒绝并提示，返回 True。"""
+        if not self._results_stale():
+            return False
+        self._discard_results()
+        self.lbl_stat.setText("文本已变更，结果已过期，请重新纠错")
+        return True
+
+    def _drop_stale_result(self, token: int) -> None:
+        """丢弃迟到的扫描结果（P0-1 核心）。
+
+        两种情况：
+          · token 不是最新一轮：用户已发起新扫描。**什么都不动** —— 旧结果
+            既不渲染也不清空视图：清空会误伤新一轮已渲染/正在渲染的结果，
+            动 busy 会把只读与按钮状态弄坏；
+          · token 是最新一轮但正文指纹变了（扫描期间改了输入框）：丢弃结果、
+            恢复可编辑、提示并自动补扫一次（单次定时器，不递归）。
+        """
+        if token != self._scan_token:
+            return
+        self._discard_results()
+        self._set_busy(False)
+        self.banner.clear()
+        self.lbl_stat.setText("文本已变更，已重新扫描")
+        self._rescan_timer.start(0)
+
+    def _rescan_after_stale(self) -> None:
+        """自动补扫（只触发一次）：上一轮 worker 尚未完全退出时稍后重试。"""
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            self._rescan_timer.start(50)
+            return
+        if self._blocks or self.input_box.toPlainText().strip():
+            self.start_check()
 
     # ------------------------------------------------------------ 纠错
     def start_check(self) -> None:
@@ -230,17 +303,35 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._set_busy(True)
         self.lbl_stat.setText("纠错中…")
         blocks_snapshot = [dict(b) for b in self._blocks]
+        # P0-1：本轮扫描绑定 token + 指纹。回调带 token 回来，与最新 token、
+        # 当前指纹任一不符即视为过期结果（见 _on_checked）。
+        self._scan_token += 1
+        token = self._scan_token
+        self._scan_fp = self._content_fingerprint()
         # parent=self：不设 parent 的 QThread 只被 self._worker 强引用，
         # 对话框一旦先于线程销毁（用户 Esc 关窗），唯一引用被释放会让仍在运行的
         # 线程被 GC 析构 → Qt qFatal 强杀进程（0xC0000409）。挂上父对象后
         # 线程生命周期跟随对话框，主窗口 closeEvent 的 findChildren(QThread)
         # 也能找到并等待它。
         self._worker = FnWorker(_scan_blocks, blocks_snapshot, parent=self)
-        self._worker.ok.connect(self._on_checked)
-        self._worker.failed.connect(self._on_failed)
+        self._worker.ok.connect(lambda corrs, _t=token: self._on_checked(corrs, _t))
+        self._worker.failed.connect(lambda msg, _t=token: self._on_failed(msg, _t))
         self._worker.start()
 
-    def _on_checked(self, corrs_by_block) -> None:
+    def _on_checked(self, corrs_by_block, token: int | None = None) -> None:
+        """扫描完成回调。
+
+        token=None 是既有同步调用路径（测试/内部直接喂结果）：以当前正文为
+        基准刷新指纹后接受，保持向后兼容。真实 worker 一律带 token：
+          · token 不是最新 → 用户已发起新扫描，旧结果整批丢弃；
+          · token 是最新但正文指纹变了 → 扫描期间改过输入框，丢弃并自动重扫。
+        两条都命中 P0-1：绝不能把旧偏移套到新文本上渲染/应用。
+        """
+        if token is None:
+            self._scan_fp = self._content_fingerprint()
+        elif token != self._scan_token or self._results_stale():
+            self._drop_stale_result(token)
+            return
         self._corrs = corrs_by_block
         self._render()
         self._set_busy(False)
@@ -278,7 +369,11 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self.banner.show_result(kind, f"共发现 {len(items)} 处问题，可逐处确认后应用",
                                 chips)
 
-    def _on_failed(self, msg: str) -> None:
+    def _on_failed(self, msg: str, token: int | None = None) -> None:
+        if token is not None and (token != self._scan_token
+                                  or self._results_stale()):
+            self._drop_stale_result(token)
+            return
         self._set_busy(False)
         self.lbl_stat.setText(f"纠错失败：{msg[:120]}")
         self.banner.show_result("danger", f"纠错未完成：{msg[:80]}")
@@ -293,6 +388,10 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
             b.setEnabled(has and not busy)
         self.btn_file.setEnabled(not busy)
         self.btn_clip.setEnabled(not busy)
+        # P0-1：扫描期间输入框只读。旧结果套新文本的竞态有一半来自"扫描中
+        # 用户继续改字"，只读是最直接的预防；程序性写入（载入文件/应用修正后
+        # 回填）不受 setReadOnly 限制，故不影响既有同步流程。
+        self.input_box.setReadOnly(busy)
         self.btn_run.setText("纠错中…" if busy else "开始纠错")
 
     # ------------------------------------------------------------ 渲染与明细
@@ -390,7 +489,18 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         if h is None:
             self.lbl_stat.setText("请先在右侧选择一处")
             return
+        # P0-1：命中里的 start/end 是**扫描时那份文本**的块内偏移。应用前
+        # 再核一次指纹，并在原文片段上复核 wrong 是否仍落在该偏移处；
+        # 任一不符都拒绝，绝不把旧偏移套到新文本上（主控实测会把
+        # "这是新文件内容。"改成"这是部署件内容。"）。
+        if self._reject_if_stale():
+            return
         c, bi, ri, ci = h["corr"], h["bi"], h["ri"], h["ci"]
+        source = self._hit_text(bi, ri, ci)
+        if c.start < 0 or c.end > len(source) or source[c.start:c.end] != c.wrong:
+            self.lbl_stat.setText("文本已变更，已放弃本次应用")
+            self._discard_results()
+            return
         if bi == -1:  # 标题
             self._title = self._title[:c.start] + c.suggestion + self._title[c.end:]
             self._sync_input_box()
@@ -406,6 +516,11 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self.start_check()
 
     def apply_all_blocks(self) -> None:
+        # P0-1：全部应用会按当前块内容重新纠错，本不会用旧偏移；但结果列表
+        # 若已过期，用户看到的"N 处"与即将写入的内容对不上，同样应拒绝并
+        # 提示先重新纠错（与逐处应用保持同一口径）。
+        if self._reject_if_stale():
+            return
         n = 0
         if self._title:
             self._title, tcs = corrector.correct_block(self._title,

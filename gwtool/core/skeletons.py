@@ -10,7 +10,31 @@
   · 「命令」在军队条例中不带「（令）」后缀。
 """
 
+import re
 from dataclasses import dataclass, field
+
+# 主送机关行模板统一以「：」收尾，而用户输入习惯上自带冒号（"各单位："），
+# 直接拼接就得到"各单位：："（P1-23 实测：新建公文时主送行出现双冒号）。
+# 只匹配**行尾**连续的全/半角冒号及其前后的空白，行内冒号不碰。
+_TRAILING_COLONS = re.compile(r"[ \t\u3000]*[：:]+[ \t\u3000]*$")
+
+
+def _one_trailing_colon(line: str) -> str:
+    """把主送机关行尾的连续冒号收敛为**一个全角冒号**。
+
+    三种输入都归一到同一结果：
+        "各单位："   -> "各单位："
+        "各单位:"    -> "各单位："   （半角冒号在公文里不合规，一并纠正）
+        "各单位"     -> "各单位："   （模板自带冒号，原样保留）
+    模板若本来就不带冒号（用户自建骨架），原样返回、不强行补。
+    """
+    m = _TRAILING_COLONS.search(line)
+    if m is None:
+        return line
+    head = line[:m.start()]
+    if not head.strip():
+        return "："          # 只有冒号的空主送行：保持单个冒号（与模板一致）
+    return head.rstrip() + "："
 
 
 @dataclass
@@ -37,7 +61,8 @@ class Skeleton:
             lines.append(sub(self.title_hint))
         lines.append("")
         if self.recipient:
-            lines.append(sub(self.recipient))
+            # P1-23：模板已带「：」，用户输入再带冒号会拼成"：："——统一收敛。
+            lines.append(_one_trailing_colon(sub(self.recipient)))
         for para in self.body:
             p = sub(para)
             if p:

@@ -979,12 +979,19 @@ class BatchCorrectDialog(ThreadSafeDialog, QDialog):
 
 # ================================================================ 历史快照
 class SnapshotsDialog(ThreadSafeDialog, QDialog):
-    """历史版本：列表 + 差异预览 + 回滚。"""
+    """历史版本：列表 + 差异预览 + 回滚。
+
+    **未打开文档时只展示空态、禁用回滚/删除**：`doc_id=None` 曾在 DAO 侧被解释为
+    "全库快照"，于是本对话框会列出所有文档的历史版本，用户还能把别篇材料的内容
+    回滚进当前编辑器（串档）。现在 DAO 默认拒绝空 doc_id，UI 侧再显式置灰 +
+    提示，两层都挡住。
+    """
 
     def __init__(self, doc_id: int | None, current_text: str, parent=None,
                  apply_callback=None):
         super().__init__(parent)
         self.doc_id = doc_id
+        self.has_doc = bool(doc_id)
         self.current_text = current_text
         self.apply_callback = apply_callback
         self.setWindowTitle("历史版本（自动保存快照）")
@@ -998,22 +1005,32 @@ class SnapshotsDialog(ThreadSafeDialog, QDialog):
         split.addWidget(self.preview)
         split.setSizes([280, 620])
         v.addWidget(split, 1)
+        self.lbl_tip = QLabel("请先打开一篇材料，再查看它的历史版本。")
+        self.lbl_tip.setStyleSheet(f"color:{theme.MUTED};")
+        self.lbl_tip.setVisible(not self.has_doc)
+        v.addWidget(self.lbl_tip)
         row = QHBoxLayout()
-        btn_restore = QPushButton("回滚到此版本")
-        btn_restore.clicked.connect(self._restore)
-        btn_del = QPushButton("删除该快照")
-        btn_del.clicked.connect(self._delete)
-        row.addWidget(btn_restore)
-        row.addWidget(btn_del)
+        self._btn_restore = QPushButton("回滚到此版本")
+        self._btn_restore.clicked.connect(self._restore)
+        self._btn_del = QPushButton("删除该快照")
+        self._btn_del.clicked.connect(self._delete)
+        row.addWidget(self._btn_restore)
+        row.addWidget(self._btn_del)
         row.addStretch(1)
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.reject)
         row.addWidget(btn_close)
         v.addLayout(row)
+        self.list_w.setEnabled(self.has_doc)
+        self._btn_restore.setEnabled(self.has_doc)
+        self._btn_del.setEnabled(self.has_doc)
         self._fill()
 
     def _fill(self):
         self.list_w.clear()
+        if not self.has_doc:
+            self.preview.clear()
+            return
         for s in dao.list_snapshots(self.doc_id):
             item = QListWidgetItem(
                 f"{s['created_time']}  [{s['reason']}]  {len(s['content'])}字")
@@ -1021,7 +1038,7 @@ class SnapshotsDialog(ThreadSafeDialog, QDialog):
             self.list_w.addItem(item)
 
     def _preview(self, row):
-        if row < 0:
+        if not self.has_doc or row < 0:
             return
         sid = self.list_w.item(row).data(Qt.UserRole)
         s = dao.get_snapshot(sid)
@@ -1038,6 +1055,8 @@ class SnapshotsDialog(ThreadSafeDialog, QDialog):
         self.preview.setHtml(html)
 
     def _restore(self):
+        if not self.has_doc:
+            return
         row = self.list_w.currentRow()
         if row < 0:
             return
@@ -1052,6 +1071,8 @@ class SnapshotsDialog(ThreadSafeDialog, QDialog):
             self.reject()
 
     def _delete(self):
+        if not self.has_doc:
+            return
         row = self.list_w.currentRow()
         if row < 0:
             return

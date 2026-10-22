@@ -21,8 +21,11 @@ import re
 from dataclasses import asdict
 from datetime import date
 
+from .. import logs
 from ..db import dao
 from .registry import SECRET_LEVELS, URGENCY_LEVELS, csvsafe, doc_types
+
+log = logs.get_logger("receive")
 
 # 收文办理流程：签收 → 拟办 → 批办 → 承办 → 办结 → 归档。
 # 与发文的（拟稿/核稿/签发/已印发/已归档）是两条不同的流程，不可混用。
@@ -104,7 +107,12 @@ def is_closed(r: dao.Receive) -> bool:
 
 
 def days_left(r: dao.Receive, today: str = "") -> "int | None":
-    """距应办结日期的天数：负数表示已逾期；无期限或已办结返回 None。"""
+    """距应办结日期的天数：负数表示已逾期；无期限或已办结返回 None。
+
+    日期非法（历史库/外部导入可能留下 `2026-02-30`）时返回 None —— 但不能
+    **静默**：督办链路会因此丢掉该件（用户表现为"这件永远不被催办"），所以
+    这里必须留痕。新录入的非法日期已由 `validate()` 拦在入库前。
+    """
     import datetime as _dt
 
     if is_closed(r) or not (r.due_date or "").strip():
@@ -114,6 +122,8 @@ def days_left(r: dao.Receive, today: str = "") -> "int | None":
         return (_dt.date.fromisoformat(r.due_date)
                 - _dt.date.fromisoformat(base)).days
     except ValueError:
+        log.warning("收文 id=%s 的应办结日期非法（%r），本次督办跳过该件；"
+                    "请到台账核对该日期", getattr(r, "id", 0), r.due_date)
         return None
 
 
@@ -176,8 +186,19 @@ def validate(r: dao.Receive) -> list[str]:
                               ("done_date", "办结日期"),
                               ("archive_date", "归档日期")):
         value = (getattr(r, field_name) or "").strip()
-        if value and not _DATE_RE.match(value):
+        if not value:
+            continue
+        if not _DATE_RE.match(value):
             problems.append(f"{label}应为 YYYY-MM-DD 格式：{value}")
+            continue
+        # 形状合规 ≠ 日期存在。只查形状会放行 2026-02-30 / 2026-13-01 /
+        # 2026-00-10：这些日期入库后 `days_left()` 抛 ValueError，督办链路
+        # 随即静默丢掉该件（该件永远不被催办）。与 `registry.validate` 用
+        # 同一把尺子 —— 两份台账一条严一条松是典型的回头坑。
+        try:
+            date(int(value[:4]), int(value[5:7]), int(value[8:10]))
+        except ValueError:
+            problems.append(f"{label}不是一个存在的日期：{value}")
     if int(r.pages or 0) < 0 or int(r.copies or 0) < 0:
         problems.append("页数与份数不能为负")
     recv = (r.receive_date or "").strip()

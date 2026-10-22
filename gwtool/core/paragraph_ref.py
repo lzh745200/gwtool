@@ -626,54 +626,67 @@ def _cn_to_int(s: str) -> int:
 
 
 def _ordinal_issues(draft: list[ParagraphRef]) -> list[Alignment]:
-    """检查草稿里各级序号的连续性，指出跳号与重复。"""
-    found: dict[int, list[tuple[int, int]]] = {}
+    """检查草稿里各级序号的连续性，指出跳号与重复。
+
+    **按父级复位**（P1-19）：序号可以随上级标题重新起算 —— 「二、」下面的
+    「（一）（二）（三）」与「三、」下面的「（一）（二）（三）」各自从 1 开始，
+    是规范写法。因此每遇到一个更浅层级的序号，就把更深层级的"已见集合"清空。
+
+    早期实现按层级各扫一遍、`seen` 全程不清空，于是任何分层公文（含**参考与
+    草稿逐字相同**的情形）都会把第二节的「（一）」判成"序号重复" —— 那是纯
+    假阳性，会把真正要看的结构差异淹没掉。判定仍需保留：
+    同一父级内重复（一、一）报重号，同一父级内跳号（一、二、四）报跳号。
+    """
+    # level -> 当前父级下已出现的序号集合（2=「一、」,3=「（一）」,4=「1.」）
+    seen: dict[int, set[int]] = {2: set(), 3: set(), 4: set()}
+    out: list[Alignment] = []
     for i, p in enumerate(draft):
         text = p.text
+        level = 0
+        val = 0
         m = _ORD_CN_SUB_RE.match(text)
         if m:
-            v = _cn_to_int(m.group(0).strip("（()）"))
-            if v:
-                found.setdefault(3, []).append((i, v))
+            level = 3
+            val = _cn_to_int(m.group(0).strip("（()）"))
+        else:
+            m = _ORD_CN_RE.match(text)
+            if m:
+                level = 2
+                val = _cn_to_int(m.group(0).strip("、．."))
+            else:
+                m = _ORD_NUM_RE.match(text)
+                if m:
+                    level = 4
+                    try:
+                        val = int(m.group(0).strip("、．."))
+                    except ValueError:
+                        val = 0
+        if not val:
             continue
-        m = _ORD_CN_RE.match(text)
-        if m:
-            v = _cn_to_int(m.group(0).strip("、．."))
-            if v:
-                found.setdefault(2, []).append((i, v))
+        # 换父级：更浅层级的序号出现 → 所有更深层级重新从 1 计数。
+        # 只清"更深"的层级 —— 清自己会丢掉同父级内的重号/跳号判定。
+        for deeper in range(level + 1, 5):
+            seen[deeper].clear()
+        bucket = seen[level]
+        if val in bucket:
+            out.append(Alignment(
+                draft_index=i, draft_text=text,
+                role=f"heading_{level}", relation="level_mismatch",
+                score=0.4,
+                hint=f"第 {i + 1} 段序号「{val}」重复（同一层级内）"))
             continue
-        m = _ORD_NUM_RE.match(text)
-        if m:
-            try:
-                v = int(m.group(0).strip("、．."))
-            except ValueError:
-                continue
-            found.setdefault(4, []).append((i, v))
-
-    out: list[Alignment] = []
-    for level in sorted(found):
-        items = found[level]
-        seen: set[int] = set()
-        for idx, val in items:
-            if val in seen:
-                out.append(Alignment(
-                    draft_index=idx, draft_text=draft[idx].text,
-                    role=f"heading_{level}", relation="level_mismatch",
-                    score=0.4,
-                    hint=f"第 {idx + 1} 段序号「{val}」重复（同一层级内）"))
-                continue
-            seen.add(val)
-            # 期望序号取**去重后**的计数：用 enumerate 的 pos 会把前面被跳过
-            # 的重复项也算进去，于是「一、二、二、三」里的「三」被判成跳号，
-            # 用户照提示改成「四」就把本来正确的序号改坏了。
-            expect = len(seen)
-            if val != expect:
-                out.append(Alignment(
-                    draft_index=idx, draft_text=draft[idx].text,
-                    role=f"heading_{level}", relation="level_mismatch",
-                    score=0.4,
-                    hint=(f"第 {idx + 1} 段序号跳到「{val}」，"
-                          f"按顺序应为「{expect}」")))
+        bucket.add(val)
+        # 期望序号取**去重后**的计数：用 enumerate 的 pos 会把前面被跳过
+        # 的重复项也算进去，于是「一、二、二、三」里的「三」被判成跳号，
+        # 用户照提示改成「四」就把本来正确的序号改坏了。
+        expect = len(bucket)
+        if val != expect:
+            out.append(Alignment(
+                draft_index=i, draft_text=text,
+                role=f"heading_{level}", relation="level_mismatch",
+                score=0.4,
+                hint=(f"第 {i + 1} 段序号跳到「{val}」，"
+                      f"按顺序应为「{expect}」")))
     return out
 
 

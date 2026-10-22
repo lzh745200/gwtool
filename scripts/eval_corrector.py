@@ -10,29 +10,45 @@
   - 无法发现"翻译层（L4/L5）一开就崩"这类整体性回归——
     因为没有任何一条门禁会把**开启增强层后的误报**纳入判定。
 
-本脚本把评测收敛为 6 个可判定项（E1–E6），每项给出数值与 PASS/FAIL，
-并可用 `--json` 落盘供版本间对比。**默认不触碰真实用户数据**：
+本脚本把评测收敛为 6 个可判定项（E1–E6）。**默认不触碰真实用户数据**：
 数据目录被重定向到临时目录，只有增强包目录是**只读**指向真实位置。
+
+评测档案（--profile）与 SKIP 语义
+--------------------------------
+    base   只跑基础三层：门禁 E1/E2/E3/E5（CI 用的就是这一档；
+           不需要增强包，任何机器都能通过）
+    l4     基础 + 单字精排层：门禁项之外再加 E4/E6（需已装拼写增强包）
+    l5     基础 + 序列生成层：同上（需已装语法增强包）
+    all    基础 + 两层（默认值，保持旧行为：跑全部 6 项）
+
+**未参与门禁的项输出 [SKIP]，不计 FAIL、不影响退出码**，并在结果行里写明原因：
+  - 档案不含的层（如 base 不含 L4/L5）→ SKIP；
+  - 增强包未安装 / onnxruntime 缺失 / 设置未启用 → E4、E6 SKIP；
+  - 未给 `--corpus` 时 E3/E5/E6 仍然测量并在结果行标"示意·不参与门禁"，
+    但**不据此判 FAIL** —— 224 字内置小样的数值没有统计意义，把它当门禁
+    就是"空过"（P0-2 的原始缺陷）。
 
 用法
 ----
-    # 用本机已导入的增强包（只读），跑全部 6 项
-    PYTHONPATH= .venv/Scripts/python.exe scripts/eval_corrector.py
+    # CI / 日常自检：基础三层门禁（无需增强包），通过即 exit 0
+    ... scripts/eval_corrector.py --profile base
 
-    # 指定公文语料（每个文件一篇，UTF-8/GBK 自动探测）作为负样本
+    # 用本机已导入的增强包（只读），跑全部 6 项（旧的默认行为）
+    ... scripts/eval_corrector.py
+
+    # 指定公文语料（每个文件一篇，UTF-8/GBK 自动探测）作为负样本；
+    # 只有给了 --corpus，E3/E5/E6 才真正参与门禁
     ... scripts/eval_corrector.py --corpus D:/公文语料
 
-    # 只看基础三层（不看增强层）
-    ... scripts/eval_corrector.py --layers base
-
-    # 落盘 JSON 便于版本对比
+    # 落盘 JSON 便于版本对比（含 profile / 语料指纹 / 样本量）
     ... scripts/eval_corrector.py --json eval_base.json
 
-退出码：0 = 全部通过；1 = 有项目未达标（明细见输出）。
+退出码：0 = 门禁项全部通过（允许存在 SKIP）；1 = 有门禁项 FAIL。
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
@@ -54,6 +70,20 @@ TH_FP_PER_WAN = 0.50            # E3 公文体负样本误报（现状 0；这�
 TH_OOV_RECALL_BASE = 0.05       # E4 词表外错字：基础三层的期望（现状 0，属已知天花板）
 TH_NEURAL_FP_PER_QIAN = 1.00    # E6 开启神经层后新增误报（处/千字）：现状 57.6，本方案核心待修项
 TH_MS_PER_QIAN_BASE = 100.0     # E5 基础三层耗时（毫秒/千字）
+
+# 评测档案 -> 启用的层。E1/E2 两项在所有档案下都算门禁（基础三层）。
+PROFILES: dict[str, tuple[str, ...]] = {
+    "base": ("base",),
+    "l4": ("base", "l4"),
+    "l5": ("base", "l5"),
+    "all": ("base", "l4", "l5"),
+}
+# 兼容旧用法 `--layers base,l4,l5`：层组合 -> 档案名。
+_LAYERS_TO_PROFILE = {tuple(sorted(v)): k for k, v in PROFILES.items()}
+
+STATUS_PASS = "PASS"
+STATUS_FAIL = "FAIL"
+STATUS_SKIP = "SKIP"
 
 # E4 内置"词表外错字"小样本：真实但不入词表、不入纠错表的错形。
 # 它的作用是**度量词表法的天花板**与增强层的补位能力，不追求统计充分性。
@@ -82,21 +112,51 @@ DEFAULT_NEG = [
 _CTX_TEMPLATES = ["各单位要高度重视{}工作。", "现将{}情况报告如下。",
                   "请认真抓好{}落实。"]
 
+# 结果行里"未参与门禁"的统一标记（供人工与测试识别，勿改字面量）。
+UNGATED_MARK = "示意·不参与门禁"
+
 
 def cjk_len(s: str) -> int:
     return len(CJK.findall(s))
 
 
 class Result:
-    """一条评测结论。"""
+    """一条评测结论。status ∈ {PASS, FAIL, SKIP}，只有 FAIL 影响退出码。"""
 
-    def __init__(self, key: str, name: str, value, text: str, passed: bool):
-        self.key, self.name, self.value, self.text, self.passed = \
-            key, name, value, text, passed
+    def __init__(self, key: str, name: str, value, text: str,
+                 status: str = STATUS_PASS, reason: str = ""):
+        self.key, self.name, self.value, self.text = key, name, value, text
+        self.status, self.reason = status, reason
+
+    @property
+    def passed(self) -> bool:
+        return self.status == STATUS_PASS
+
+    @property
+    def skipped(self) -> bool:
+        return self.status == STATUS_SKIP
 
     def line(self) -> str:
-        tag = "PASS" if self.passed else "FAIL"
-        return f"[{tag}] {self.key} {self.name}：{self.text}"
+        return f"[{self.status}] {self.key} {self.name}：{self.text}"
+
+    def to_json(self) -> dict:
+        # 保留 `passed` 兼容旧消费方（SKIP 视为 False），并新增 status/reason。
+        return {"key": self.key, "name": self.name, "value": self.value,
+                "status": self.status, "passed": self.passed,
+                "text": self.text, "reason": self.reason}
+
+
+def _gated_result(key: str, name: str, value, text: str, ok: bool,
+                  fail_text: str = "") -> Result:
+    """按阈值生成 PASS/FAIL。"""
+    if ok:
+        return Result(key, name, value, text, STATUS_PASS)
+    return Result(key, name, value, f"{text}{fail_text}", STATUS_FAIL)
+
+
+def _skipped_result(key: str, name: str, value, text: str,
+                    reason: str) -> Result:
+    return Result(key, name, value, text, STATUS_SKIP, reason)
 
 
 def _read_corpus(path: str) -> list[str]:
@@ -125,19 +185,60 @@ def _read_corpus(path: str) -> list[str]:
     return out
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="纠错引擎评测基线")
-    ap.add_argument("--corpus", default="", help="负样本语料目录/文件（缺省用内置样例）")
-    ap.add_argument("--layers", default="base,l4,l5",
-                    help="启用的层：base / l4 / l5 的逗号组合")
+def _corpus_fingerprint(segments: list[str]) -> str:
+    """语料指纹（sha256 前 16 位）：换语料必然换指纹，版本对比时不会被误读。"""
+    h = hashlib.sha256("\n".join(segments).encode("utf-8")).hexdigest()
+    return h[:16]
+
+
+def _resolve_profile(args, ap: argparse.ArgumentParser) -> str:
+    """--profile 与旧 --layers 的兼容解析。
+
+    规则：两个都不给 -> all（保持旧默认行为）；只给 --layers -> 由层组合反推
+    档案；两个都给且不一致 -> 直接报参数错误（避免"以为在跑 base 门禁，
+    实际跑的是 all"这类静默错配）。
+    """
+    if args.profile is not None and args.layers is not None:
+        raw = tuple(sorted({s.strip() for s in args.layers.split(",") if s.strip()}))
+        if raw != tuple(sorted(PROFILES[args.profile])):
+            ap.error(f"--profile {args.profile} 与 --layers {args.layers} 不一致")
+        return args.profile
+    if args.profile is not None:
+        return args.profile
+    if args.layers is not None:
+        raw = tuple(sorted({s.strip() for s in args.layers.split(",") if s.strip()}))
+        profile = _LAYERS_TO_PROFILE.get(raw)
+        if profile is None:
+            ap.error("--layers 仅支持 base / base,l4 / base,l5 / base,l4,l5；"
+                     "请改用 --profile")
+        return profile
+    return "all"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="纠错引擎评测基线（门禁）")
+    ap.add_argument("--profile", choices=tuple(PROFILES), default=None,
+                    help="评测档案 base|l4|l5|all（默认 all）。档案不包含的层/"
+                         "未安装增强包的项输出 SKIP，不计 FAIL")
+    ap.add_argument("--corpus", default="",
+                    help="负样本语料目录/文件；不给时 E3/E5/E6 仅示意、不参与门禁")
+    ap.add_argument("--layers", default=None,
+                    help="[兼容旧用法] 层组合；等价于 --profile，两者冲突会报错")
     ap.add_argument("--pack-root", default="",
                     help="增强包根目录（其下应有 current/<kind>/）；缺省用真实数据目录")
     ap.add_argument("--gen-sample", type=int, default=800, help="生成对抽样条数")
     ap.add_argument("--json", default="", help="把结果写到该 JSON 文件")
     ap.add_argument("--seed", type=int, default=20260915)
-    args = ap.parse_args()
+    return ap
 
-    layers = {s.strip() for s in args.layers.split(",") if s.strip()}
+
+def main() -> int:
+    ap = _build_parser()
+    args = ap.parse_args()
+    profile = _resolve_profile(args, ap)
+    layers = set(PROFILES[profile])
+    enh_requested = bool(layers & {"l4", "l5"})
+    external_corpus = bool(args.corpus)
 
     # ---- 隔离数据目录：绝不碰真实用户库 ----
     from gwtool import paths
@@ -176,29 +277,69 @@ def main() -> int:
     _force_settings(False, False)          # 一律从"基础三层"起步
 
     results: list[Result] = []
-    data: dict = {"layers": sorted(layers)}
+    data: dict = {"layers": sorted(layers), "profile": profile}
 
-    print("=" * 72)
-    print("纠错引擎评测基线")
-    print("=" * 72)
     pairs = dao.all_error_pairs(only_enabled=False)
     words = set(dao.all_dictionary_words())
     data["pairs_total"] = len(pairs)
     data["dict_words"] = len(words)
-    csc_info = csc_neural.enhance_pack.installed_pack("csc")
-    cgec_info = csc_gec.enhance_pack.installed_pack("cgec")
-    # 精标条数以**代码内置表**为准（v1.8）：种子库不再带 curated 快照，
-    # 内置 `CURATED_PAIRS` 才是唯一事实来源；库内只剩生成对与用户词条。
+
+    # ---- 增强包就绪度：决定 E4/E6 是"测量"还是"SKIP" ----
+    pack_csc = csc_neural.enhance_pack.installed_pack("csc")
+    pack_cgec = csc_gec.enhance_pack.installed_pack("cgec")
+    runtime_l4 = csc_neural.runtime_available()
+    runtime_l5 = csc_gec.runtime_available()
+    can_l4 = "l4" in layers and pack_csc is not None and runtime_l4
+    can_l5 = "l5" in layers and pack_cgec is not None and runtime_l5
+    enh_active = can_l4 or can_l5
+    pack_any = pack_csc is not None or pack_cgec is not None
     n_builtin_curated = len(corrector_data.CURATED_PAIRS)
     data["curated_builtin"] = n_builtin_curated
+    data["enhance"] = {
+        "pack_csc": pack_csc is not None, "pack_cgec": pack_cgec is not None,
+        "runtime_l4": runtime_l4, "runtime_l5": runtime_l5,
+        "can_l4": can_l4, "can_l5": can_l5,
+    }
+
+    print("=" * 72)
+    print("纠错引擎评测基线")
+    print("=" * 72)
+    print(f"评测档案 profile={profile}　启用层={','.join(sorted(layers))}")
     print(f"错别字对 {len(pairs)}（库内生成 "
           f"{sum(1 for p in pairs if p.source == 'generated')} / 库内用户 "
           f"{sum(1 for p in pairs if p.source == 'user')}）"
           f"　内置精标 {n_builtin_curated}　词典 {len(words)} 词")
-    print(f"增强包：拼写={'已装' if csc_info else '未装'}"
-          f"　语法={'已装' if cgec_info else '未装'}"
-          f"　onnxruntime={'可用' if csc_neural.runtime_available() else '缺失'}")
+    print(f"增强包：拼写={'已装' if pack_csc else '未装'}"
+          f"　语法={'已装' if pack_cgec else '未装'}"
+          f"　onnxruntime={'可用' if runtime_l4 or runtime_l5 else '缺失'}")
     print()
+
+    # ---------------------------------------------------------- 语料契约
+    neg = _read_corpus(args.corpus) if external_corpus else list(DEFAULT_NEG)
+    n_chars = sum(cjk_len(s) for s in neg)
+    corpus_payload: dict = {
+        "path": args.corpus,
+        "external": external_corpus,
+        "segments": len(neg),
+        "chars": n_chars,
+        "fingerprint": _corpus_fingerprint(neg),
+        "gated": bool(external_corpus and n_chars > 0),
+    }
+    data["corpus"] = corpus_payload
+    # E3/E5/E6 是否参与门禁：只有"外部且非空"的语料才有统计意义。
+    corpus_gated = bool(external_corpus and n_chars > 0)
+    ungated_reason = "缺 --corpus" if not external_corpus else "外部语料为空或不可读"
+    # 无外部语料时统一追加的标记（E3/E5/E6 的结果行都必须带上，见 P0-2 验收口径）
+    ungated_tail = f"（{UNGATED_MARK}：{ungated_reason}）"
+    if external_corpus:
+        neg_src = f"外部语料 {args.corpus}"
+    else:
+        neg_src = "内置样例（示意，需替换为真实公文）"
+    if external_corpus and not n_chars:
+        print(f"警告：外部语料不可用（{args.corpus}），E3 判 FAIL、E5/E6 跳过。\n")
+    else:
+        print(f"负样本语料：{neg_src}　{len(neg)} 段 / {n_chars} 汉字"
+              f"　指纹 {corpus_payload['fingerprint']}\n")
 
     # ---------------------------------------------------------- E1 精标集
     ok = bad = 0
@@ -213,7 +354,7 @@ def main() -> int:
             bad += 1
             miss.append(f"{wrong}→{correct}")
     recall = ok / max(1, ok + bad)
-    results.append(Result(
+    results.append(_gated_result(
         "E1", "人工精标集检出率", round(recall, 4),
         f"{ok}/{ok + bad} = {recall:.1%}"
         + (f"；漏报 {miss[:6]}" if miss else ""),
@@ -232,7 +373,7 @@ def main() -> int:
             ctx += 1
     n = max(1, len(sample))
     ctx_recall = ctx / n
-    results.append(Result(
+    results.append(_gated_result(
         "E2", "生成对召回（上下文中）", round(ctx_recall, 4),
         f"{ctx}/{len(sample)} = {ctx_recall:.1%}（孤立 {iso / n:.1%}）",
         ctx_recall >= TH_GEN_CTX_RECALL))
@@ -240,9 +381,6 @@ def main() -> int:
                   "iso_recall": iso / n, "ctx_recall": ctx_recall}
 
     # ---------------------------------------------------------- E3 负样本误报
-    neg = _read_corpus(args.corpus) if args.corpus else list(DEFAULT_NEG)
-    neg_src = f"外部语料 {args.corpus}" if args.corpus else "内置样例（需替换为真实公文）"
-    n_chars = sum(cjk_len(s) for s in neg)
     t0 = time.perf_counter()
     fp_hits = []
     for s in neg:
@@ -252,14 +390,29 @@ def main() -> int:
     by_cat: dict[str, int] = {}
     for h in fp_hits:
         by_cat[h.category] = by_cat.get(h.category, 0) + 1
-    results.append(Result(
-        "E3", "负样本误报（基础三层）", round(fp_per_wan, 3),
-        f"{len(fp_hits)} 处 / {n_chars} 汉字 = {fp_per_wan:.2f} 处/万字"
-        f"　来源：{neg_src}　分类：{by_cat or '无'}",
-        fp_per_wan <= TH_FP_PER_WAN))
+    e3_value: float | None = round(fp_per_wan, 3)
+    if external_corpus and not n_chars:
+        results.append(Result(
+            "E3", "负样本误报（基础三层）", None,
+            f"外部语料为空或不可读（{args.corpus}）：不得把空样本当门禁通过",
+            STATUS_FAIL, ungated_reason))
+    else:
+        e3_text = (f"{len(fp_hits)} 处 / {n_chars} 汉字 = {fp_per_wan:.2f} 处/万字"
+                   f"　来源：{neg_src}　分类：{by_cat or '无'}")
+        if corpus_gated:
+            results.append(_gated_result(
+                "E3", "负样本误报（基础三层）", e3_value, e3_text,
+                fp_per_wan <= TH_FP_PER_WAN,
+                f"　（阈值 ≤{TH_FP_PER_WAN} 处/万字）"))
+        else:
+            results.append(_skipped_result(
+                "E3", "负样本误报（基础三层）", e3_value,
+                f"{e3_text}（{UNGATED_MARK}：{ungated_reason}）",
+                ungated_reason))
     data["E3"] = {"segments": len(neg), "chars": n_chars, "hits": len(fp_hits),
-                  "per_wan": fp_per_wan, "by_category": by_cat,
-                  "corpus": neg_src, "seconds": round(t_neg, 3)}
+                  "per_wan": e3_value, "by_category": by_cat,
+                  "corpus": neg_src, "external": external_corpus,
+                  "gated": corpus_gated, "seconds": round(t_neg, 3)}
 
     # ---------------------------------------------------------- E4 词表外错字
     oov = [(w, c) for w, c in OOV_CASES
@@ -268,11 +421,29 @@ def main() -> int:
     oov_ok = sum(1 for w, _c in oov
                  if corrector.check_text(f"各单位要{w}相关规定。"))
     oov_recall = oov_ok / max(1, len(oov))
-    results.append(Result(
-        "E4", "词表外错字召回（基础三层）", round(oov_recall, 4),
-        f"{oov_ok}/{len(oov)} = {oov_recall:.1%}（词表法天花板，增强层应显著提升）",
-        oov_recall >= TH_OOV_RECALL_BASE))
-    data["E4"] = {"n": len(oov), "ok": oov_ok, "recall": oov_recall}
+    e4_text = (f"{oov_ok}/{len(oov)} = {oov_recall:.1%}"
+               f"（词表法天花板，增强层应显著提升）")
+    if not enh_requested:
+        e4_reason = f"profile={profile}：基础门禁不含 E4"
+        results.append(_skipped_result(
+            "E4", "词表外错字召回", round(oov_recall, 4),
+            f"{e4_text}（{e4_reason}，不计入门禁）", e4_reason))
+    elif not pack_any:
+        e4_reason = "未安装增强包（拼写/语法均未装），无补位来源"
+        results.append(_skipped_result(
+            "E4", "词表外错字召回", round(oov_recall, 4),
+            f"{e4_text}（{e4_reason}，不计入门禁）", e4_reason))
+    elif not enh_active:
+        e4_reason = "增强包已装但推理栈不可用（onnxruntime 缺失）"
+        results.append(_skipped_result(
+            "E4", "词表外错字召回", round(oov_recall, 4),
+            f"{e4_text}（{e4_reason}，不计入门禁）", e4_reason))
+    else:
+        results.append(_gated_result(
+            "E4", "词表外错字召回", round(oov_recall, 4), e4_text,
+            oov_recall >= TH_OOV_RECALL_BASE))
+    data["E4"] = {"n": len(oov), "ok": oov_ok, "recall": oov_recall,
+                  "gated": enh_active, "status": results[-1].status}
 
     # ---------------------------------------------------------- E5 耗时
     probe = neg[:40] or list(DEFAULT_NEG)
@@ -282,18 +453,45 @@ def main() -> int:
         corrector.check_text(s)
     dt = time.perf_counter() - t0
     ms_per_qian = dt * 1000 / max(1, probe_chars) * 1000
-    results.append(Result(
-        "E5", "基础三层耗时", round(ms_per_qian, 1),
-        f"{dt * 1000:.0f} ms / {probe_chars} 汉字 = {ms_per_qian:.1f} ms/千字",
-        ms_per_qian <= TH_MS_PER_QIAN_BASE))
+    e5_text = (f"{dt * 1000:.0f} ms / {probe_chars} 汉字"
+               f" = {ms_per_qian:.1f} ms/千字")
+    if corpus_gated:
+        results.append(_gated_result(
+            "E5", "基础三层耗时", round(ms_per_qian, 1), e5_text,
+            ms_per_qian <= TH_MS_PER_QIAN_BASE,
+            f"　（阈值 ≤{TH_MS_PER_QIAN_BASE} ms/千字）"))
+    else:
+        results.append(_skipped_result(
+            "E5", "基础三层耗时", round(ms_per_qian, 1),
+            f"{e5_text}（{UNGATED_MARK}：{ungated_reason}）", ungated_reason))
     data["E5"] = {"chars": probe_chars, "seconds": round(dt, 4),
-                  "ms_per_qian": ms_per_qian}
+                  "ms_per_qian": ms_per_qian, "gated": corpus_gated,
+                  "status": results[-1].status}
 
     # ---------------------------------------------------------- E6 神经层误报闸门
-    if "l4" in layers or "l5" in layers:
-        ready_l4 = "l4" in layers and csc_neural.runtime_available()
-        ready_l5 = "l5" in layers and csc_gec.runtime_available()
-        _force_settings(ready_l4, ready_l5)
+    e6_chars = 0
+    # 未参与门禁的 E6 若同时缺 --corpus，也要带上统一标记（与 E3/E5 一致）。
+    e6_tail = "" if corpus_gated else ungated_tail
+    if not enh_requested:
+        e6_reason = f"profile={profile}：不含增强层"
+        results.append(_skipped_result(
+            "E6", "开启增强层后新增误报", None,
+            f"未运行（{e6_reason}，不计入门禁）{e6_tail}", e6_reason))
+        data["E6"] = {"status": STATUS_SKIP, "reason": e6_reason}
+    elif not enh_active:
+        if not pack_any:
+            e6_reason = "未安装增强包（拼写/语法均未装）"
+        else:
+            e6_reason = "增强包已装但推理栈不可用（onnxruntime 缺失）"
+        results.append(_skipped_result(
+            "E6", "开启增强层后新增误报", None,
+            f"未运行（{e6_reason}，不计入门禁）{e6_tail}", e6_reason))
+        data["E6"] = {"status": STATUS_SKIP, "reason": e6_reason,
+                      "l4_ready": can_l4, "l5_ready": can_l5,
+                      "l4_error": csc_neural.last_error(),
+                      "l5_error": csc_gec.last_error()}
+    else:
+        _force_settings(can_l4, can_l5)
         t0 = time.perf_counter()
         neural_hits = []
         for s in probe:
@@ -302,15 +500,23 @@ def main() -> int:
         added = [h for h in neural_hits if h.category in ("神经纠错", "语法纠错")]
         per_qian = len(added) / max(1, probe_chars) * 1000
         samples = [f"{h.wrong}→{h.suggestion}" for h in added[:8]]
-        results.append(Result(
-            "E6", "开启增强层后新增误报", round(per_qian, 3),
-            f"新增 {len(added)} 处 / {probe_chars} 汉字 = {per_qian:.1f} 处/千字"
-            f"　耗时 {dt_n:.1f}s　样例：{samples or '无'}",
-            per_qian <= TH_NEURAL_FP_PER_QIAN))
+        e6_chars = probe_chars
+        e6_text = (f"新增 {len(added)} 处 / {probe_chars} 汉字 = {per_qian:.1f}"
+                   f" 处/千字　耗时 {dt_n:.1f}s　样例：{samples or '无'}")
+        if corpus_gated:
+            results.append(_gated_result(
+                "E6", "开启增强层后新增误报", round(per_qian, 3), e6_text,
+                per_qian <= TH_NEURAL_FP_PER_QIAN,
+                f"　（阈值 ≤{TH_NEURAL_FP_PER_QIAN} 处/千字）"))
+        else:
+            results.append(_skipped_result(
+                "E6", "开启增强层后新增误报", round(per_qian, 3),
+                f"{e6_text}（{UNGATED_MARK}：{ungated_reason}）", ungated_reason))
         data["E6"] = {"added": len(added), "chars": probe_chars,
                       "per_qian": per_qian, "seconds": round(dt_n, 3),
-                      "samples": samples,
-                      "l4_ready": ready_l4, "l5_ready": ready_l5,
+                      "samples": samples, "gated": corpus_gated,
+                      "status": results[-1].status,
+                      "l4_ready": can_l4, "l5_ready": can_l5,
                       "l4_error": csc_neural.last_error(),
                       "l5_error": csc_gec.last_error()}
 
@@ -325,20 +531,33 @@ def main() -> int:
     for r in results:
         print(r.line())
     print("-" * 72)
-    failed = [r for r in results if not r.passed]
-    print(f"通过 {len(results) - len(failed)}/{len(results)} 项；"
+    gated = [r for r in results if not r.skipped]
+    failed = [r for r in results if r.status == STATUS_FAIL]
+    skipped = [r for r in results if r.skipped]
+    print(f"门禁项：通过 {len(gated) - len(failed)}/{len(gated)} 项；"
           f"未达标：{', '.join(r.key for r in failed) or '无'}")
-    print("\n注：E3/E6 的负样本缺省仅为示意（公文体小样）。作为发布门禁时，"
-          "必须用 --corpus 指向本单位真实公文语料，"
-          "并按 §评估 的口径补上检测级/纠正级 F1。")
+    if skipped:
+        detail = "；".join(f"{r.key}（{r.reason}）" for r in skipped)
+        print(f"未参与门禁（SKIP，不计 FAIL / 不影响退出码）：{detail}")
+    if not external_corpus:
+        print(f"说明：E3/E5/E6 缺 --corpus，仅{UNGATED_MARK}；"
+              "发布门禁必须用 --corpus 指向本单位真实公文语料。")
+    print(f"退出码：{1 if failed else 0}（{'有门禁项未达标' if failed else '门禁通过'}）")
 
+    # ---------------------------------------------------------- JSON 落盘
+    sample_chars = {"E3": n_chars, "E5": probe_chars, "E6": e6_chars}
+    data["sample_chars"] = sample_chars
     if args.json:
+        payload = {
+            "profile": profile,
+            "layers": sorted(layers),
+            "corpus": corpus_payload,
+            "sample_chars": sample_chars,
+            "results": [r.to_json() for r in results],
+            "data": data,
+        }
         Path(args.json).write_text(
-            json.dumps({"results": [{"key": r.key, "name": r.name,
-                                     "value": r.value, "passed": r.passed,
-                                     "text": r.text} for r in results],
-                        "data": data}, ensure_ascii=False, indent=1),
-            encoding="utf-8")
+            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"已写出：{args.json}")
     return 1 if failed else 0
 

@@ -3,39 +3,58 @@
 
 所有 UI 代码从本模块取值，不允许散落字面量——保证全应用视觉一致，
 调一处即全局生效。
+
+**对比度口径（v1.9 起，P1-32）**：关键文字对必须 ≥ 4.5:1（WCAG 2.1 AA，
+正文/次要说明/警告/错误/成功/提示/选中行/表头），非文字图形（图标、
+焦点描边）≥ 3:1。深浅两套调色板都按这个口径取值，`tests/test_theme_contrast_v19.py`
+用纯计算守住（不依赖 Qt 渲染）。
+
+主色有两种角色，深浅两套**无法用同一个值同时满足**：白字压主色实底需要
+主色偏深（亮度低），主色文字压页面底需要主色偏亮（亮度高）。因此按角色
+拆 token：`PRIMARY`（实底/描边）、`ACCENT_FG`（主色系文字）、
+`SELECTED_FG`（选中行文字）、`ON_DANGER`（危险色实底上的文字）。
+既有 token 名一个都不改，只调不足 4.5:1 的色值。
 """
 from __future__ import annotations
 
 # ---------------------------------------------------------------- 色板
-PRIMARY = "#9E2B25"       # 公文红（主按钮 / 强调 / 选中态 / 标题）
-PRIMARY_DIM = "#7A1F1C"   # 主色深化（hover / 选中底色）
+PRIMARY = "#9E2B25"       # 公文红（主按钮实底 / 强调 / 描边 / 标题）
+PRIMARY_DIM = "#7A1F1C"   # 主色深化（hover / 菜单选中底）
 SURFACE = "#FAF7F2"       # 卡片 / 分组 / 交替行底色（纸面暖白）
 BORDER = "#E0D8CE"        # 边框 / 分隔线 / Splitter
 HEADING_BG = "#F0EAE0"    # 工具栏 / 表头 / 分组标题底色
 BG = "#FFFFFF"            # 对话框 / 编辑区纯白底
 
-# 语义色（浅色主题下对比度达标）
+# 语义色（浅色主题下对比度达标；v1.9 把不足 4.5:1 的 WARN / MUTED / SUCCESS
+# 调深一档，色相不变——原值分别是 #b26a00 / #757575 / #2E7D32）
 DANGER = "#b00020"        # 错误 / 确认错误
-WARN = "#b26a00"          # 警告 / 疑似错误
+WARN = "#8A5200"          # 警告 / 疑似错误（原 #b26a00：压 WARN_BG 仅 3.71:1）
 INFO = "#606060"          # 提示
-MUTED = "#757575"         # 次要说明文字
+MUTED = "#666666"         # 次要说明文字（原 #757575：压 HEADING_BG 仅 3.85:1）
 ICON = "#5f6368"          # 工具栏图标描边色
 
 # 语义底色与补充态（v1.7 UI 方案 §4.1 新增，与前景色成对设计，
 # 正文 12pt 下对比度 ≥ 4.5:1。只增不改——既有 token 保持原值）
-SUCCESS = "#2E7D32"       # 成功 / 已办结 / 体检通过
+SUCCESS = "#2A7430"       # 成功 / 已办结 / 体检通过（原 #2E7D32：压底 4.44:1）
 SUCCESS_BG = "#E8F1E9"    # 成功横幅底色
 DANGER_BG = "#F7E6E8"     # 错误横幅 / 确认错误行底色
 WARN_BG = "#F7EFE0"       # 警告横幅 / 疑似错误行底色
 INFO_BG = "#EEF0F2"       # 提示横幅 / info 行底色
 SELECTED_BG = "#F5EAE7"   # 列表/树选中行底（浅红纸，替代满行深红）
 HOVER_BG = "#F5F2EC"      # 列表悬停行底
-DISABLED_FG = "#A8A29A"   # 禁用态文字（比 MUTED 更浅一档）
+DISABLED_FG = "#A8A29A"   # 禁用态文字（WCAG 对 inactive 控件豁免对比度）
 FOCUS_RING = "#9E2B254D"  # 键盘焦点外圈（主色 30% 透明）
 SHADOW = "#3A2E2847"      # 卡片投影
 TEXT = "#333333"          # 常规控件前景（按钮等）
 HEADING_TEXT = "#5a4a3a"  # 表头文字（暖棕，与 HEADING_BG 成对）
 TOOLTIP_BG = "#3a3028"    # 工具提示底色
+
+# 角色色（v1.9 P1-32 新增，只增不改）：把"主色系文字"从实底主色里拆出来，
+# 使深浅两套都能同时满足 4.5:1。浅色下与 PRIMARY / PRIMARY_DIM 同值。
+ACCENT_FG = PRIMARY       # 主色系文字：分组标题 / 选中标签页 / 链接
+SELECTED_FG = PRIMARY_DIM  # 列表/树选中行文字（与 SELECTED_BG 成对）
+ON_DANGER = "#FFFFFF"      # 危险色实底上的文字（危险按钮 hover）
+ON_PRIMARY = "#FFFFFF"     # 主色实底上的文字（工具栏主按钮；v1.9）
 
 # ---------------------------------------------------------------- 字号 (pt)
 TITLE = 16                # 对话框标题 / 主窗口大标题
@@ -53,15 +72,17 @@ ROW_GAP = 4               # 行内间距 / 紧凑布局
 # ================================================================ 深色主题
 # 深色调色板（UI 设计方案 §4.3/P2）：只覆盖"看起来会错"的键——字号/间距
 # 不随主题变化。取值原则：底色走深墨暖色（与 PPT 封面的 DARK/DCARD 一致），
-# 前景与语义色整体提亮一档保证对比度；公文红提亮为 #C4534B（深底上保持品牌）。
+# 前景与语义色整体提亮一档保证对比度；公文红提亮（深底上保持品牌）。
+# v1.9 P1-32 复测（WCAG）：选中行 1.67:1、主色文字 3.87:1、白字压主色 4.48:1
+# 均不达标，按角色拆 token 后修复（见文件头"对比度口径"）。
 _DARK = {
-    "PRIMARY": "#C4534B",
+    "PRIMARY": "#BC4B43",      # 实底/描边；白字压底 4.97:1（原 #C4534B 仅 4.48）
     "PRIMARY_DIM": "#8F2F2A",
     "SURFACE": "#2C2521",
     "BORDER": "#4A3F38",
     "HEADING_BG": "#342C27",
     "BG": "#1F1917",
-    "DANGER": "#E57373",
+    "DANGER": "#E57373",       # 压 DANGER_BG 4.77:1（v1.9 复测达标，故保持原值）
     "WARN": "#E5A044",
     "INFO": "#B8B2AB",
     "MUTED": "#A99C90",
@@ -77,6 +98,12 @@ _DARK = {
     "TEXT": "#EFE7DE",
     "HEADING_TEXT": "#C7B8A8",
     "TOOLTIP_BG": "#4A3F38",
+    # 角色色：主色系文字 5.00~6.34:1；选中行文字 9.82:1；危险底上文字 6.07:1
+    "ACCENT_FG": "#DD847D",
+    "SELECTED_FG": "#F2D6D1",
+    "ON_DANGER": "#241012",
+    # 主色实底上的文字：深色 PRIMARY=#BC4B43，白字 4.97:1（浅色 7.3:1）
+    "ON_PRIMARY": "#FFFFFF",
 }
 
 _IS_DARK = False
@@ -126,10 +153,12 @@ def danger_button_style() -> str:
     """危险操作按钮样式（§6.8 / §7.1）：白底 + DANGER 描边与文字，hover 反色。
 
     仅用于不可逆操作（彻底删除 / 清空回收站 / 恢复覆盖），与主按钮的主色
-    实底形成明确区分。
+    实底形成明确区分。hover 的文字色取 ``ON_DANGER``：深色主题的 DANGER 为
+    保证"错误文字压页面底"而提亮，白字压它会掉到 3:1 以下，故底色实底上
+    统一走角色 token（浅色白字 / 深色深字）。
     """
     return (f"QPushButton {{ border:1px solid {DANGER}; color:{DANGER}; }}"
-            f"QPushButton:hover {{ background:{DANGER}; color:white; }}")
+            f"QPushButton:hover {{ background:{DANGER}; color:{ON_DANGER}; }}")
 
 
 def danger_group_style() -> str:
@@ -160,7 +189,7 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
 }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
 QPlainTextEdit:focus {{
-    border: 1px solid {PRIMARY};
+    border: 1px solid {ACCENT_FG};
 }}
 /* 正文编辑区（§6.2）：白底无边框——描边由外层容器表达，正文区只留纸面 */
 QTextEdit#doc_editor {{
@@ -220,25 +249,28 @@ QListWidget, QTreeWidget, QTableWidget {{
    键盘焦点用主色边框表达（与输入框 focus 同一语义），
    当前项用焦点底色表达（不再依赖原生虚线框）。 */
 QListWidget:focus, QTreeWidget:focus, QTableWidget:focus {{
-    border: 1px solid {PRIMARY};
+    border: 1px solid {ACCENT_FG};
 }}
+/* 选中行 / 焦点行文字走 SELECTED_FG：深色下 PRIMARY_DIM 压 SELECTED_BG 只有
+   1.67:1，选中行是高频阅读位置，必须≥4.5:1（v1.9 P1-32）。 */
 QListWidget::item:selected, QTreeWidget::item:selected,
 QTableWidget::item:selected {{
     background: {SELECTED_BG};
-    color: {PRIMARY_DIM};
+    color: {SELECTED_FG};
 }}
 QListWidget::item:focus, QTreeWidget::item:focus,
 QTableWidget::item:focus {{
     background: {SELECTED_BG};
-    color: {PRIMARY_DIM};
+    color: {SELECTED_FG};
 }}
 QListWidget::item:hover, QTreeWidget::item:hover,
 QTableWidget::item:hover {{
     background: {HOVER_BG};
 }}
-/* 分类树选中节点：主色左侧 3px 指示条（§6.3） */
+/* 分类树选中节点：主色左侧 3px 指示条（§6.3）—— 用 ACCENT_FG 保证深色下
+   压 SURFACE 仍有 ≥3:1 的边界可见度（PRIMARY 实底色在深色下仅 2.66:1）。 */
 QTreeWidget#cat_tree::item:selected {{
-    border-left: 3px solid {PRIMARY};
+    border-left: 3px solid {ACCENT_FG};
 }}
 QHeaderView::section {{
     background: {HEADING_BG};
@@ -258,7 +290,7 @@ QGroupBox::title {{
     subcontrol-origin: margin;
     left: 8px;
     padding: 0 4px;
-    color: {PRIMARY};
+    color: {ACCENT_FG};
     font-weight: bold;
 }}
 QToolBar {{
@@ -287,9 +319,9 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{
     background: {BG};
-    color: {PRIMARY};
+    color: {ACCENT_FG};
     font-weight: bold;
-    border-bottom: 2px solid {PRIMARY};
+    border-bottom: 2px solid {ACCENT_FG};
 }}
 QSplitter::handle {{
     background: {BORDER};

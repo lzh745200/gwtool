@@ -798,7 +798,7 @@ def _validate_restored_db(tmp: Path) -> None:
     import sqlite3
 
     from .. import logs
-    from ..db.schema import core_table_names, required_table_names
+    from ..db.schema import SCHEMA_VERSION, core_table_names, required_table_names
 
     conn = sqlite3.connect(str(tmp))
     try:
@@ -809,10 +809,24 @@ def _validate_restored_db(tmp: Path) -> None:
                 "已中止恢复，当前数据未被改动")
         present = {str(r[0]) for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
+        backup_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     except sqlite3.DatabaseError as exc:
         raise ValueError(f"备份包内的数据库损坏，无法读取：{exc}") from exc
     finally:
         conn.close()
+
+    # 版本方向校验（v1.9）：备份包**比当前程序新**时必须拒绝。
+    #
+    # 为什么必须在这里拦：恢复只做"文件替换 + 启动时迁移"，而迁移只会**升**
+    # 版本。把 v8 的库换进 v7 程序后，启动时的版本检查会抛 SchemaTooNewError —
+    # 用户看到的是"恢复成功"随后程序打不开，且旧库此时已被替换（只剩恢复前的
+    # 自动备份）。实测：v8 备份恢复 ok=True → 程序打不开。
+    # 反方向（旧备份进新程序）是正常升级路径，必须放行并交给迁移。
+    if backup_version > int(SCHEMA_VERSION):
+        raise ValueError(
+            f"备份包来自更新版本的程序（数据库版本 v{backup_version}，"
+            f"当前程序最高支持 v{SCHEMA_VERSION}）。请先将程序升级到该版本或更高"
+            "再恢复此备份；当前数据未被改动。")
 
     required = required_table_names()
     core = set(core_table_names())

@@ -94,7 +94,7 @@ class EditorPanel(QWidget):
         self.dirty_dot = QLabel("●")
         self.dirty_dot.setToolTip("有修改尚未保存（Ctrl+S 保存到资料库）")
         self.dirty_dot.setStyleSheet(
-            f"color:{theme.PRIMARY};font-size:{theme.SMALL}pt;")
+            f"color:{theme.ACCENT_FG};font-size:{theme.SMALL}pt;")
         self.dirty_dot.setVisible(False)
         self.tabs.setCornerWidget(self.dirty_dot, Qt.TopRightCorner)
 

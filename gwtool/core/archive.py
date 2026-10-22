@@ -53,16 +53,46 @@ def next_archive_no(prefix: str, year: str, seq: int) -> str:
     return f"{(prefix or '').strip()}{year}-{int(seq):04d}"
 
 
+def _row_year(r, default: str) -> str:
+    """记录所属年度：优先收到日期，其次办结日期/来文日期，最后回退默认年。
+
+    跨年批次**不能**统一用首行的年份（旧实现的 `rows[0].receive_date[:4]`）：
+    12 月办结、次年 1 月归档的件会被编到错误年度，档号与年度卷对不上。
+    """
+    for raw in (getattr(r, "receive_date", ""), getattr(r, "done_date", ""),
+                getattr(r, "doc_date", "")):
+        head = (raw or "")[:4]
+        if head.isdigit():
+            return head
+    return default
+
+
 def suggest_batch(rows: list, prefix: str, year: str = "") -> list:
-    """为一批记录预分配档号（不改库，供界面预览）。"""
-    y = year or (rows[0].receive_date[:4] if rows and rows[0].receive_date else
-                 str(date.today().year))
-    used = 0
+    """为一批记录预分配档号（不改库，供界面预览）。
+
+    两条硬约束（v1.9 修 P1-24）：
+      1. **起始序号接续本年度已用最大号**（`dao.max_archive_seq`）。旧实现每批
+         从 0001 重新开始，同一年度归档第二批必然与第一批重号；
+      2. **年度按每条记录自己的日期算**，不取 `rows[0]` 的年份；只有调用方显式
+         传 year 时才整批用该年度（导入历史卷等场景）。
+    """
+    default_year = str(date.today().year)
+    if rows:
+        default_year = _row_year(rows[0], default_year)
+    next_seq: dict[str, int] = {}
+
+    def take(y: str) -> str:
+        if y not in next_seq:
+            next_seq[y] = dao.max_archive_seq(prefix, y) + 1
+        no = next_archive_no(prefix, y, next_seq[y])
+        next_seq[y] += 1
+        return no
+
     for r in rows:
         if (r.archive_no or "").strip():
             continue          # 已有档号的不重编，避免打乱既有卷
-        used += 1
-        yield r, next_archive_no(prefix, y, used)
+        y = (year or "").strip() or _row_year(r, default_year)
+        yield r, take(y)
 
 
 def batch_archive(rows: list, prefix: str, retention: str,

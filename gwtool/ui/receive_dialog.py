@@ -192,7 +192,7 @@ class ReceiveForm(QDialog):
         self._record_label(key, label)
         if required:
             # §7.3：必填项在标签前标主色星号
-            lbl = QLabel(f'<span style="color:{theme.PRIMARY}">*</span>'
+            lbl = QLabel(f'<span style="color:{theme.ACCENT_FG}">*</span>'
                          + label.rstrip("：") + "：")
             form.addRow(lbl, ed)
         else:

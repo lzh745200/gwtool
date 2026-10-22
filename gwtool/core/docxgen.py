@@ -49,9 +49,55 @@ def _set_run_font(run, cn_font: str, size_pt: float, bold: bool = False,
 
 
 def _set_line_exact(par, pt: float) -> None:
+    """固定行距，并把**段前/段后显式清零**（P1-01）。
+
+    为什么必须写 before/after=0：python-docx 自带模板的 `styles.xml`
+    `docDefaults` 里带着 `<w:spacing w:after="200" w:line="276"
+    w:lineRule="auto"/>`。段落上只写 `w:line`/`w:lineRule` 时，`w:after=200`
+    （10 磅段后距）**仍会被继承**并叠加到行距上 —— 实测（WPS 12.0 渲染）
+    模板要求 28 磅固定行距 / 每面 22 行，实际渲成 32.4 磅 / 19~20 行，
+    整篇版心不合规、页数虚增。补上 before/after=0 后实测回到 28.0 磅。
+    """
     pf = par.paragraph_format
     pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
     pf.line_spacing = Pt(pt)
+    pf.space_before = Pt(0)
+    pf.space_after = Pt(0)
+
+
+def _zero_doc_defaults_spacing(doc) -> None:
+    """把文档级默认段前/段后也清零（P1-01 的第二道保险）。
+
+    `_set_line_exact` 只覆盖"我们自己创建的正文/标题/页脚/间距段"；表格单元格
+    段落、`add_page_break()` 造出的空段落等不经过它，仍会继承 docDefaults 的
+    `w:after=200`。同一份材料里一半段落 28 磅、另一半 38 磅，比整体偏移更难查，
+    因此这里把文档默认值也清零，让整篇口径一致。
+
+    只清 before/after（含 beforeLines/afterLines 这类按行计数、优先级更高的
+    属性），**不动 docDefaults 的 line/lineRule**：表格等未显式设行距的段落
+    继续沿用模板原有的 1.15 倍行距，不会被本次修复压成固定值。
+    """
+    try:
+        defaults = doc.styles.element.find(qn("w:docDefaults"))
+        if defaults is None:
+            return
+        ppr_default = defaults.find(qn("w:pPrDefault"))
+        if ppr_default is None:
+            return
+        ppr = ppr_default.find(qn("w:pPr"))
+        if ppr is None:
+            return
+        spacing = ppr.find(qn("w:spacing"))
+        if spacing is None:
+            return
+        for attr in ("w:beforeLines", "w:afterLines"):
+            if spacing.get(qn(attr)) is not None:
+                del spacing.attrib[qn(attr)]
+        spacing.set(qn("w:before"), "0")
+        spacing.set(qn("w:after"), "0")
+    except Exception as exc:  # 模板结构异常不能拦住生成（默认行距仍可用）
+        from ..logs import get_logger
+        get_logger("docx").warning("清零文档默认段距失败，沿用模板默认值：%s", exc)
 
 
 def _set_first_line_chars(par, chars: float) -> None:
@@ -122,6 +168,9 @@ def _enable_even_odd_footers(doc) -> None:
 # ------------------------------------------------------------------ 主流程
 def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
     doc = Document()
+    # P1-01：先把模板自带的段后距清零，后续每段再显式写 0，两处一起才保证
+    # "正文 28 磅固定行距、每面 22 行" 的版心口径在 Word/WPS 里都成立。
+    _zero_doc_defaults_spacing(doc)
 
     # 页面设置
     sec = doc.sections[0]
