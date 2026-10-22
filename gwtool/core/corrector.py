@@ -72,6 +72,8 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
     for wrong, correct, cat, conf in CURATED_PAIRS:
         if conf <= 0 or not _is_valid_pair(wrong, correct):
             continue
+        if _is_self_contained(wrong, correct):
+            continue
         old = patterns.get(wrong)
         if old is None or conf > old[2]:
             patterns[wrong] = (correct, cat, conf)
@@ -80,9 +82,28 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
         for p in dao.all_error_pairs():
             if not _is_valid_pair(p.wrong, p.correct) or not p.enabled:
                 continue
+            # `source == "curated"` 的库内记录是**构建期对内置精标表的快照**
+            # （seed.db 生成时写进去的 220 条）。内置文件才是唯一事实来源：
+            # 早先的实现把快照也当数据加载，于是
+            #   · 内置表里**已删除**的错对（行使权利→行使权力、哑巴→听障人士）
+            #     会从快照"复活"；
+            #   · 内置表里**已修订**的类别/置信度（异形词降为"规范用字 0.7"）
+            #     会被快照里更高置信的旧值盖回去。
+            # 这两点在真实用户机上都会生效（首启动即导入 seed.db），单测却因为
+            # 用空库看不到 —— 属"内置数据改了但线上不变"的隐性缺陷。
+            # 与 README 既有口径一致：程序内置的人工精标对始终生效、不受规则集开关影响。
+            if p.source == "curated":
+                continue
+            if _is_self_contained(p.wrong, p.correct):
+                continue
             conf = p.confidence if p.source != "user" else max(p.confidence, 0.99)
             old = patterns.get(p.wrong)
-            if old is None or conf > old[2]:
+            # 同置信度时按正形字典序取小（v1.8）：同一错形若有多个正形（用户
+            # 从多份词表导入、或历史数据重复），"显示哪一条"原来取决于库内
+            # 行序，同一份词库在两台机器上可能给出不同建议 —— 不可复现。
+            # 种子库已在构建期按错形去重（见 scripts/seed_data.py），
+            # 这里再兜一层，保证任何来源的数据都给出确定性的建议。
+            if old is None or conf > old[2] or (conf == old[2] and p.correct < old[0]):
                 patterns[p.wrong] = (p.correct, p.category or "错别字", conf)
     except Exception as exc:
         # 数据库不可用时退化为纯内置数据 —— 降级本身是设计，但必须留痕：
@@ -92,6 +113,8 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
             "纠错词库加载失败，本次退化为内置数据：%s", exc)
     # 机构沿革对照（提示级，建议核实后替换）
     for wrong, correct in ORG_RENAME_PAIRS:
+        if _is_self_contained(wrong, correct):
+            continue
         old = patterns.get(wrong)
         if old is None or 0.7 > old[2]:
             patterns[wrong] = (correct, "机构沿革", 0.7)
@@ -105,6 +128,23 @@ def _load_patterns() -> dict[str, tuple[str, str, float]]:
             "忽略名单加载失败，退化为空集：%s", exc)
         _RULES_CACHE["ignore"] = set()
     return patterns
+
+
+def _is_self_contained(wrong: str, correct: str) -> bool:
+    """错形是不是正形的**子串**（自包含对，加载时丢弃）。
+
+    审计 P1-1：机构沿革表里 `旅游局 → 文化和旅游局`、`建设局 → 住房和城乡建设局`
+    这类映射中，正形**包含**错形。子串匹配会在**已经正确的现行机构名**上再次命中：
+
+        市文化和旅游局 → 市文化和文化和旅游局
+        住房和城乡建设部 → 住房和城乡住房和城乡建设部
+
+    而 `correct_block` / 参考面板「全部替换」会把它写回正文 —— 直接改坏正确名称。
+    这类映射在词表法里没有可靠的正向写法（无法区分"旧称单独出现"与"新称内部
+    子串"），按项目红线「宁少报不误报」在加载端整条丢弃；旧称的提示能力由
+    `core.consistency._check_orgs`（全文新旧并存才提示）承担。
+    """
+    return bool(wrong) and wrong in correct
 
 
 def invalidate_cache() -> None:
@@ -264,8 +304,21 @@ def _check_exact(text: str) -> list[Correction]:
                 if q_open > q_close:
                     i += len(hit)
                     continue
+                # 机构沿革：历史语境不改（审计 P2-12）。`1953年，卫生部`、
+                # `原卫生部` 这类引述改成现名属把对的改错 —— 机构沿革只应是
+                # "新稿里误用了旧名"的提示，不是历史改写器。
+                if cat == "机构沿革" and _looks_historical(text, i):
+                    i += len(hit)
+                    continue
                 raw.append((i, i + len(hit), hit, correct, cat, conf))
-                i += len(hit)
+                # 前进 **1 个字**而不是 len(hit)（v1.8，深审 P1 附带修复）：
+                # 原来一跳就跳过整个命中，于是"起点更早的短命中"会把**落在它内部
+                # 的长命中整个吞掉**。实测：`文中出现了戒骄戒燥` 里生成对
+                # `了戒→了解`（0.55）从下标 4 命中并把指针推到 6，
+                # 4 字精标对 `戒骄戒燥`（0.9，起点 5）**根本不会被扫描到**。
+                # 逐字前进让两个起点都进入候选，重叠按（置信度，长度）由
+                # `_dedupe` 仲裁 —— 0.9 的长对胜出，语义与既有设计一致。
+                i += 1
                 continue
         if text[i] == "《":
             q_open += 1
@@ -273,6 +326,23 @@ def _check_exact(text: str) -> list[Correction]:
             q_close += 1
         i += 1
     return _suppress_inside_common_words(text, raw)
+
+
+_HIST_YEAR_RX = re.compile(r"(?:19|20)\d{2}\s*年")
+
+
+def _looks_historical(text: str, i: int) -> bool:
+    """命中处是否处于"历史引述"语境（机构沿革专用，审计 P2-12）。
+
+    只取两种**确定性**信号，不做语义猜测：
+      · 命中前 12 字内出现四位年份 —— `1953年，卫生部`、`1998年组建的国家旅游局`；
+      · 紧邻前缀是「原 / 前 / 撤销」—— `原卫生部`、`前国家旅游局`。
+    命中则不改：把历史引述里的旧机构名改成现名，会把本来正确的引述改错。
+    """
+    head = text[max(0, i - 12):i]
+    if _HIST_YEAR_RX.search(head):
+        return True
+    return head.rstrip().endswith(("原", "前", "撤销"))
 
 
 def _suppress_inside_common_words(
@@ -285,15 +355,36 @@ def _suppress_inside_common_words(
       1) 两端都必须落在分词边界（原规则只要求"非双内"）——
          拦截跨词命中（如 '全厂生产' 分词 全厂|生产，'厂生' 右端在边界）；
       2) 命中不得严格位于任何分词 token 内部；
-      3) 例外：命中本身是 jieba 高频词（词频≥30）时退回原规则，
-         避免误伤"同为真实词的易混对"（如 度过/渡过 类）；
-      4) 追加防线（v1.5.1）：命中若由**≥2 个高频常用字**组成
+      3) 追加防线（v1.5.1）：命中若由**≥2 个高频常用字**组成
          （如 这是/没又/住要 —— 生成器的"同音错形"恰好落在常用字上），
          它在任何正常行文中随处可见，属结构性误报，一律抑制。
          实测 seed.db 的 4 万条生成对中有 925 条属此类。
          判据刻意用**逐字词频**而非分词结果：jieba 会把"这是"整体并成
          一个词、把"请驶用"并成一个词，依赖分词边界并不可靠。
-         本条只对"低置信且命中非高频词"的命中生效，绝不触碰人工精标对。
+      4) v1.8 新增四道**与分词无关**的结构性闸门（与上面的 strict 门控并列，
+         且同样只对 conf < _LOW_CONF 的生成层命中生效 —— 精标对、用户词条、
+         规则层的 confidence 均 ≥0.7，一律不受影响）：
+         a. **错形本身是已知合法词 → 不报**。生成层是按同音/近音程序化配对的，
+            "错形"若本身是 jieba 词表/随包 CC-CEDICT 词典/用户术语里的合法词形，
+            属"同音异形真词"歧义。真实语料上的表现是 `显式→显示`、`一键→一件`、
+            `重试→重视`、`一价→一家`、`上疏→上述` 这类**把正确用词改成另一个词**
+            的误报（改完语义就变了）。无模型条件下无法判定该处究竟是哪个词，
+            按项目红线「宁少报不误报」直接不报；这些真实混淆仍由精标对、上下文
+            规则、用户词库覆盖。
+            实测代价：4 万条生成对里约 2.5% 不再参与召回（E2 约 -1.4pp），
+            收益：仓库 doc/ 真实长文语料上低置信误报 110 处 → 19 处（0.52/万字）；
+            词典全量探针里"合法词被判错"从 133 个降到 79 个（余下全是**本该报**的
+            变体/旧称/禁用词）。
+         b. **命中是更长词典词的一部分 → 不报**。若 `一矢` 落在词典词 `一矢中的`
+            里，改它就是把词拆坏（与 repeat_rules 的"更长词覆盖即放行"同源）。
+         c. **同一文档内重复出现 ≥_DOC_REPEAT_MIN 次 → 不报**。同一篇材料里
+            反复出现的词形是作者的术语选择（新词、简称、单位内部提法），
+            不是笔误；真实笔误一般只出现在一处。该闸门不依赖外部词典，
+            正好补上 a/b 在"词表外新词"上的空档。用户把真错加进词库后
+            置信度升到 0.99，即永久生效（逃生通道不变）。
+         d. 上述 a/b/c 三条都**不属于**"高置信短路"：`_CURATED_WRONG` 里的
+            人工精标错形永不进入它们（否则 `布署`、`帐目` 这些被词典收录的
+            真错别字反而会被放行）。
     """
     boundaries: set[int] = set()
     inside_mask = bytearray(len(text) + 2)   # 位置 -> 是否严格位于某 token 内部
@@ -318,22 +409,43 @@ def _suppress_inside_common_words(
             tokenized = None
     out: list[Correction] = []
     for s, e, hit, correct, cat, conf in raw:
-        if tokenized is None:
-            # 无分词信息：跳过词边界门控，只保留确定性的结构规则
-            if conf < _LOW_CONF and jieba_freq(hit) < 30 \
-                    and _is_common_char_sequence(hit):
-                continue
-            out.append(Correction(s, e, hit, correct, cat, "词库匹配", conf))
-            continue
-        both_ends = s in boundaries and e in boundaries
-        inside = bool(inside_mask[s])
-        if conf < _LOW_CONF and jieba_freq(hit) < 30:
-            if not (both_ends and not inside):
-                continue  # 低置信：跨词/词内命中 -> 误报
-            if _is_common_char_sequence(hit):
-                continue  # 逐字皆为高频常用字 -> 结构性误报
-        else:
-            if boundaries and s not in boundaries and e not in boundaries:
+        if conf < _LOW_CONF:
+            # 生成层四道**与分词无关**的结构性闸门，必须排在分词分支之前：
+            # 分词不可用时它们照样生效（降低误报的防线不该随分词一起降级）。
+            # 人工精标错形永远豁免：它们是被人工确认过的"真错"（如 `布署`），
+            # 不能因为恰好被词典收录就被当成"同音异形歧义"放行。
+            if hit not in _CURATED_WRONG:
+                if _is_known_word(hit):
+                    continue   # 错形本身是词典词 -> 同音异形歧义，不报
+                if _covered_by_known_word(text, s, e):
+                    continue   # 命中是更长词典词的一部分 -> 词被拆坏，不报
+                if text.count(hit) >= _DOC_REPEAT_MIN:
+                    continue   # 文档内重复出现 -> 作者的术语选择，不报
+            if tokenized is None:
+                # 无分词信息：跳过词边界门控，只保留确定性的结构规则
+                if _is_common_char_sequence(hit):
+                    continue
+            else:
+                both_ends = s in boundaries and e in boundaries
+                inside = bool(inside_mask[s])
+                if not (both_ends and not inside):
+                    continue  # 低置信：跨词/词内命中 -> 误报
+                if _is_common_char_sequence(hit):
+                    continue  # 逐字皆为高频常用字 -> 结构性误报
+        elif tokenized is not None:
+            if len(hit) <= 2:
+                # 两字高置信精标对也必须**两端都落在分词边界**（v1.8，审计 P1-3）。
+                # 原规则只要求"两端不同时在词内"，于是正常词的跨接会被报出：
+                #   `按排放标准`（按|排放|标准）-> `按排→安排`
+                #   `按装机容量`（按|装机|容量）-> `按装→安装`
+                #   `虽然烧了`（虽然|烧|了）    -> `然烧→燃烧`
+                #   `防害虫`（防|害虫）         -> `防害→妨害`
+                # 这些都是"前一词的尾字 + 后一词的首字"，conf 0.9+ 默认阈值必中。
+                # 四字及以上不受影响（成语错形不可能由正常词跨接产生），
+                # 故只对两字条目收紧，避免误伤长对召回。
+                if not (s in boundaries and e in boundaries):
+                    continue
+            elif boundaries and s not in boundaries and e not in boundaries:
                 continue  # 两端均在词内部 -> 误报
         out.append(Correction(s, e, hit, correct, cat, "词库匹配", conf))
     return out
@@ -350,6 +462,21 @@ _LOW_CONF = 0.7            # 低于此置信度走严格门控
 # 就弹一个假建议。**逃生通道**：用户手动添加的词条置信度会被抬到 0.99，
 # 永不进入本门控——任何被误抑制的真错，用户加一次即永久生效。
 _COMMON_CHAR_FREQ = 5000
+
+# v1.8：生成层（conf < _LOW_CONF）的"同一文档内重复出现"豁免门槛。
+# 依据：同一篇材料里同一词形出现 ≥2 次，几乎只能是作者的术语选择（新词/简称/
+# 单位内部提法）；真实笔误一般只出现在一处。取 2 而非更高，是因为真实语料里
+# `一键`、`显式` 这类词往往一篇出现 2~3 次，门槛再高就漏掉主要收益。
+# 逃生通道与上面一致：用户把真错加进词库后置信度 0.99，不吃这道闸门。
+_DOC_REPEAT_MIN = 2
+
+# 人工精标错形集合（v1.8）：生成层两道新闸门的**豁免名单**。
+# 为什么需要：jieba 词典本身收了一批"别写"（如 `布署`、`帐目`），
+# 若一律按"错形是词典词 -> 不报"处理，会把精标层里真正要报的错别字吃掉。
+# 判据用**词形**而非置信度——这样 `test_bugfix_regression` 里以 0.55 构造的
+# `布署` 原始命中同样不会被误伤，语义稳定、不依赖调用方传的 conf。
+_CURATED_WRONG: frozenset[str] = frozenset(
+    w for w, _c, _cat, conf in CURATED_PAIRS if conf > 0)
 
 
 def _is_common_char_sequence(hit: str) -> bool:
@@ -369,6 +496,68 @@ def jieba_freq(word: str) -> int:
         return int(jieba.dt.FREQ.get(word, 0))
     except Exception:
         return 0
+
+
+def _known_word_set() -> frozenset[str]:
+    """已知词形集合（jieba 判据之外的词典/术语证据），懒加载并缓存。
+
+    词典加载走 DAO 的只读接口并缓存在 `_RULES_CACHE`（`invalidate_cache()` 会清），
+    异常（库不可用）降级为空集 —— 只退化为 jieba 判据，不影响主流程。
+    """
+    cached = _RULES_CACHE.get("known_words")
+    if cached is not None:
+        return cached
+    words: set[str] = set()
+    try:
+        from ..db import dao
+        words.update(dao.builtin_dictionary_words())
+        words.update(dao.user_dictionary_words())
+    except Exception:
+        words = set()
+    cached = _RULES_CACHE["known_words"] = frozenset(words)
+    return cached
+
+
+def _is_known_word(hit: str) -> bool:
+    """错形本身是不是**已知的合法词形**（词典词或用户术语）。
+
+    两道判据取并集：
+      · jieba 词频 > 0 —— 1990 年代口径的通用词表，覆盖面窄但无需加载；
+      · 随包 CC-CEDICT 词典（12 万词）或用户导入的行业术语 —— 覆盖面宽得多，
+        能兜住 `一价`、`一哥`、`上疏`、`可恃` 这类"词频表里没有、但确实是
+        合法词/专名"的错形。实测词典全量探针里，被误判的词典词从 133 降到 92，
+        剩下的主要是**本该报**的变体/旧称/禁用词。
+    任一命中即视为"同音异形真词"，生成层不对它报错。
+    """
+    if jieba_freq(hit) > 0:
+        return True
+    return hit in _known_word_set()
+
+
+# 词典最长词 8 字（与 repeat_rules._MAX_WIN 同口径）：判断"命中是否被更长的
+# 词典词覆盖"时的窗口上限。
+_MAX_WORD_WIN = 8
+
+
+def _covered_by_known_word(text: str, s: int, e: int) -> bool:
+    """命中区间是否被某个**更长的**词典词完整覆盖。
+
+    与 repeat_rules 的 ② 规则同源：若 `一矢`（0..2）落在词典词 `一矢中的`
+    （0..4）里，那这段字是**一个合法词的一部分**，把它当"一矢→一时"的错形
+    改掉会把词拆坏。窗口上限 8 字（词典最长词），每个候选 O(64) 次集合查询，
+    只对低置信命中执行，代价可忽略。
+    """
+    words = _known_word_set()
+    if not words:
+        return False
+    n = len(text)
+    lo = max(0, s - _MAX_WORD_WIN + 1)
+    hi = min(n, s + _MAX_WORD_WIN)
+    for a in range(lo, s + 1):
+        for b in range(e + 1, hi + 1):
+            if text[a:b] in words:
+                return True
+    return False
 
 
 def _check_regex_group(text: str, rules, category: str) -> list[Correction]:

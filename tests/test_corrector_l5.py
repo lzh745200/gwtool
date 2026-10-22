@@ -525,7 +525,9 @@ def test_encdec_mode_detection_defaults_to_oneshot(tmp_db, monkeypatch):
     """不加 mode 参数时保持 oneshot，既有契约不漂移。"""
     session = _enable(monkeypatch, {})
     assert csc_gec._ENGINE.mode == "oneshot"
-    assert session.calls >= 0
+    # 原断言 `session.calls >= 0` 恒真（深审 P3 之一）。真正的契约是：仅"启用"
+    # 不应触发任何推理调用（懒加载），否则设置页一勾选就会阻塞。
+    assert session.calls == 0
 
 
 def test_encdec_encode_has_no_cls_wrap(tmp_db, monkeypatch):

@@ -1,5 +1,7 @@
 # open-code-review 全项目代码审查报告
 
+> 📌 **历史快照**：本文记录**撰写当时**的状态与数字（审查/验收/方案的一次性记录），其中条目、数量与性能数据不代表当前版本。现行口径请看 [README.md](README.md) 与 [v1.8.0增强与修复记录.md](v1.8.0增强与修复记录.md)。
+
 > 审查对象：公文汇编助手（`C:/gwtool`）全项目源码
 > 审查工具：**alibaba/open-code-review**（`open-code-review v1.12.5`，windows/amd64）
 > 审查日期：2026-09-21

@@ -187,9 +187,14 @@ def main() -> int:
     data["dict_words"] = len(words)
     csc_info = csc_neural.enhance_pack.installed_pack("csc")
     cgec_info = csc_gec.enhance_pack.installed_pack("cgec")
-    print(f"错别字对 {len(pairs)}（精标 {sum(1 for p in pairs if p.source == 'curated')}"
-          f" / 生成 {sum(1 for p in pairs if p.source == 'generated')}）"
-          f"　词典 {len(words)} 词")
+    # 精标条数以**代码内置表**为准（v1.8）：种子库不再带 curated 快照，
+    # 内置 `CURATED_PAIRS` 才是唯一事实来源；库内只剩生成对与用户词条。
+    n_builtin_curated = len(corrector_data.CURATED_PAIRS)
+    data["curated_builtin"] = n_builtin_curated
+    print(f"错别字对 {len(pairs)}（库内生成 "
+          f"{sum(1 for p in pairs if p.source == 'generated')} / 库内用户 "
+          f"{sum(1 for p in pairs if p.source == 'user')}）"
+          f"　内置精标 {n_builtin_curated}　词典 {len(words)} 词")
     print(f"增强包：拼写={'已装' if csc_info else '未装'}"
           f"　语法={'已装' if cgec_info else '未装'}"
           f"　onnxruntime={'可用' if csc_neural.runtime_available() else '缺失'}")

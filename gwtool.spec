@@ -27,6 +27,12 @@ hiddenimports = [
     # icons.py 用 QImage.fromData(..., "SVG") 画图标，需要 imageformats/qsvg 插件；
     # 代码未显式 import QtSvg，PyInstaller 不会自动收集该插件，打包后图标会全空白。
     'PySide6.QtSvg',
+    # core/consistency.py（v1.8 文内一致性校验）只被 writing_hints 以
+    # 函数体内 `from . import consistency` 延迟导入，且外面包了 try/except
+    # （拿不到就静默少一类提示）。静态分析**通常**扫得到函数内 import，
+    # 但这里一旦漏扫，产物不会报错、只是"写作提示里永远没有一致性检查" ——
+    # 属最难发现的静默降级。显式声明，把"产物必含该模块"变成确定性行为。
+    'gwtool.core.consistency',
 ]
 if sys.platform.startswith('win'):
     hiddenimports.append('win32timezone')   # pywin32 动态导入

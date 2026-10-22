@@ -15,7 +15,7 @@ REM  cmd.exe mis-parses the for/if blocks below. Verified: with
 REM  chcp 65001 the for-loop never set TS_DIR, so Tesseract was not
 REM  bundled while the script still printed success.
 REM
-REM  Chinese documentation for this script lives in README.md.
+REM  Chinese documentation for this script lives in doc/README.md.
 REM ============================================================
 setlocal
 cd /d "%~dp0.."

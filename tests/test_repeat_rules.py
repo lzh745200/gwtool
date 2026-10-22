@@ -373,3 +373,15 @@ def test_empty_dictionary_degrades_to_no_report():
             dbconn.configure(prev)
     corrector.invalidate_cache()
     assert rep("的的")                       # 恢复后仍工作
+
+# ============================================================ 7) 跨词交界不是间隔重复
+def test_interval_repeat_cross_word_boundary_not_reported():
+    """首个 c 是左邻词尾字、X 是右邻词首字 → 正常短语交界，不报（v1.8）。
+
+    实测来源：审计报告里「规则正则写错」被报成 `则正则→正则`（0.5 灰档）。
+    判据与同字连 ⑤a「左右都有词则放行」一致；真正的间隔重复正例
+    （是否是 / 在不在 / 了完了）只有一侧成词，不受影响 —— 同一文件下方
+    `test_interval_repeat_is_gray_050` 继续守着它们。
+    """
+    for s in ["规则正则写错会静默失效", "这条规则正则匹配", "选项正则表达式"]:
+        assert not rep(s), f"{s!r} 是正常短语，不应报：{pairs(s)}"

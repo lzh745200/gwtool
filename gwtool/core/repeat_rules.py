@@ -65,6 +65,13 @@ ONO_CHARS = frozenset(
     "吱嘎嘁嚓嘘砰"
 )
 
+# cXc 间隔重复的**排除字**（v1.8，深审 P2-13）：
+# 「的」是结构助词，`的X的`（`达到预期的目的`、`这是一个很好的目的`）在正常行文里
+# 大量合法，删掉前一个"的"只是换一种说法、不构成纠错。审计实测它被判为间隔重复
+# （confidence 0.5、kind=delete），而参考面板默认阈值就是 0.5，「全部替换」会把
+# 它写回正文 —— 等于把对的句子改掉。其余虚词（在/是/和…）的 cXc 仍需保留判定。
+CXC_EXCLUDED = frozenset("的")
+
 
 def invalidate_cache() -> None:
     """词典变化后调用：清空派生缓存，下次判定重新派生。"""
@@ -361,12 +368,22 @@ def _check_interval_repeat(text: str, ctx: dict) -> list[Correction]:
     i = 0
     while i + 2 < n:
         c = text[i]
-        if c in FUNCTION_CHARS and text[i] == text[i + 2] and text[i] != text[i + 1]:
+        if (c in FUNCTION_CHARS and c not in CXC_EXCLUDED
+                and text[i] == text[i + 2] and text[i] != text[i + 1]):
             # 极大化：避免与同字连、更长的间隔重复重叠
             if (i == 0 or text[i - 1] != c) and (i + 3 >= n or text[i + 3] != c):
                 mid = text[i + 1]
                 if _is_cjk(c) and _is_cjk(mid) and not \
                         _covered_by_longer_word(text, i, 3, ctx):
+                    # v1.8 追加护栏（真实语料抓到的误报）：首个 c 若是**左邻词的尾字**、
+                    # 中间的 X 又是**右邻词的首字**，这就是正常短语交界，不是重复。
+                    # 实测：`规则正则` 被判成 `则正则`（删一字得「正则」）；而真正的
+                    # 间隔重复正例（是否是 / 在不在 / 了完了）只有一侧成词，故不误伤。
+                    # 与同字连 ⑤a「左右都有词 → 放行」同一判据，两处口径一致。
+                    if _left_word_exists(text, i, ctx) \
+                            and _right_word_exists(text, i, ctx):
+                        i += 1
+                        continue
                     form = text[i:i + 3]
                     keep_left = text[i:i + 2]       # cX（删右侧 c）
                     keep_right = text[i + 1:i + 3]  # Xc（删左侧 c）

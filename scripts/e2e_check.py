@@ -393,6 +393,57 @@ def main() -> int:
          bool(_long) and _long[0].wrong == "反应情况"
          and _long[0].suggestion == "反映情况")
 
+    # 8e) v1.8 新增能力：文内一致性 / 生成层精度闸门 / 校对报告
+    #
+    # 这三条都是**门禁式**断言：能力退化必须让发布前最后一道人工可读门禁红灯，
+    # 而不是只躺在单测里。三条分别对应"新能力有没有接上"（一致性、校对报告）
+    # 与"旧能力有没有被新闸门改坏"（精度闸门）。
+    from gwtool.core import consistency
+    _inc = consistency.check(
+        "共三个部门参与，另有3个部门配合；材料于2026年10月3日印发，"
+        "2026.10.3归档。")
+    _inc_kinds = {i.kind for i in _inc}
+    step("一致性：同一实体的两种写法可检出",
+         {"数字", "日期"} <= _inc_kinds,
+         f"{len(_inc)} 条：{sorted(_inc_kinds)}")
+    _inc_clean = consistency.check("共3个部门参与，材料于2026年10月3日印发。")
+    step("一致性：写法统一时零命中", not _inc_clean,
+         f"{len(_inc_clean)} 命中")
+
+    # 精度闸门（corrector v1.8）：生成层按同音程序化配对，会把合法现代词
+    # （重试/显式/一键）当成错形报出来 —— 那会把正确用词改成另一个词。
+    # 这里"合法词不得报 + 真错别字仍要报"成对断言，防止闸门被调成"全不报"。
+    #
+    # ⚠️ 断言口径：词表外新词（显式）靠"同一文档重复出现"豁免，因此文本里必须
+    # 出现 ≥2 次才在闸门覆盖范围内；只出现一次的词表外新词仍会报（已知局限，
+    # 见 README「校对能力的已知边界」与 tests/test_precision_gate_v18.py）。
+    _gate_text = ("系统会在超时后自动重试三次；界面请显式提示用户，"
+                  "显式提示比隐式默认更容易排查。")
+    _gate = {(c.wrong, c.suggestion) for c in corrector.check_text(_gate_text)}
+    step("精度闸门：合法现代词不被当成错形",
+         not any(w in ("重试", "显式") for w, _s in _gate),
+         f"命中 {sorted(_gate)[:3]}")
+    step("精度闸门：真错别字照报",
+         ("布署", "部署") in {(c.wrong, c.suggestion)
+                             for c in corrector.check_text("现将工作布署如下。")})
+
+    # 校对报告（DOCX 留痕）：必须能生成，且明细行数 == 命中数（+表头）
+    from gwtool.core import report as _rep_mod
+    _rep_hits = corrector.check_text("工作布署已完成，报名截止本月底。")
+    _rep_path = Path(sample_dir) / "校对报告.docx"
+    _rep_mod.export_correction_report(_rep_hits, str(_rep_path),
+                                      source_name="e2e样例")
+    _rep_tree = _rep_mod.build_correction_report_tree(_rep_hits,
+                                                      source_name="e2e样例")
+    _rep_rows = [len(b.rows) for b in _rep_tree.blocks
+                 if getattr(b, "rows", None)]
+    _rep_size = _rep_path.stat().st_size if _rep_path.exists() else 0
+    step("校对报告：DOCX 生成且明细行数正确",
+         _rep_size > 0 and bool(_rep_rows) and _rep_rows[0] == len(_rep_hits) + 1,
+         f"{_rep_path.name} {_rep_size // 1024} KB；"
+         f"明细 {(_rep_rows[0] - 1) if _rep_rows else 0}/{len(_rep_hits)} 行")
+
+
     # 9) 词表导入：预检 → 预览 → 事务写入 → 生效与回归校验
     #
     # ⚠️ 本脚本跑在**真实数据目录**上，所以自检用的词表**导入后必须删掉**，

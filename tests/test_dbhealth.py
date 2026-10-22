@@ -109,7 +109,9 @@ class TestMaintenance:
         rep = dbhealth.maintenance()
         assert rep["ok"] is True
         assert rep["after"] <= rep["before"] + 4096      # 不应变大
-        assert rep["saved"] >= 0
+        # 原断言 `saved >= 0` 恒真（深审 P3 之一）：维护报告最核心的数字反而没被锁。
+        # 契约：saved 必须等于 before-after（真空后通常缩小；不缩小时记 0，不为负）。
+        assert rep["saved"] == max(0, rep["before"] - rep["after"])
 
     def test_fts_rebuilt(self, tmp_db):
         dao.add_document(dao.Document(title="检索测试", content_text="安全生产"))

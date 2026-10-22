@@ -91,21 +91,27 @@ class TestImportDoesNotCreateFalsePositives:
             "导入常见二字词后正常语句被误报 —— 证据集与用户词集串了")
 
     def test_isolation_is_load_bearing(self):
-        """反证：若这些词**真的**进了证据集，这句话就会被 cXc 通道报出来。
+        """反证：若这些词**真的**进了证据集，cXc 通道就会报出重复。
 
-        注意误报渠道：这句话里**没有相邻同字**，所以走不到 `_judge_run`
+        注意误报渠道：这类句子**没有相邻同字**，走不到 `_judge_run`
         （①②③④⑤⑥⑦⑧ 都是对"同字连"的判定）。真正会中招的是**独立的
         cXc 间隔重复通道**（`_check_interval_repeat`）——它的 `deletable`
-        同样读词集合，「现在会在…」里的 "在会在" 正是它的目标形态。
-        （本用例最初写成注入后调 `_judge_run`，直接失败 —— 那次失败恰好
-        纠正了"误报走哪条路"的错误认知。）
+        同样读词集合。本题最初用 `NATURAL_SENTENCE`（现在会在…）作反证，
+        在 v1.8 之后**改用句首形态**：`现在|会在|…` 的首个 c（在）既是左邻词
+        「现在」的尾字、又在右邻词「会在」的首字上，v1.8 新加的
+        "跨词交界 → 放行"护栏会独立拦住它（见 repeat_rules 的 cXc 注释），
+        于是它不再能证明"隔离是否必要"。句首形态没有左邻词，
+        只剩 `deletable` 一条判据 —— 只要污染词真进了证据集就必报。
         """
         ctx = repeat_rules._context()
         polluted = dict(ctx)
         polluted["words"] = set(ctx["words"]) | set(POLLUTING_WORDS)
-        got = repeat_rules._check_interval_repeat(NATURAL_SENTENCE, polluted)
+        probe = "在会在结果对话框中逐条点名。"      # 句首 cXc：无左邻词证据
+        got = repeat_rules._check_interval_repeat(probe, polluted)
         assert got, ("注入证据集后 cXc 通道仍未报出：说明本用例没有真正验证到"
                      "隔离的必要性，污染样本或判据已变，请重新挑选")
+        # 反向对照：证据集**干净**时同一句不得报（否则"反证"本身是假的）
+        assert not repeat_rules._check_interval_repeat(probe, ctx)
 
 
 class TestEvidenceAndExemptionSetsAreSeparate:

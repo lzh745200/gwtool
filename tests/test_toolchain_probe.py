@@ -230,7 +230,12 @@ class TestFormatterProbe:
     def test_cleanup_and_indent(self):
         text = "  段落甲有多余空格 。\n\n\n\n段落乙"
         out, n = formatter.run_full_cleanup(text)
-        assert "  " not in out.split("\n")[0] or n >= 0  # 有清理动作即可
+        # 原断言 `... or n >= 0` 恒为真（恒真断言，深审 P3 之一）——实际什么都没锁住。
+        # 这里钉住真正的契约：行首多余空格被清掉、空行被压缩、且确实产生了清理动作
+        # （本函数的第二返回值是"动作清单"list，不是计数）。
+        assert not out.split("\n")[0].startswith("  ")
+        assert "\n\n\n" not in out
+        assert isinstance(n, list) and n
 
     def test_normalize_heading_numbers(self):
         """只统一书写格式（点号/半角括号→规范层级），不重排跳号内容。

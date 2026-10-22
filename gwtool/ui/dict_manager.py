@@ -289,6 +289,13 @@ class DictManager(QDialog):
         self.err_source.clear()
         self.err_source.addItem("全部规则集", "")
         for name, n in dao.error_pair_sources():
+            # `curated` 是历史遗留的**库内精标快照**（旧 seed.db 带进来的那 220 条）。
+            # v1.8 起内置精标表是唯一事实来源，且按设计**不受规则集开关影响**
+            # （见 corrector._load_patterns：库内 source='curated' 的行直接跳过）。
+            # 把它列进下拉，只会让人以为"停用这个分组能关掉精标对" —— 实际无效。
+            # 新装用户的种子库已不带这类行（tests/test_seed_artifact.py 守这一点）。
+            if name == "curated":
+                continue
             self.err_source.addItem(f"{name}（{n} 条）", name)
         idx = self.err_source.findData(current)
         if idx >= 0:

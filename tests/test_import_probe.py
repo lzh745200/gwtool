@@ -237,9 +237,25 @@ class TestDocRealConversion:
         assert dst.exists() and dst.stat().st_size > 0
         return dst
 
-    def test_parse_doc_via_com(self, real_doc):
+    def test_parse_doc_via_com(self, real_doc, monkeypatch):
+        """真实 .doc 必须由 **COM 主路径**解析（四级降级链的其余三级全钉死）。
+
+        原用例只断言最终文本：COM 主路径失败时，soffice/olefile/raw-scan 三级
+        降级也能拿到同样的文本 —— 主路径坏了测试照样绿（深审报告 P3-8）。
+        这里把第 2~4 级替换成"一调就炸"：还能解析成功，就证明走的是 COM。
+        """
+        from gwtool.core.parsers import doc_parser
+
+        def _forbidden(*_a, **_k):
+            # 用 SystemExit 而非 Exception：parse_doc 对第 3/4 级有 `except Exception`
+            # 兜底，普通异常会被吞掉、变成"空文本"的假失败；SystemExit 会直接冒出来。
+            raise SystemExit("降级链被调用：COM 主路径未生效")
+
+        monkeypatch.setattr(doc_parser, "_convert_via_soffice", _forbidden)
+        monkeypatch.setattr(doc_parser, "_extract_text_olefile", _forbidden)
+        monkeypatch.setattr(doc_parser, "_extract_text_raw_scan", _forbidden)
         r = parse_any(str(real_doc))
-        assert r.ok, f"真实 .doc 解析失败：{r.error}"
+        assert r.ok, f"真实 .doc 解析失败（COM 主路径不可用）：{r.error}"
         joined = "".join(b.text for b in r.tree.blocks)
         assert "第一段正文。" in joined
 

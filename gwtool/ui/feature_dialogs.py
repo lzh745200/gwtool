@@ -2232,7 +2232,7 @@ class WritingHintsDialog(QDialog):
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(QLabel("写作提示（结构 / 要素 / 衔接 / 文风）"))
+        lv.addWidget(QLabel("写作提示（结构 / 要素 / 衔接 / 文风 / 用语 / 一致性）"))
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
         lv.addWidget(self.report, 1)

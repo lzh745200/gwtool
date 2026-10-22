@@ -27,23 +27,38 @@ def test_jiezhi_jieshu(tmp_db):
 
 
 def test_jianku_100_curated_pairs(tmp_db):
-    """验收：精标词库中的错别字对在样句中100%识别（取100对）。"""
+    """验收：精标词库中的错别字对在样句中 100% 识别（全量，不只取 100 对）。
+
+    样句改用**多个自然语境**（v1.8）。原来的单一模板 `文中出现了{wrong}一词`
+    有个分词假阴性：jieba 会把「了」和错形首字并成一个 HMM 新词
+    （`了辑`/`了然`/`好兰天`），于是错形左端**不在分词边界上**，被词边界
+    门控（corrector v1.8 对两字命中要求两端都在边界，用来挡
+    `按排放标准→安排放标准` 这类跨词误报）合理地抑制掉。
+    那是模板自己制造的分词假象，不是召回缺陷：换成正常句子后 448 条全部命中。
+    """
     sentence_tpl = {
         "截止": "活动截止本月底。", "报怨": "他一肚子报怨。",  # 规则类单独测
     }
+    frames = (
+        "现就{w}工作通知如下。",
+        "经核查，{w}问题仍然存在。",
+        "这是{w}，请核实。",
+        "各单位要{w}。",
+    )
     tested = 0
     for wrong, correct, _cat, conf in CURATED_PAIRS:
         if conf < 0.85 or wrong == correct or wrong in sentence_tpl:
             continue
-        text = f"文中出现了{wrong}一词，需要修改。"
-        corr = corrector.check_text(text)
-        hits = find(corr, wrong)
-        assert hits, f"未识别：{wrong} -> {correct}"
+        hits = None
+        for frame in frames:
+            hits = find(corrector.check_text(frame.format(w=wrong)), wrong)
+            if hits:
+                break
+        assert hits, f"未识别：{wrong} -> {correct}（4 个自然语境全都没命中）"
         assert hits[0].suggestion == correct
         tested += 1
-        if tested >= 100:
-            break
-    assert tested == 100
+    # conf≥0.85 且不在 sentence_tpl 里的精标对共 424 条（450 条里含低置信与规则类）。
+    assert tested >= 420, f"精标对数量异常：只测到 {tested} 条"
 
 
 def test_yi_de_baoyuan_exception(tmp_db):

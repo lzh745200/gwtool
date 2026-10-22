@@ -435,8 +435,8 @@ config 开关）。P2 全部在 P0/P1 验收通过后启动，逐项独立提交
 ### 11.4 每期统一验收清单
 
 1. `ruff check .` 全绿；
-2. `python -m pytest tests/ -q` 1745+ 全绿（含 UI 冒烟与模态框屏蔽）；
-3. `python scripts/e2e_check.py` 50 项全过；
+2. `python -m pytest tests/ -q` **2053** 全绿（含 UI 冒烟与模态框屏蔽）；
+3. `python scripts/e2e_check.py` **55 项**全过；
 4. 手动走查：导入→汇编→纠错→体检→台账→备份恢复 全流程；
 5. 截图比对：1024×640 / 1366×768 / 1920×1080 / 2560×1440 四档 + 150% DPI。
 

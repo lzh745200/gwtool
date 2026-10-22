@@ -101,7 +101,15 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self.btn_next = QPushButton("下一处")
         self.btn_docx = QPushButton("导出修正后 DOCX")
         self.btn_txt = QPushButton("导出 TXT")
-        for b in (self.btn_prev, self.btn_next, self.btn_docx, self.btn_txt):
+        # 校对留痕：只导出修正稿没有过程记录（谁、何时、对哪份文件、改了哪些、
+        # 依据什么）。按钮文案压到「导出报告」——row2 已有 4 个按钮，1080 宽
+        # 的窗口里第 5 个再长就会把布局顶出去。完整含义放 tooltip。
+        self.btn_report = QPushButton("导出报告")
+        self.btn_report.setToolTip(
+            "导出校对报告（DOCX）：记录校对对象/时间/依据、逐处明细与置信度统计，"
+            "可归档或转交拟稿人")
+        for b in (self.btn_prev, self.btn_next, self.btn_docx, self.btn_txt,
+                  self.btn_report):
             row2.addWidget(b)
         rv.addLayout(row2)
         split.addWidget(right)
@@ -126,6 +134,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self.btn_next.clicked.connect(lambda: self._step(1))
         self.btn_docx.clicked.connect(self.export_docx)
         self.btn_txt.clicked.connect(self.export_txt)
+        self.btn_report.clicked.connect(self.export_report)
         self._set_busy(False)
 
     # ------------------------------------------------------------ 来源
@@ -279,7 +288,8 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         if busy:
             self.banner.clear()      # 新一轮开始：收起上一轮结论（§6.7）
         for b in (self.btn_run, self.btn_apply_one, self.btn_apply_all,
-                  self.btn_ignore, self.btn_docx, self.btn_txt):
+                  self.btn_ignore, self.btn_docx, self.btn_txt,
+                  self.btn_report):
             b.setEnabled(has and not busy)
         self.btn_file.setEnabled(not busy)
         self.btn_clip.setEnabled(not busy)
@@ -435,20 +445,37 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
             self._loading = False
 
     # ------------------------------------------------------------ 导出
-    def _start_export(self, work, done_text: str) -> None:
+    def _start_export(self, work, done_text: str, buttons=()) -> None:
         """把导出任务丢进后台线程（DOCX 排版/逐块拼接都是秒级操作）。
 
         完成后写状态文本；失败也写状态文本 —— 这个对话框没有模态提示，
         `lbl_stat` 就是用户唯一的结果反馈通道，静默失败等于"点了没反应"。
+
+        buttons：本次导出期间需要置灰的按钮（无论成败都在完成槽里复位）。
+        默认空 —— 既有 export_docx / export_txt 的交互保持原样（它们靠
+        `_set_busy` 与"上一次导出仍在进行"护栏防重复点击）。
         """
         worker = getattr(self, "_export_worker", None)
         if worker is not None and worker.isRunning():
             self.lbl_stat.setText("上一次导出仍在进行，请稍候。")
             return
+        for b in buttons:
+            b.setEnabled(False)
         self.lbl_stat.setText("正在导出…")
         w = FnWorker(work, parent=self)
-        w.ok.connect(lambda _r: self.lbl_stat.setText(done_text))
-        w.failed.connect(lambda msg: self.lbl_stat.setText(f"导出失败：{msg}"))
+
+        def _done(_r):
+            for b in buttons:
+                b.setEnabled(True)
+            self.lbl_stat.setText(done_text)
+
+        def _failed(msg):
+            for b in buttons:
+                b.setEnabled(True)
+            self.lbl_stat.setText(f"导出失败：{msg}")
+
+        w.ok.connect(_done)
+        w.failed.connect(_failed)
         self._export_worker = w
         w.start()
 
@@ -494,6 +521,52 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
             Path(out).write_text("\n".join(parts), encoding="utf-8")
 
         self._start_export(work, f"已导出：{out}")
+
+    def _current_text(self) -> str:
+        """导出报告时随附的正文（含已应用的修正；表格按行拼回）。
+
+        只在主线程调用：报告后台线程拿到的是字符串快照，不读 _blocks。
+        """
+        parts = [self._title] if self._title else []
+        for b in self._blocks:
+            if b["kind"] == "table":
+                parts.extend(" ｜ ".join(row) for row in (b.get("rows") or []))
+            else:
+                parts.append(b.get("text", ""))
+        return "\n".join(p for p in parts if p)
+
+    def export_report(self) -> None:
+        """导出「校对报告」DOCX（校对留痕）。
+
+        与导出修正稿不同：报告记录**过程**——校对对象/时间/依据、逐处明细、
+        置信度统计与（可选的）修正后正文，供归档与转交拟稿人。
+        没有命中时也允许导出（报告结论为“未发现问题”），方便留一份“已校对”
+        的凭证。失败只写 lbl_stat，不弹模态框（与 export_docx/export_txt 一致）。
+        """
+        if not self._blocks:
+            self.lbl_stat.setText("请先载入文档或粘贴文本，再导出校对报告")
+            return
+        from datetime import datetime
+
+        default = f"校对报告_{datetime.now():%Y%m%d_%H%M}.docx"
+        out, _ = QFileDialog.getSaveFileName(self, "导出校对报告", default,
+                                             "Word (*.docx)")
+        if not out:
+            return
+        if not out.lower().endswith(".docx"):
+            out += ".docx"
+        # 快照：命中与正文都在主线程取好，后台线程不再读 self.*（主线程可能
+        # 正在应用修正/重扫；Correction 只被读取，无需深拷贝）。
+        hits = [h["corr"] for h in self._hits]
+        source, fixed = self._source or "", self._current_text()
+
+        def work():
+            from ..core import report
+            report.export_correction_report(hits, out, source_name=source,
+                                            fixed_text=fixed)
+
+        self._start_export(work, f"已导出校对报告：{out}",
+                           buttons=(self.btn_report,))
 
 
 def _scan_blocks(blocks):
