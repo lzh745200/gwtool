@@ -171,13 +171,31 @@ def test_full_dictionary_zero_false_positive():
 
 # ============================================================ 4) 真实语料回归
 def _corpus_files():
-    """语料文档 = **git 跟踪** 的仓库根 markdown（保证他人 clone 后结果一致）。
+    """语料文档 = 仓库根与 ``doc/`` 下的产品 markdown（"自然散文"负样本）。
 
-    刻意**不用** ``ROOT.glob("*.md")``：仓库长期有并行会话，glob 会扫到未提交的
-    临时文档，使语料不可由提交复现、且随并行改动漂移。这里只认 ``git ls-files``
-    的受控集合；git 不可用时回退到核心固定文档。
+    取语料有两条路：
+
+    1. **git 受控集合**（首选）：只认 ``git ls-files`` 列出的文件，保证"他人
+       clone 后语料完全一致、不受并行会话的临时文档影响"；
+    2. **目录 glob 回退**（git 不可用或返回空时）：对**同样两个目录**做 glob。
+
+    ⚠️ 回退**必须扫完整目录**，不能退化成几张固定文档。v1.8 的 Linux CI 就踩过：
+    容器里 `git ls-files` 失败（容器内 .git 属主/权限与 PATH 差异都会触发），
+    旧回退只列了根目录 4 个文档名，而这些文档已在 v1.7.3 归档进 ``doc/`` ——
+    结果语料只剩根 README 的 13 行，"零误报"验收入口名存实亡（测试自己报
+    "语料过小"红灯，但真正的缺陷是回退路径没跟上归档）。
     """
     import subprocess
+
+    def _resolve(n: str):
+        """git 索引路径优先；根目录被并行会话重组进 doc/ 时按名回退。"""
+        p = ROOT / n
+        if p.is_file():
+            return p
+        alt = ROOT / "doc" / Path(n).name
+        return alt if alt.is_file() else None
+
+    files: list = []
     try:
         out = subprocess.run(
             ["git", "-C", str(ROOT), "-c", "core.quotepath=false",
@@ -185,25 +203,27 @@ def _corpus_files():
             capture_output=True, encoding="utf-8", errors="replace",
             check=True).stdout
         names = [ln.strip() for ln in out.splitlines() if ln.strip()]
-
-        def _resolve(n: str):
-            """git 索引路径优先；根目录被并行会话重组进 doc/ 时按名回退。"""
-            p = ROOT / n
-            if p.is_file():
-                return p
-            alt = ROOT / "doc" / Path(n).name
-            return alt if alt.is_file() else None
-
         files = [p for p in (_resolve(n) for n in names) if p]
-        if files:
-            return files, names
     except (OSError, subprocess.SubprocessError):
-        pass
-    # 回退：核心产品文档（均为 git 跟踪文件）
-    fallback = ["README.md", "纠错系统落地方案.md",
-                "项目文件结构说明.md", "纠错引擎增强方案.md"]
-    files = [ROOT / n for n in fallback if (ROOT / n).is_file()]
-    return files, [f.name for f in files]
+        files = []
+
+    if not files:
+        # 回退：扫**根目录 + doc/**（与 git 集合同一批受控文档所在的位置）
+        import pathlib as _pathlib
+        root = _pathlib.Path(ROOT)
+        for pattern in ("*.md", "doc/*.md"):
+            files.extend(sorted(root.glob(pattern)))
+
+    # 去重（同一条 rel 路径可能被两条规则命中）
+    seen = set()
+    unique = []
+    for f in files:
+        key = str(f.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(f)
+    return unique, [f.name for f in unique]
 
 
 def _corpus_lines():
@@ -385,3 +405,22 @@ def test_interval_repeat_cross_word_boundary_not_reported():
     """
     for s in ["规则正则写错会静默失效", "这条规则正则匹配", "选项正则表达式"]:
         assert not rep(s), f"{s!r} 是正常短语，不应报：{pairs(s)}"
+
+def test_corpus_survives_without_git(monkeypatch):
+    """git 不可用时语料必须仍然完整（v1.8 Linux CI 的真实失败点）。
+
+    CI 容器里 `git ls-files` 会因 .git 属主/权限或 PATH 差异失败；旧回退只列了
+    4 个**根目录**文档名，而这些文档在 v1.7.3 已归档进 doc/ —— 回退后语料塌成
+    根 README 的 13 行，`test_real_corpus_zero_false_positive` 直接报"语料过小"。
+    本用例把 git 钉成不可用，断言回退路径仍然扫到完整语料。
+    """
+    import subprocess
+
+    def _boom(*_a, **_k):
+        raise subprocess.SubprocessError("模拟 CI 容器内 git 不可用")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    files, names = _corpus_files()
+    total = sum(len(p.read_text(encoding="utf-8", errors="ignore")) for p in files)
+    assert len(files) >= 15, f"回退语料文件过少：{names}"
+    assert total > 10000, f"回退语料过小：{len(files)} 文件 / {total} 字"
