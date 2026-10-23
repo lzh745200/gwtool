@@ -83,6 +83,64 @@ def next_doc_no(prefix: str, year: str | int | None = None) -> str:
     return format_doc_no(prefix, y, next_serial(prefix, y))
 
 
+def duplicate_of(doc_no: str, exclude_id: int = 0) -> "dao.Dispatch | None":
+    """该发文字号是否已被登记（应用层唯一性判据；编辑时用 exclude_id 排除自身）。
+
+    唯一性放在应用层而不是库层唯一索引：历史用户库里可能已有重复字号
+    （v1.9 前的取号竞态造成），直接加 UNIQUE 会让老库迁移失败、程序打不开。
+    """
+    return dao.find_dispatch_by_doc_no(doc_no, exclude_id=exclude_id)
+
+
+def uniqueness_problem(d: "dao.Dispatch") -> str:
+    """重号的可直接展示提示（含占用方标题与 id）；无重号返回空串。
+
+    放在 registry 而不是各个 UI：手工登记、汇编回填、导入脚本都应给出同一句
+    提示，否则用户在不同入口看到不同说法，反而以为是好几种错误。
+    """
+    text = (d.doc_no or "").strip()
+    if not text:
+        return ""
+    dup = duplicate_of(text, exclude_id=int(getattr(d, "id", 0) or 0))
+    if dup is None:
+        return ""
+    title = (dup.title or "未命名").strip()
+    return (f"发文字号「{text}」已被占用：{title}（id={dup.id}）。"
+            f"请改用其他号，或使用「自动取号」顺延一个未用号。")
+
+
+def next_available_doc_no(prefix: str, year: "str | int | None" = None) -> str:
+    """下一个**当前未被占用**的发文字号。
+
+    与 `next_doc_no` 的分工：后者只做 max+1（正常情况下就是空闲号）；历史库
+    若有手工跳号/重复，max+1 可能已被占用，本函数继续顺延，供"重号后一键
+    改号"使用。并发下仍可能被抢占 —— 最终以 `dao.add_dispatch_auto` 的写入
+    事务为准（它会在锁内重新算号）。
+    """
+    y = str(year or date.today().year)
+    serial = next_serial(prefix, y)
+    for _ in range(200):
+        no = format_doc_no(prefix, y, serial)
+        if duplicate_of(no) is None:
+            return no
+        serial += 1
+    return format_doc_no(prefix, y, serial)
+
+
+def suggest_for_duplicate(d: "dao.Dispatch") -> str:
+    """给一条重号记录的建议新号：能解析出机关代字/年份就顺延，推不出返回空串。"""
+    prefix, year, _serial = parse_doc_no(d.doc_no)
+    if not prefix:
+        prefix = (d.org or "").strip()
+    if not prefix:
+        return ""
+    if not year and (d.sign_date or "")[:4].isdigit():
+        year = d.sign_date[:4]
+    if not year:
+        year = str(date.today().year)
+    return next_available_doc_no(prefix, year)
+
+
 def year_of(d: dao.Dispatch) -> str:
     """登记记录所属年度：优先成文日期，其次发文字号里的年份。"""
     if (d.sign_date or "")[:4].isdigit():

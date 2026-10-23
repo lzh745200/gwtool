@@ -1,15 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Markdown / HTML 解析：转纯文本并保留标题层级。"""
+"""Markdown / HTML 解析：转纯文本并保留标题层级。
+
+编码（v1.9b 修）
+----------------
+此前固定 ``encoding="utf-8", errors="replace"`` —— 中文 Windows 上常见的
+GBK/GB18030 的 .md/.html（很多单位的内部 wiki、Excel 导出的 html 报表）
+会被整篇替换成 ``�``，用户看到的是"导进来全是乱码"，而不是任何报错。
+现在统一走 `txt_parser.read_text_smart`（BOM / UTF-8 / GBK / GB18030 /
+UTF-16 + chardet 探测），与 .txt 口径一致 —— 同一份中文文本不该因为扩
+展名不同而用两套编码规则。
+"""
 from __future__ import annotations
 
 import re
 
 from ..model import Block, DocTree, HEADING, LIST_ITEM, PARAGRAPH
+from .txt_parser import read_text_smart
 
 
 def parse_md(path: str) -> DocTree:
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
+    text = read_text_smart(path)
     return _md_text_to_tree(text)
 
 
@@ -56,8 +66,7 @@ def _clean_md(s: str) -> str:
 
 
 def parse_html(path: str) -> DocTree:
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        html = fh.read()
+    html = read_text_smart(path)      # 编码探测同 parse_md（GBK 网页不再乱码）
     return html_text_to_tree(html)
 
 

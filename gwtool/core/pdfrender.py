@@ -116,6 +116,11 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
     因此每个分节的第一元素携带 page-break-before 样式。
     toc_pages 为每份材料的目录项 [(text, level, page)]；
     toc_placeholder=True 时页码用“00”占位（保证两遍渲染分页一致）。
+
+    ⚠ 行距：下面 CSS 里的 `line-height:{line_spacing_pt}pt` 只为外部消费者
+    （如编辑器预览的 HTML）保留语义，**Qt 富文本并不支持该属性**（实测
+    line_spacing 20/28/40 三档渲染结果逐页相同）。真正生效的是
+    `_apply_fixed_line_height()` 里的 QTextBlockFormat 固定行高。
     """
     body_font = _font_family(tpl.body_font)
     indent_px = int(tpl.first_line_indent_chars * tpl.body_size_pt * 96 / 72)
@@ -247,11 +252,99 @@ def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# ------------------------------------------------------------------ 行距（P1-02）
+# Qt 富文本**不支持** CSS `line-height`：实测模板 line_spacing 20/28/40 三档
+# 渲染出的 PDF 逐页完全相同（恒 ~20.6pt、30~31 行/页），版心"22 行 × 28 字"
+# 在 PDF 通路上根本不成立。真正生效的是块级格式
+# `QTextBlockFormat.setLineHeight(FixedHeight)`，见 _apply_fixed_line_height。
+_PX_PER_PT = 96.0 / 72.0      # 与 _render_html_to_pdf 里的 writer.setResolution(96) 一致
+
+
+def _fixed_height_enum() -> int:
+    """`QTextBlockFormat.FixedHeight` 的 int 值（跨 PySide6 版本的取值方式）。
+
+    PySide6 6.x 把它暴露成真枚举（需要 `.value` 才能过 setLineHeight 的
+    `heightType: int` 重载），老版本/其他绑定可能本身就是 int —— 两种都兼容。
+    """
+    from PySide6.QtGui import QTextBlockFormat
+    val = QTextBlockFormat.FixedHeight
+    return int(getattr(val, "value", val))
+
+
+def _table_block_ranges(doc) -> list[tuple[int, int]]:
+    """文档里所有表格占用的块序号区间（含嵌套表）。
+
+    为什么要把表格挑出来：目录与正文表格的行高由单元格内容决定，套上固定
+    行高会把表格撑高甚至撑破一页（目录表还依赖 ~22 行/页的分片假设）；而
+    表格的"行"本来就不是正文行距的语义。
+    """
+    from PySide6.QtGui import QTextTable
+
+    ranges: list[tuple[int, int]] = []
+    stack = [doc.rootFrame()]
+    while stack:
+        frame = stack.pop()
+        for child in frame.childFrames():
+            if isinstance(child, QTextTable):
+                first = child.firstCursorPosition().blockNumber()
+                last = child.lastCursorPosition().blockNumber()
+                ranges.append((first, last))
+            else:
+                stack.append(child)
+    return ranges
+
+
+def _apply_fixed_line_height(doc, tpl: DocTemplate) -> int:
+    """把段落行距真正固定为模板的 `line_spacing_pt`，返回改动的块数。
+
+    Qt 的 HTML/CSS 子集里没有 `line-height`，模板行距此前是**完全没生效**的
+    （三档参数输出一致）。这里逐块写 `QTextBlockFormat`：
+
+        fmt.setLineHeight(line_spacing_pt * 96/72, FixedHeight)
+
+    只改满足两个条件的块，避免把版式改坏：
+      · **排除表格块**（见 `_table_block_ranges`，目录/正文表格保持自然行高，
+        目录分页假设与两遍渲染的页数计算都不受影响）；
+      · **字号必须能塞进固定行高**：`字号 × 1.3 ≤ 行距`（1.3 是 CJK 字体自然
+        行高系数）。封面题字(28pt)、红头机关标志(36pt) 因此保持自然行高，
+        不会被固定行高压扁；而 2pt/4pt 的红色分隔线占位、空段落也按字号下限
+        排除，避免把 2pt 的线撑成一行 28pt 的空白。
+    """
+    from PySide6.QtGui import QTextCursor
+
+    fixed_px = tpl.line_spacing_pt * _PX_PER_PT
+    height_type = _fixed_height_enum()
+    ranges = _table_block_ranges(doc)
+    min_pt = tpl.body_size_pt * 0.75          # 小于正文字号的 3/4：装饰性占位
+    max_pt = tpl.line_spacing_pt / 1.3        # 再大就会被固定行高压扁
+    changed = 0
+    block = doc.begin()
+    while block.isValid():
+        number = block.blockNumber()
+        point = block.charFormat().fontPointSize() or tpl.body_size_pt
+        if (block.text().strip()
+                and min_pt <= point <= max_pt
+                and not any(lo <= number <= hi for lo, hi in ranges)):
+            fmt = block.blockFormat()
+            if fmt.lineHeightType() != height_type or abs(fmt.lineHeight() - fixed_px) > 0.5:
+                fmt.setLineHeight(fixed_px, height_type)
+                QTextCursor(block).setBlockFormat(fmt)
+                changed += 1
+        block = block.next()
+    return changed
+
+
+
 def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
     """手动分页绘制 QTextDocument。
 
     不能用 doc.print_(writer)：Qt 会自动在每页尾部附加页码且无法关闭。
     手动方式：按内容区分页，逐页 translate + clip 后调用 documentLayout().draw。
+
+    行距（P1-02）：`setHtml` 之后、`setPageSize` 之前必须调用
+    `_apply_fixed_line_height` —— Qt 不吃 CSS `line-height`，只有块级
+    `setLineHeight(FixedHeight)` 才会改变实际行高与分页；放在 setPageSize
+    之前是为了让分页按新行高重算（`doc.pageCount()` 才准）。
     """
     from PySide6.QtCore import QRectF
     from PySide6.QtGui import QAbstractTextDocumentLayout
@@ -269,7 +362,13 @@ def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
 
     doc = QTextDocument()
     doc.setDefaultFont(QFont(_font_family(tpl.body_font), int(tpl.body_size_pt)))
+    # 版心（P1-02）：QTextDocument 默认带 4px 的 documentMargin，内容区因此比
+    # 模板版心窄 8px（实测红色分隔线——`width=100%` 的全宽元素——只到
+    # 435.8pt / 154.0mm，左边界 82.5pt / 29.1mm；置 0 后 441.8pt / 155.9mm、
+    # 左边界 79.5pt / 28.0mm）。"版心 156mm × 225mm"因此才算真正成立。
+    doc.setDocumentMargin(0)
     doc.setHtml(html)
+    _apply_fixed_line_height(doc, tpl)
     doc.setPageSize(QSizeF(page_rect.width(), page_rect.height()))
 
     painter = QPainter(writer)

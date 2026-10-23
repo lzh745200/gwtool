@@ -1,14 +1,38 @@
 # -*- coding: utf-8 -*-
 """DOC（Word 97-2003）解析：尽力提取。
 
-策略（按优先级自动降级）：
-  1. Windows：通过 COM 调用本机 Word 或 WPS 完美转换 docx（若安装）；
-  2. 有 LibreOffice（soffice）时 headless 转换 docx；
-  3. 纯 Python：olefile 读取 WordDocument 流，解析 FIB + 分片表(piece table)
-     提取文本（完整率约 95%+，不含图片/表格线等格式信息）。
+转换策略（v1.9b 起**默认纯 Python 优先**）
+------------------------------------------
+四条提取路径：
+  ① 纯 Python 分片表（olefile 读 WordDocument 流 + CLX 分片表，完整率约 95%+）；
+  ② 纯 Python 兜底（raw_scan 扫描流内可打印 UTF-16 片段，畸形文件也能出文本）；
+  ③ LibreOffice（soffice --headless 转 docx）—— 只提纯文本时收益很小；
+  ④ Windows COM（Word / WPS 转 docx）。
+
+**为什么默认不再走 COM**：`parse_doc` 只取 `plain_text()`（见 `_text_from_conv`），
+COM 转出来的 docx 里那些"格式保真"收益在这里被整体丢弃，代价却全额支付：
+实测 5 份 .doc，COM 链 8.53 s vs 纯 Python 0.003 s（约 2405×），本机复测
+单份 1.55–6.38 s vs 2.7 ms。更糟的是 COM 会把用户的 Word/WPS 真正拉起来，
+批量导入 200 份就是几分钟的"看起来卡死"。
+
+因此默认链路是 **纯 Python →（质量可疑时才）LibreOffice / COM 兜底**。
+**质量兜底**（v1.9b 追加）：纯 Python 的结果"明显不可信"时不会直接交付 ——
+判据见 `is_suspicious_extraction`（文件 >20KB 却提不出 80 字 / 替换符占比 >5% /
+结构是 Word 却一个字都没有），满足且本机 COM 可用时**自动用 COM 重试一次**。
+所以"默认快"不等于"难文件就放弃"：正常文书走毫秒级纯 Python，可疑文件才付
+COM 的 1.5~6 秒。
+
+需要"保真"（例如怀疑纯 Python 漏段落、或要保留页眉页脚等结构）时显式开启：
+
+    parse_doc(path, prefer_com=True)          # 单次调用
+    set_prefer_com(True)                      # 进程内默认（设置界面调用）
+    set GWTOOL_DOC_PREFER_COM=1               # 环境变量（CI / 便携模式）
+
+开启后仍保持 v1.8 的"保真链"：COM → LibreOffice → 纯 Python → raw_scan。
 """
 from __future__ import annotations
 
+import os
 import shutil
 import struct
 import subprocess
@@ -18,9 +42,90 @@ from pathlib import Path
 from ..model import Block, DocTree, HEADING, PARAGRAPH
 from .txt_parser import _HEADING_RE
 
+# ---------------------------------------------------------------- 策略与入口
+# 环境变量入口（默认关）：'1' / 'true' / 'yes' / 'on' 视为开启
+_ENV_PREFER_COM = "GWTOOL_DOC_PREFER_COM"
+# 进程内显式设置（设置界面/测试用）；None 表示"未设置，按环境变量/默认"。
+_prefer_com_setting: bool | None = None
 
-def parse_doc(path: str) -> DocTree:
-    text = _extract_text(path)
+# ---- 质量兜底判据（见 is_suspicious_extraction）----
+# 只有"明显不可信"才动用 COM 重试一次，阈值刻意保守，避免把正常的短文档
+# （通知、便函）也拖进 1.5~6 秒的 COM 路径。
+_SUSPICIOUS_MIN_CHARS = 80          # 去空白后正文不足 80 字
+_SUSPICIOUS_MIN_BYTES = 20 * 1024   # 而原文件 > 20KB —— 只提这么点明显漏了
+_SUSPICIOUS_BAD_RATIO = 0.05        # 替换符/控制符占比 > 5%
+
+
+def set_prefer_com(enabled: bool | None) -> None:
+    """设置"启用 COM 保真转换"的进程内默认值；传 None 恢复为按环境变量。
+
+    给设置界面留的入口（本模块不依赖 config/UI，便于单独测试）。
+    **默认关**：纯 Python 比 COM 快约 2400×（见模块 docstring 实测）。
+    """
+    global _prefer_com_setting
+    _prefer_com_setting = None if enabled is None else bool(enabled)
+
+
+def prefer_com_enabled() -> bool:
+    """当前默认是否启用 COM 保真转换（显式设置 > 环境变量 > 默认关）。"""
+    if _prefer_com_setting is not None:
+        return _prefer_com_setting
+    return str(os.environ.get(_ENV_PREFER_COM, "")).strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _com_available() -> bool:
+    """本机是否存在可用的 COM 通道（Windows + cmd + pywin32）。
+
+    只做"能不能试"的判断，不真正 Dispatch：质量兜底要用它决定是否值得
+    再看一眼 COM。抽成函数便于测试注入（CI 上无 COM，不能依赖真机）。
+    """
+    if not shutil.which("cmd"):
+        return False
+    try:
+        import win32com.client  # noqa: F401  # type: ignore
+    except Exception:
+        return False
+    return True
+
+
+def is_suspicious_extraction(path: str, text: str) -> bool:
+    """纯 Python 提取结果是否"明显不可信"，值得再用 COM 兜一次。
+
+    只认**确定性**信号（不做"像不像公文"这种语义判断）：
+      ① 文件不小却几乎没提出字：去空白后 < 80 字、而文件 > 20KB；
+      ② 替换符/控制符泛滥：``U+FFFD`` 与 C0 控制符占非空白字符 > 5%
+         （编码猜错、分片表解析跑偏时的典型症状）；
+      ③ 结构上是 Word 文档却一个字都没提出来（``_looks_like_word_doc``）。
+    都不是就返回 False —— 正常文书不该为了一次怀疑付 1.5~6 秒 COM 成本。
+    """
+    body = "".join(ch for ch in (text or "") if not ch.isspace())
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        size = 0
+    if len(body) < _SUSPICIOUS_MIN_CHARS and size > _SUSPICIOUS_MIN_BYTES:
+        return True
+    if body:
+        bad = sum(1 for ch in body
+                  if ch == "\ufffd" or (ord(ch) < 32 and ch not in "\t\n\r"))
+        if bad / len(body) > _SUSPICIOUS_BAD_RATIO:
+            return True
+    if not body and _looks_like_word_doc(path):
+        return True
+    return False
+
+
+def parse_doc(path: str, *, prefer_com: bool | None = None) -> DocTree:
+    """解析 .doc。
+
+    ``prefer_com``：True=先走 COM 保真转换（慢，会拉起 Word/WPS）；
+    False=纯 Python 优先；None（默认）=取 `prefer_com_enabled()`（默认关）。
+    无论哪种，**提取结果明显不可信且本机 COM 可用**时会自动用 COM 重试一次
+    （见 `is_suspicious_extraction`），所以"默认快"不等于"放弃难文件"。
+    """
+    use_com = prefer_com_enabled() if prefer_com is None else bool(prefer_com)
+    text = _extract_text(path, prefer_com=use_com)
     return _text_to_tree(text, title_hint=Path(path).stem)
 
 
@@ -147,47 +252,77 @@ def _convert_via_soffice(path: str) -> str | None:
 
 
 # ------------------------------------------------------------------ 纯Python解析
-def _extract_text(path: str) -> str:
-    # 1) COM 完美转换。转换产物落在独立临时目录里，读完即删——老实现把
-    #    <stem>_conv.docx 直接写进 %TEMP% 根目录且永不清理，批量导入 200 个
-    #    .doc 就在用户临时目录里留 200 个文件。
-    import shutil as _shutil
-    conv_dir = _convert_via_com(path)
-    if conv_dir:
-        try:
-            conv = str(Path(conv_dir) / (Path(path).stem + "_conv.docx"))
-            if Path(conv).exists():
-                from .docx_parser import parse_docx
-                text = parse_docx(conv).plain_text()
-                if text.strip():
-                    return text
-            # WPS 对 FIB 损坏的 doc 可能“成功打开”却产出空文档 —— 空结果不算
-            # 成功，继续降级（真实探测发现：此时纯 Python 路径本可救回全文）。
-            # 真为空文档时后面 raw_scan 也返回空，无额外代价。
-        finally:
-            _shutil.rmtree(conv_dir, ignore_errors=True)
-    # 2) LibreOffice
-    conv_dir = _convert_via_soffice(path)
-    if conv_dir:
-        try:
-            conv = str(Path(conv_dir) / (Path(path).stem + ".docx"))
-            if Path(conv).exists():
-                from .docx_parser import parse_docx
-                text = parse_docx(conv).plain_text()
-                if text.strip():
-                    return text
-        finally:
-            _shutil.rmtree(conv_dir, ignore_errors=True)
-    # 3) 纯 Python 分片表解析
+def _extract_text(path: str, *, prefer_com: bool = False) -> str:
+    """提取正文纯文本。``prefer_com`` 见模块 docstring。
+
+    默认（``prefer_com=False``）：纯 Python 优先，**质量兜底**如下 ——
+      · 结果正常（见 `is_suspicious_extraction`）→ 直接用（毫秒级，不碰 COM）；
+      · 结果明显不可信（几乎没字 / 替换符泛滥 / 结构是 Word 却提不出字）
+        → 先试 LibreOffice，仍有问题且本机 COM 可用时**再用 COM 重试一次**；
+      · 所有兜底都不如原结果时，返回原结果（宁可给不完美的文本，也不给空）。
+    这样"默认快 ~2400×"与"难文件仍能救回"两件事同时成立。
+    """
+    if prefer_com:
+        # 保真链（v1.8 顺序）：COM → LibreOffice → 纯 Python → raw_scan
+        text = _extract_via_office(path, use_com=True)
+        return text if text.strip() else _extract_pure(path)
+
+    text = _extract_pure(path)
+    if text.strip() and not is_suspicious_extraction(path, text):
+        return text
+
+    # ---- 质量兜底：结果不可信时才动用外部组件（各一次，不循环）
+    alt = _extract_via_office(path, use_com=False)
+    if alt.strip() and not is_suspicious_extraction(path, alt):
+        return alt
+    if _com_available():
+        com_text = _extract_via_office(path, use_com=True)
+        if com_text.strip():
+            return com_text
+    return alt or text
+
+
+def _text_from_conv(conv_dir: str | None, path: str, suffix: str) -> str:
+    """把 LibreOffice/COM 的转换产物读成纯文本，读完**立即删临时目录**。
+
+    转换产物落在独立临时目录里（`mkdtemp`），所以同名 stem 并发导入不会
+    互相覆盖；无论解析成功还是抛异常都在 finally 里清理。
+    空结果**不算成功**（WPS 对 FIB 损坏的 doc 会"成功打开"却产出空文档）。
+    """
+    if not conv_dir:
+        return ""
     try:
-        return _extract_text_olefile(path)
+        conv = str(Path(conv_dir) / (Path(path).stem + suffix))
+        if Path(conv).exists():
+            from .docx_parser import parse_docx
+            return parse_docx(conv).plain_text()
+        return ""
+    finally:
+        shutil.rmtree(conv_dir, ignore_errors=True)
+
+
+def _extract_via_office(path: str, *, use_com: bool) -> str:
+    """外部办公组件转换（COM 可选）。返回纯文本，失败/空结果返回 ""。"""
+    if use_com:
+        text = _text_from_conv(_convert_via_com(path), path, "_conv.docx")
+        if text.strip():
+            return text
+    return _text_from_conv(_convert_via_soffice(path), path, ".docx")
+
+
+def _extract_pure(path: str) -> str:
+    """纯 Python 两级：分片表 → raw_scan；两级都失败返回 ""，绝不抛。
+
+    raw_scan 是「绝不再抛」的底线：olefile 面对畸形 OLE 会抛 ValueError
+    （如 "bytes length not a multiple of item size"），必须接住并退化成空文本，
+    由上层按「提取不到内容」处理。
+    """
+    try:
+        text = _extract_text_olefile(path)
+        if text.strip():
+            return text
     except Exception:
         pass
-    # 4) 最后兜底：扫描流内可打印片段。
-    # 这一级是「绝不再抛」的底线 —— 前面每一级都可能失败（结构坏、库版本差异），
-    # 兜底自己再抛就等于让 parse_doc 直接炸给用户看。olefile 面对畸形 OLE 会抛
-    # ValueError（如 "bytes length not a multiple of item size"），必须接住并
-    # 退化成空文本，由上层按「提取不到内容」处理。
     try:
         return _extract_text_raw_scan(path)
     except Exception:

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -32,6 +33,141 @@ from .workers import FnWorker
 # 清单来自 core 的单一事实来源：提示类类别的 suggestion 是标签而非替换文本。
 _APPLY_SKIP = corrector.ADVISORY_CATEGORIES
 
+# P1-15 阈值：小文档同步更快（避免线程往返与信号调度），大文档才走 worker。
+# 8 万字实测整篇应用 0.74 s + 渲染 0.85 s，是本次要挪走的阻塞；2 000 字以下的
+# 文档两条路径都在几十毫秒内，同步反而少一层延迟。两条路径共用同一套
+# worker 函数，保证结果逐字节一致（见 tests/test_ui_perf_v19b.py）。
+_UI_ASYNC_MIN_CHARS = 2_000
+
+
+def _content_char_count(blocks, title: str = "") -> int:
+    """正文 + 标题的总字符数（表格按单元格累加），用于选择同步/异步路径。"""
+    total = len(title or "")
+    for b in blocks or []:
+        if b.get("kind") == "table":
+            for row in (b.get("rows") or []):
+                total += sum(len(str(cell)) for cell in row)
+        else:
+            total += len(b.get("text", "") or "")
+    return total
+
+
+def _hit_text_of(blocks, title: str, bi, ri, ci) -> str:
+    """命中所在的原文片段（纯函数版，供 worker 与主线程共用）。"""
+    if bi < 0:
+        return title or ""
+    if not (0 <= bi < len(blocks)):
+        return ""
+    b = blocks[bi]
+    if b.get("kind") == "table" and ri is not None:
+        try:
+            return b["rows"][ri][ci]
+        except (IndexError, TypeError, KeyError):
+            return ""
+    return b.get("text", "") or ""
+
+
+def _render_payload(blocks, title: str, corrs_by_block) -> dict:
+    """在调用线程里把标记视图组织成纯数据（HTML + 命中明细）。
+
+    P1-15：这段是 8 万字文档渲染耗时的主体（to_marked_html 逐块转义 + 锚点）。
+    抽成纯函数后既能放进 FnWorker，也能被 `_render()`（同步兼容路径）复用，
+    两条路径产出完全一致，不会出现"后台渲染与前台渲染细节不同"。
+    """
+    html_parts: list[str] = []
+    hits: list[dict] = []
+
+    def _collect(bi, ri, ci, cs, anchor, where) -> None:
+        for j, c in enumerate(cs):
+            text = _hit_text_of(blocks, title, bi, ri, ci)
+            hits.append({"bi": bi, "ri": ri, "ci": ci, "corr": c,
+                         "anchor": f"{anchor}{j}", "where": where,
+                         "text": text,
+                         "label": (
+                             f"[{where}·第{corrector.paragraph_no(text, c.start)}段] "
+                             f"{c.label}（{c.category} {c.confidence:.2f}）")})
+
+    if title:
+        tcs = corrector.check_text(title)
+        html_parts.append(f'<p style="color:{theme.MUTED};">【标题】</p>'
+                          + corrector.to_marked_html(title, tcs,
+                                                     anchor_prefix="tm")
+                          + "<br>")
+        _collect(-1, None, None, tcs, "tm", "标题")
+    for bi, b in enumerate(blocks):
+        cs = corrs_by_block[bi] if bi < len(corrs_by_block) else []
+        if b["kind"] == "table":
+            html_parts.append(f'<p style="color:{theme.MUTED};">〖表格〗</p>')
+            by_cell: dict[tuple[int, int], list] = {}
+            for c in cs:
+                key = getattr(c, "_cell", None) or (0, 0)
+                by_cell.setdefault(key, []).append(c)
+            for ri, row in enumerate(b.get("rows") or []):
+                for ci, cell in enumerate(row):
+                    cc = by_cell.get((ri, ci))
+                    if not cc:
+                        continue
+                    anchor = f"b{bi}r{ri}c{ci}m"
+                    html_parts.append(
+                        f'<p style="color:{theme.MUTED};">r{ri + 1}c{ci + 1}：</p>'
+                        + corrector.to_marked_html(cell, cc, anchor_prefix=anchor))
+                    _collect(bi, ri, ci, cc, anchor, f"表格r{ri + 1}c{ci + 1}")
+            continue
+        anchor = f"b{bi}m"
+        html_parts.append(corrector.to_marked_html(b["text"], cs,
+                                                   anchor_prefix=anchor))
+        html_parts.append("<br>")
+        _collect(bi, None, None, cs, anchor,
+                 "标题" if b["kind"] == "heading" else "正文")
+
+    return {"html": "".join(html_parts), "hits": hits,
+            "blocks": blocks, "title": title,
+            "corrs": corrs_by_block}
+
+
+def _scan_and_render_worker(blocks, title: str) -> dict:
+    """后台入口（大文档）：一次扫描 + 渲染，返回纯数据结果。
+
+    结果只含字符串/普通 dataclass 列表，主线程据此更新列表与浏览器；
+    调用期间不读写窗口对象，天然满足"跨线程只回填主线程"。
+    """
+    corrs = _scan_blocks(blocks)
+    return _render_payload(blocks, title, corrs)
+
+
+def _apply_all_blocks_worker(blocks, title: str) -> dict:
+    """后台入口：整篇应用（逐块 correct_block），返回新块与修正数。
+
+    blocks 由主线程 deepcopy 后传入；本函数只读入参、只写自己的返回值，
+    不触碰任何 Qt 对象。
+    """
+    n = 0
+    new_title = title or ""
+    if new_title:
+        new_title, tcs = corrector.correct_block(new_title,
+                                                 skip_categories=_APPLY_SKIP)
+        n += len(tcs)
+    out: list[dict] = []
+    for b in blocks:
+        nb = dict(b)
+        if nb.get("kind") == "table":
+            rows = [list(row) for row in (nb.get("rows") or [])]
+            for ri, row in enumerate(rows):
+                for ci, cell in enumerate(row):
+                    fixed, cs = corrector.correct_block(
+                        cell, skip_categories=_APPLY_SKIP)
+                    n += len(cs)
+                    rows[ri][ci] = fixed
+            nb["rows"] = rows
+        else:
+            fixed, cs = corrector.correct_block(nb.get("text", "") or "",
+                                                skip_categories=_APPLY_SKIP)
+            n += len(cs)
+            nb["text"] = fixed
+        out.append(nb)
+    return {"blocks": out, "title": new_title, "n": n}
+
+
 
 class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
     """任意文档纠错（带标记视图）。"""
@@ -48,6 +184,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._loading_source = ""       # 后台解析中暂存的文件名（回调里落 _source）
         self._loading = False           # 程序性写输入框时抑制 textChanged 重建
         self._worker: FnWorker | None = None
+        self._apply_worker: FnWorker | None = None
         # P0-1 竞态防护：每次扫描绑定一个自增 token + 输入指纹。
         # 结果回来时两者任一与当前不符，就说明"扫描期间正文变了"——
         # 此时命中偏移（块内局部 offset）已不能套到新文本上，必须整批丢弃。
@@ -313,16 +450,29 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         # 线程被 GC 析构 → Qt qFatal 强杀进程（0xC0000409）。挂上父对象后
         # 线程生命周期跟随对话框，主窗口 closeEvent 的 findChildren(QThread)
         # 也能找到并等待它。
-        self._worker = FnWorker(_scan_blocks, blocks_snapshot, parent=self)
-        self._worker.ok.connect(lambda corrs, _t=token: self._on_checked(corrs, _t))
+        # P1-15：大文档把扫描与渲染一起放进 worker（8 万字渲染 ~0.85 s，原在
+        # 主线程）；小文档保留原 `_scan_blocks` 单层 worker，两条路径的回调都
+        # 走 `_on_checked`，token/指纹校验完全一致。
+        if _content_char_count(blocks_snapshot, self._title) >= _UI_ASYNC_MIN_CHARS:
+            self._worker = FnWorker(_scan_and_render_worker, blocks_snapshot,
+                                    self._title, parent=self)
+            self._worker.ok.connect(
+                lambda payload, _t=token: self._on_checked(payload, _t))
+        else:
+            self._worker = FnWorker(_scan_blocks, blocks_snapshot, parent=self)
+            self._worker.ok.connect(
+                lambda corrs, _t=token: self._on_checked(corrs, _t))
         self._worker.failed.connect(lambda msg, _t=token: self._on_failed(msg, _t))
         self._worker.start()
 
     def _on_checked(self, corrs_by_block, token: int | None = None) -> None:
         """扫描完成回调。
 
-        token=None 是既有同步调用路径（测试/内部直接喂结果）：以当前正文为
-        基准刷新指纹后接受，保持向后兼容。真实 worker 一律带 token：
+        corrs_by_block 可以是 `list[list[Correction]]`（小文档/既有同步调用）
+        或 `_scan_and_render_worker` 返回的纯数据 dict（大文档，含预渲染好的
+        HTML 与命中列表）。token=None 是既有同步调用路径（测试/内部直接喂
+        结果）：以当前正文为基准刷新指纹后接受，保持向后兼容。真实 worker
+        一律带 token：
           · token 不是最新 → 用户已发起新扫描，旧结果整批丢弃；
           · token 是最新但正文指纹变了 → 扫描期间改过输入框，丢弃并自动重扫。
         两条都命中 P0-1：绝不能把旧偏移套到新文本上渲染/应用。
@@ -332,12 +482,15 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         elif token != self._scan_token or self._results_stale():
             self._drop_stale_result(token)
             return
-        self._corrs = corrs_by_block
-        self._render()
+        if isinstance(corrs_by_block, dict):
+            self._apply_render_payload(corrs_by_block)
+        else:
+            self._corrs = corrs_by_block
+            self._render()
         self._set_busy(False)
-        n = sum(len(x) for x in corrs_by_block)
+        n = sum(len(x) for x in self._corrs)
         self.lbl_stat.setText(f"完成：发现 {n} 处问题" + ("，已按类别标记" if n else ""))
-        self._show_banner(corrs_by_block)
+        self._show_banner(self._corrs)
 
     def _show_banner(self, corrs_by_block) -> None:
         """刷新结论横幅：按置信度与提示类分档统计（§6.7）。
@@ -396,58 +549,26 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
 
     # ------------------------------------------------------------ 渲染与明细
     def _render(self) -> None:
-        self._hits = []
-        html_parts: list[str] = []
-        if self._title:
-            tcs = corrector.check_text(self._title)
-            html_parts.append(f'<p style="color:{theme.MUTED};">【标题】</p>'
-                              + corrector.to_marked_html(self._title, tcs,
-                                                         anchor_prefix="tm")
-                              + "<br>")
-            self._collect_hits(-1, None, None, tcs, "tm", "标题")
-        for bi, b in enumerate(self._blocks):
-            cs = self._corrs[bi] if bi < len(self._corrs) else []
-            if b["kind"] == "table":
-                html_parts.append(f'<p style="color:{theme.MUTED};">〖表格〗</p>')
-                by_cell: dict[tuple[int, int], list] = {}
-                for c in cs:
-                    key = getattr(c, "_cell", None) or (0, 0)
-                    by_cell.setdefault(key, []).append(c)
-                for ri, row in enumerate(b.get("rows") or []):
-                    for ci, cell in enumerate(row):
-                        cc = by_cell.get((ri, ci))
-                        if not cc:
-                            continue
-                        anchor = f"b{bi}r{ri}c{ci}m"
-                        html_parts.append(
-                            f'<p style="color:{theme.MUTED};">r{ri + 1}c{ci + 1}：</p>'
-                            + corrector.to_marked_html(cell, cc, anchor_prefix=anchor))
-                        self._collect_hits(bi, ri, ci, cc, anchor,
-                                           f"表格r{ri + 1}c{ci + 1}")
-                continue
-            anchor = f"b{bi}m"
-            html_parts.append(corrector.to_marked_html(b["text"], cs,
-                                                       anchor_prefix=anchor))
-            html_parts.append("<br>")
-            self._collect_hits(bi, None, None, cs, anchor,
-                               "标题" if b["kind"] == "heading" else "正文")
-        self.browser.setHtml("".join(html_parts))
+        """同步渲染（兼容路径：小文档/既有同步调用直接喂结果）。"""
+        self._apply_render_payload(
+            _render_payload(self._blocks, self._title, self._corrs))
+
+    def _apply_render_payload(self, payload: dict) -> None:
+        """主线程合并 worker 产出的纯数据：命中、列表项、浏览器 HTML。"""
+        self._corrs = payload.get("corrs") or []
+        self._hits = payload.get("hits") or []
+        self.browser.setHtml(payload.get("html") or "")
         self.listw.clear()
         for idx, h in enumerate(self._hits):
             c = h["corr"]
-            it = QListWidgetItem(
+            label = h.get("label") or (
                 f"[{h['where']}·第{corrector.paragraph_no(h['text'], c.start)}段] "
                 f"{c.label}（{c.category} {c.confidence:.2f}）")
+            it = QListWidgetItem(label)
             it.setForeground(QColor(severity_color("error") if c.confidence >= 0.8
                                     else severity_color("warn")))
             it.setData(Qt.UserRole, idx)
             self.listw.addItem(it)
-
-    def _collect_hits(self, bi, ri, ci, cs, anchor, where) -> None:
-        for j, c in enumerate(cs):
-            self._hits.append({"bi": bi, "ri": ri, "ci": ci, "corr": c,
-                               "anchor": f"{anchor}{j}", "where": where,
-                               "text": self._hit_text(bi, ri, ci)})
 
     def _hit_text(self, bi, ri, ci) -> str:
         """命中所在的原文片段。
@@ -457,17 +578,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         于是标题命中的"第N段"算错；输入框被清空后 _blocks 为空，
         直接 IndexError 把整次纠错结果丢掉（列表空、状态永远停在"纠错中…"）。
         """
-        if bi < 0:
-            return self._title or ""
-        if not (0 <= bi < len(self._blocks)):
-            return ""
-        b = self._blocks[bi]
-        if b.get("kind") == "table" and ri is not None:
-            try:
-                return b["rows"][ri][ci]
-            except (IndexError, TypeError, KeyError):
-                return ""
-        return b.get("text", "") or ""
+        return _hit_text_of(self._blocks, self._title, bi, ri, ci)
 
     def _goto_hit(self, row: int) -> None:
         if 0 <= row < len(self._hits):
@@ -521,25 +632,53 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         # 提示先重新纠错（与逐处应用保持同一口径）。
         if self._reject_if_stale():
             return
-        n = 0
-        if self._title:
-            self._title, tcs = corrector.correct_block(self._title,
-                                                       skip_categories=_APPLY_SKIP)
-            n += len(tcs)
-        for b in self._blocks:
-            if b["kind"] == "table":
-                for ri, row in enumerate(b.get("rows") or []):
-                    for ci, cell in enumerate(row):
-                        fixed, cs = corrector.correct_block(cell, skip_categories=_APPLY_SKIP)
-                        n += len(cs)
-                        b["rows"][ri][ci] = fixed
-            else:
-                fixed, cs = corrector.correct_block(b["text"], skip_categories=_APPLY_SKIP)
-                n += len(cs)
-                b["text"] = fixed
+        worker = self._apply_worker
+        if worker is not None and worker.isRunning():
+            self.lbl_stat.setText("上一次整篇应用仍在进行，请稍候。")
+            return
+        # P1-15：大文档整篇应用 8 万字实测 0.74 s，必须挪到后台；小文档
+        # 同步更快，且既有测试/调用方依赖"调用返回后块已更新"的语义。
+        # 两条路径复用同一个 worker 函数，保证产物一致。
+        blocks_snapshot = deepcopy(self._blocks)
+        title = self._title
+        if _content_char_count(blocks_snapshot, title) < _UI_ASYNC_MIN_CHARS:
+            self._adopt_applied(_apply_all_blocks_worker(blocks_snapshot, title))
+            return
+        token = self._scan_token
+        fingerprint = self._content_fingerprint()
+        self._set_busy(True)
+        self.banner.clear()
+        self.lbl_stat.setText("正在应用整篇修正…")
+        w = FnWorker(_apply_all_blocks_worker, blocks_snapshot, title, parent=self)
+        w.ok.connect(lambda result, _t=token, _fp=fingerprint:
+                     self._on_apply_all_done(result, _t, _fp))
+        w.failed.connect(self._on_apply_all_failed)
+        self._apply_worker = w
+        w.start()
+
+    def _adopt_applied(self, result: dict) -> None:
+        """主线程合并整篇应用结果（同步/异步两条路径共用）。"""
+        self._blocks = result["blocks"]
+        self._title = result["title"]
         self._sync_input_box()
         self.start_check()
-        self.lbl_stat.setText(f"整篇应用完成：修正 {n} 处")
+        self.lbl_stat.setText(f"整篇应用完成：修正 {result['n']} 处")
+
+    def _on_apply_all_done(self, result: dict, token: int,
+                           fingerprint: tuple) -> None:
+        # P0-1：worker 回填前再核一次快照。文本在这几百毫秒里被改过
+        # （程序性写入/新扫描）就不能套用结果，否则旧偏移会污染新正文。
+        if token != self._scan_token or self._content_fingerprint() != fingerprint:
+            if token == self._scan_token:
+                self._set_busy(False)
+            self.lbl_stat.setText("文本已变更，已放弃本次应用")
+            return
+        self._adopt_applied(result)
+
+    def _on_apply_all_failed(self, msg: str) -> None:
+        # 与导出同一约定：失败只写 lbl_stat，不弹模态框。
+        self._set_busy(False)
+        self.lbl_stat.setText(f"整篇应用失败：{msg[:120]}")
 
     def ignore_selected(self) -> None:
         h = self._current_hit()

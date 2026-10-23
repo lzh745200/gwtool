@@ -25,7 +25,7 @@ from ..db import dao
 from . import theme
 from . import errmsg
 from .widgets import Banner, ThreadSafeDialog, ask, info, warn
-from .workers import _close_thread_conn
+from .workers import FnWorker, _close_thread_conn
 
 log = logs.get_logger("ui.pack")
 
@@ -2200,7 +2200,36 @@ class StyleCheckDialog(QDialog):
 
 
 # ================================================================ 写作提示与灵感
-class WritingHintsDialog(QDialog):
+# P1-21：25k 字首调 hints() 实测 ~803 ms（含懒加载），热 101 ms。构造时同步跑
+# 会把对话框冻住；改为"先建界面 → 后台计算 → 主线程回填"。
+# 超长正文采样在**对话框侧**完成（不改 writing_hints 契约）：首尾各取 3000 字，
+# 中段以省略标记连接，并在界面明确注明"已采样首尾"。
+_HINT_SAMPLE_CHARS = 3000
+
+
+def _sample_hint_text(text: str) -> "tuple[str, str]":
+    """返回 (送分析的文本, 采样说明)。短文本原样返回、说明为空。"""
+    text = text or ""
+    limit = _HINT_SAMPLE_CHARS
+    if len(text) <= limit * 2:
+        return text, ""
+    omitted = len(text) - limit * 2
+    sample = (text[:limit]
+              + f"\n……（中间省略 {omitted} 字）……\n"
+              + text[-limit:])
+    note = f"文本较长（{len(text)} 字），已采样首尾各 {limit} 字用于分析。"
+    return sample, note
+
+
+def _hints_worker(text: str, kind: str) -> dict:
+    """后台入口：只接收不可变快照，返回纯数据；不触碰任何 Qt 对象。"""
+    from ..core import writing_hints as wh
+    hs = wh.hints(text, kind)
+    return {"lines": wh.report_lines(hs),
+            "warn_n": sum(1 for h in hs if h.level == "warn")}
+
+
+class WritingHintsDialog(ThreadSafeDialog, QDialog):
     """写作提示与灵感建议：**只给建议，不改正文**。
 
     三个能力：
@@ -2218,6 +2247,9 @@ class WritingHintsDialog(QDialog):
         from ..core import writing_hints as wh
         self._wh = wh
         self._getter = text_getter
+        # P1-21 异步状态：token 防止旧结果覆盖新请求；worker 结果只回填主线程。
+        self._hints_token = 0
+        self._hints_worker = None
         self.setWindowTitle("写作提示与灵感建议（只给建议，不改正文）")
         _fit_dialog(self, 1080, 660)
         v = QVBoxLayout(self)
@@ -2229,6 +2261,11 @@ class WritingHintsDialog(QDialog):
         head.setWordWrap(True)
         head.setStyleSheet(f"color:{theme.MUTED};")
         v.addWidget(head)
+        # 采样说明（超长文档才显示；让用户知道分析的是首尾而非全文）
+        self.lbl_sample = QLabel("")
+        self.lbl_sample.setWordWrap(True)
+        self.lbl_sample.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_sample)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("文种："))
@@ -2241,9 +2278,9 @@ class WritingHintsDialog(QDialog):
         self.ed_topic = QLineEdit(topic)
         self.ed_topic.setPlaceholderText("填写后可检索本地资料库中的可借鉴写法（可留空）")
         row.addWidget(self.ed_topic, 2)
-        btn_hint = QPushButton("生成写作提示")
-        btn_hint.clicked.connect(self.run_hints)
-        row.addWidget(btn_hint)
+        self.btn_hint = QPushButton("生成写作提示")
+        self.btn_hint.clicked.connect(self.run_hints)
+        row.addWidget(self.btn_hint)
         btn_idea = QPushButton("获取灵感建议")
         btn_idea.clicked.connect(self.run_ideas)
         row.addWidget(btn_idea)
@@ -2287,8 +2324,23 @@ class WritingHintsDialog(QDialog):
         btns.addWidget(btn_save)
         btns.addWidget(btn_close)
         v.addLayout(btns)
-        self.run_hints()
+        # 构造期不再同步跑 hints()（25k 字首调 ~803 ms）。空稿的提案例是
+        # "先搭骨架"，计算量近零，同步给出可避免多余的线程与"正在分析"闪烁；
+        # 非空稿一律后台计算，先显示载入态。
         self.run_ideas()
+        initial = self._text()
+        if initial.strip():
+            self.report.setPlainText("正在分析…")
+            self.lbl_stat.setText("正在分析…")
+            self.run_hints()
+        else:
+            # 空稿的骨架提示计算量近零（实测 0.0 ms），同步给出以保留原有
+            # "打开即见骨架"的体验；异常同样降级为可读文本。
+            try:
+                self._finish_hints(_hints_worker("", self.kind()))
+            except Exception as exc:
+                self.report.setPlainText(errmsg.friendly(exc, action="写作提示"))
+                self.lbl_stat.setText("写作提示生成失败")
 
     # ------------------------------------------------------------ 取文本
     def kind(self) -> str:
@@ -2302,18 +2354,50 @@ class WritingHintsDialog(QDialog):
 
     # ------------------------------------------------------------ 提示
     def run_hints(self):
-        """生成写作提示。**任何异常都降级为提示文本，绝不向外抛。**"""
+        """生成写作提示（后台线程，主线程回填）。
+
+        超长文本先在本方法（主线程）采样为首尾各 3000 字再交给 worker：
+        采样是纯字符串操作，不改变 writing_hints 的入参契约；界面上用
+        `lbl_sample` 明确告知"已采样首尾"。旧结果带 token 回来，若期间又发起
+        了新请求则直接丢弃，避免过期的提示覆盖新的分析。
+        """
         text = self._text()
-        try:
-            hs = self._wh.hints(text, self.kind())
-            lines = self._wh.report_lines(hs)
-            warn_n = sum(1 for h in hs if h.level == "warn")
-        except Exception as exc:
-            self.report.setPlainText(errmsg.friendly(exc, action="写作提示"))
+        sample, sample_note = _sample_hint_text(text)
+        self.lbl_sample.setText(sample_note)
+        if self._hints_worker is not None and self._hints_worker.isRunning():
+            self.lbl_stat.setText("上一次分析仍在进行，请稍候…")
             return
+        self._hints_token += 1
+        token = self._hints_token
+        self.btn_hint.setEnabled(False)
+        self.report.setPlainText("正在分析…")
+        self.lbl_stat.setText("正在分析…")
+        w = FnWorker(_hints_worker, sample, self.kind(), parent=self)
+        w.ok.connect(lambda result, _t=token: self._on_hints_done(result, _t))
+        w.failed.connect(lambda msg, _t=token: self._on_hints_failed(msg, _t))
+        self._hints_worker = w
+        w.start()
+
+    def _finish_hints(self, result: dict) -> None:
+        """主线程回填提示文本（同步/异步共用）。"""
+        lines = result.get("lines") or []
+        warn_n = int(result.get("warn_n") or 0)
         self.report.setPlainText("\n".join(lines))
         self.lbl_stat.setText(f"提示 {len(lines)} 条" + (f"（其中缺失项 {warn_n} 条）"
                                                         if warn_n else ""))
+        self.btn_hint.setEnabled(True)
+
+    def _on_hints_done(self, result: dict, token: int) -> None:
+        if token != self._hints_token:
+            return          # 旧请求的迟到结果：不得覆盖新一轮
+        self._finish_hints(result)
+
+    def _on_hints_failed(self, msg: str, token: int) -> None:
+        if token != self._hints_token:
+            return
+        self.report.setPlainText(msg)
+        self.lbl_stat.setText("写作提示生成失败")
+        self.btn_hint.setEnabled(True)
 
     # ------------------------------------------------------------ 灵感
     def run_ideas(self):

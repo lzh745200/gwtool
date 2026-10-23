@@ -1,7 +1,7 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.9.0**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.10.0**。
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
 
@@ -245,6 +245,7 @@ CI 以 dpkg-deb 打成唯一安装包 `gwtool_<版本>_linux_arm64.deb`。
 | **写作提示 16 项检查**（v1.8）| 每项正/反例；规范范文 0 warn；单类异常隔离 | test_writing_hints_ext |
 | **GB/T 15835 数字规范 21 条**（v1.8）| 全部提示级、可自动替换类整类排除；真实语料命中逐条白名单 | test_rules_expansion_v18 |
 | **A 批 19 项修复**（v1.9） | 竞态/评测门禁/排版/纠错守卫/写作/台账/快照/恢复/主题/日志，逐项带回归 | test_correct_dialog_race / test_docx_layout_v19 / test_rules_guard_v19 / test_writing_fix_v19 / test_registry_v19 / test_eval_script / test_theme_contrast_v19 / test_data_safety_v19 |
+| **B 批 17 项修复**（v1.10） | PDF 行距/分段/页序/水印、.doc 默认纯 Python + 质量兜底、编码探测、控制字符、缩进归一、同名附件、大文档异步、写作提示异步、槽位精确率 9/14→14/14、法定文种识别、发文字号唯一、段落索引体量策略、资料库刷新 229→1.7ms | test_pdf_layout_v19b / test_import_export_v19b / test_ui_perf_v19b / test_slot_extraction_v19b / test_genre_v19b / test_registry_unique_v19b / test_library_refresh_v19b |
 | 运行期故障可诊断 | 队列异步日志 + 全局异常钩子 | test_logs |
 
 ## 目录结构

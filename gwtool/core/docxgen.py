@@ -193,14 +193,13 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
         _build_cover(doc, tpl)
         doc.add_page_break()
 
-    # 2) 红头
-    if tpl.red_header.enabled:
-        _build_red_header(doc, tpl)
-
-    # 3) 目录（TOC 域）
+    # 2) 目录（TOC 域）
+    #     P1-04：目录必须排在红头**之前** —— 与内置 PDF 渲染器
+    #     （pdfrender.trees_to_html：封面 → 目录 → 红头+正文）同序。旧实现把
+    #     红头夹在封面与目录之间，且红头后又跟一个分页符，结果红头独占一整页
+    #     （实测第 2 页只有"××单位文件""×政发〔2026〕1号"两行），同一模板导出
+    #     docx 与 PDF 的页序还不一致，用户无法二选一交付。
     if tpl.toc_enabled:
-        if tpl.red_header.enabled:
-            doc.add_page_break()
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p.add_run(tpl.toc_title)
@@ -208,6 +207,10 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
         toc_p = doc.add_paragraph()
         _add_field(toc_p, r' TOC \o "1-3" \h \z \u ', "（打开文档后按提示更新目录页码）")
         doc.add_page_break()
+
+    # 3) 红头：紧随目录、与正文首页同页（P1-04，不再单独占一页）
+    if tpl.red_header.enabled:
+        _build_red_header(doc, tpl)
 
     # 4) 正文
     for mat_no, tree in enumerate(trees, 1):
@@ -240,7 +243,53 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
         add_watermark_docx(str(out), tpl.watermark_text.strip(),
                            opacity=tpl.watermark_opacity,
                            angle=(360 - tpl.watermark_angle) % 360)
+        # P1-11：add_watermark_docx 只写默认(奇数)页眉，而本模板开了
+        # evenAndOddHeaders —— 偶数页读的是 even_page_header，不继承默认页眉，
+        # 于是偶数页完全没有水印（实测：WPS 渲染后奇数页 5 条矢量路径、偶数页
+        # 0 条）。这里把同一段 VML 复制到偶数页页眉，奇偶页都盖到。
+        _mirror_watermark_to_even_header(str(out))
     return str(out)
+
+
+def _mirror_watermark_to_even_header(docx_path: str) -> bool:
+    """把默认(奇数)页眉里的水印 VML 复制到偶数页页眉（P1-11），返回是否改动。
+
+    只复制**含 `w:pict` 的整段**（保留 pStyle/run 结构），不重新拼 XML ——
+    VML 的唯一来源仍是 `watermark.add_watermark_docx`，两处不会漂移。
+    失败只记日志：水印是附加要素，不能因为页眉结构异常把已生成好的公文搞丢。
+    """
+    from copy import deepcopy
+
+    from docx import Document
+
+    try:
+        doc = Document(docx_path)
+        changed = 0
+        for sec in doc.sections:
+            source = sec.header._element
+            pict_paras = [p for p in source.findall(qn("w:p"))
+                          if p.find(".//" + qn("w:pict")) is not None]
+            if not pict_paras:
+                continue
+            targets = [sec.even_page_header]
+            if sec.different_first_page_header_footer:
+                targets.append(sec.first_page_header)   # 首页单独页眉时才需要
+            for target in targets:
+                target.is_linked_to_previous = False
+                element = target._element
+                for old in [p for p in element.findall(qn("w:p"))
+                            if p.find(".//" + qn("w:pict")) is not None]:
+                    element.remove(old)                 # 重复调用不叠加
+                for para in pict_paras:
+                    element.append(deepcopy(para))
+                changed += 1
+        if changed:
+            doc.save(docx_path)
+        return bool(changed)
+    except Exception as exc:                            # 水印是附加要素，不阻断
+        from ..logs import get_logger
+        get_logger("docx").warning("偶数页水印复制失败，仅奇偶不一致：%s", exc)
+        return False
 
 
 # ------------------------------------------------------------------ 部件

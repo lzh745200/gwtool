@@ -23,6 +23,8 @@
      （数字/日期/单位/机构名/标点形式，复用 ``core.consistency``）。
    **warn 只留给"骨架要求的要素确实缺失"**，其余一律 info —— 正常公文不应被刷警告。
 2. **文种识别** —— 复用 ``style_profile`` 的量化指纹，回答"这篇更像哪个文种"；
+   7 种无固定模板文体为常序，文本标题/结束语带法定文种标记时并入伍种基线
+   （``style_data.LEGAL_REF``，P1-18），避免通知/请示/报告恒被判成"经验总结"；
 3. **灵感建议** —— 离线句式库（``writing_data``，自撰、许可干净）
    ＋ 资料库/词典检索（``reference``），给可套用的句式骨架与可借鉴的既有写法。
 
@@ -34,6 +36,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import style_data as D
 from . import writing_data as W
 
 # ---------------------------------------------------------------- 启发式正则
@@ -165,19 +168,105 @@ def outline(kind: str) -> Outline | None:
 
 
 # ---------------------------------------------------------------- 文种识别
+#: 与 `style_profile._MATCH_KEYS` 同口径（该常量是私有的，这里镜像一份；
+#: 漂移由 tests/test_genre_v19b.py 的一致性断言兜住）。
+_LEGAL_MATCH_KEYS = ("chars", "sent", "h1", "h2", "h3", "yishi", "dun",
+                     "qz", "yq", "jy", "pct")
+#: 法定基线并入排序的门槛：只有法定基线**明显**优于 7 文体 top1 才参与。
+#: 目的：无固定模板样张的标题/结尾偶尔夹带法定套语（如文末引用「特此报告」）
+#: 时不至于被"抢位"——实测法定样张 legal≈0.0，而同文本 style≥0.70。
+_LEGAL_MERGE_MARGIN = 0.8
+
+
+def _legal_marker(text: str) -> tuple[str, str]:
+    """文本暗示的法定文种，返回 ``(文种, 来源)``；没有迹象返回 ``("", "")``。
+
+    来源分两档（置信度不同，排序时用法也不同）：
+
+    * ``"title"`` —— 标题后缀直接写明文种（「…的通知」「…的请示」
+      「…的实施意见」「会议纪要」等）。这是作者**自报**的文种，属确定性证据；
+      真实公文粘贴后前几行常带发文机关标志/发文字号，因此扫**前 3 行**；
+    * ``"closing"`` —— 只有文末结束语套语（「特此通知」「妥否，请批示」
+      「此复」…）。只是线索：正文引用别家公文时也可能出现，需与统计距离配合。
+
+    两处词表都在 ``style_data.LEGAL_TITLE_MARKS / LEGAL_CLOSINGS``，不在本模块
+    硬编码——加一个法定文种只改数据层。
+    """
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    for line in lines[:3]:
+        head = _MD_HEAD_RE.sub("", line)[:80]
+        for genre, suffixes in D.LEGAL_TITLE_MARKS:
+            if any(head.endswith(suf) for suf in suffixes):
+                return genre, "title"
+    tail = (text or "")[-400:]
+    for genre, closings in D.LEGAL_CLOSINGS.items():
+        if any(closing in tail for closing in closings):
+            return genre, "closing"
+    return "", ""
+
+
+def _legal_rank(a: dict) -> list[tuple[str, float]]:
+    """按法定文种识别基线排序（距离口径与 ``style_profile.match_genre`` 一致）。"""
+    out: list[tuple[str, float]] = []
+    for genre, row in D.LEGAL_REF.items():
+        dist = 0.0
+        count = 0
+        for key in _LEGAL_MATCH_KEYS:
+            spec = row.get(key)
+            if not spec or key not in a:      # 指标缺失就跳过，不猜也不抛
+                continue
+            lo, hi, mid = spec
+            scale = max(hi - lo, abs(mid) * 0.3, 1)
+            dist += abs(a[key] - mid) / scale
+            count += 1
+        if count:
+            out.append((genre, dist / count))
+    return sorted(out, key=lambda item: item[1])
+
+
+def _is_legal_kind(kind: str) -> bool:
+    """是否法定文种（含未设识别基线的条例/通告/通令/指示，一律按法定处理）。
+
+    法定文种**不出**"本文更像 X"提示：它们的结构由制度锁定，识别基线是
+    自撰示意样本，据此在法定文种之间判"更像"没有精度保证（P1-18）。
+    """
+    return bool(kind) and (kind in D.LEGAL_STYLES or kind in D.NO_PARAM
+                           or kind in ("通令", "指示"))
+
+
 def detect_kind(text: str, limit: int = 3) -> list[tuple[str, float]]:
     """按量化指纹给出"更像哪个文种"的排序。
 
     返回 ``[(文种, 距离), ...]`` —— **距离越小越像**，列表已按此升序排列
     （与 ``style_profile.match_genre`` 同口径，勿按"分值越大越好"理解）。
     无法量化时返回 ``[]``。
+
+    排序对象平时是 7 种无固定模板文体；文本带法定文种标记时并入 10 种法定
+    文种的识别基线，否则通知/请示/报告会被 7 文体指纹判成「经验总结」
+    （P1-18 实测 top1=经验总结 0.751）。两档合并策略：
+
+    * 标题已写明文种（``"title"``）：该文种距离记为 **0.0**——标题是作者自报
+      的确定性证据，优先于统计相似度（「的通知」就是通知，不需要再猜）；
+      其余文种仍按统计距离排在后面，列表整体仍升序。
+    * 只有结束语线索（``"closing"``）：受 ``_LEGAL_MERGE_MARGIN`` 约束，法定
+      基线必须明显优于 7 文体 top1 才并入，避免正文引用别家公文套语时抢位。
     """
     try:
         from . import style_profile
         a = style_profile.analyze(text or "")
         if not a:
             return []
-        return list(style_profile.match_genre(a))[:limit]
+        ranking = list(style_profile.match_genre(a))
+        genre, source = _legal_marker(text)
+        if genre:
+            legal = _legal_rank(a)
+            if source == "title":
+                legal = [(g, 0.0 if g == genre else d) for g, d in legal]
+                ranking = sorted(ranking + legal, key=lambda item: item[1])
+            elif legal and (not ranking
+                            or legal[0][1] < ranking[0][1] * _LEGAL_MERGE_MARGIN):
+                ranking = sorted(ranking + legal, key=lambda item: item[1])
+        return ranking[:limit]
     except Exception:
         return []
 
@@ -312,11 +401,21 @@ def _style_hints(text: str, kind: str) -> list[Hint]:
             out.append(Hint("文风", "平均句长偏长",
                             f"实测 {sent:.0f} 字/句，超过 {W.SENT_LONG} 字，建议拆分长句",
                             "info"))
-        top = detect_kind(text, limit=1)
-        if kind and top and top[0][0] != kind:
-            out.append(Hint("文风", f"本文更像「{top[0][0]}」",
-                            f"与所选文种「{kind}」不一致，请确认文种是否选对",
-                            "info"))
+        # 文种匹配度：只在**同族**内比较（P1-18）。法定文种不出这条提示——
+        # 其结构由制度锁定，识别基线是自撰示意样本，不足以在法定文种间判
+        # "更像"；否则任何通知/请示/报告都会收到"更像经验总结"的误导性提示。
+        # 7 种无固定模板文体维持原口径（直接与 match_genre 比，不经过
+        # detect_kind，避免标题夹带法定套语时被法定基线抢位）。
+        if kind and not _is_legal_kind(kind):
+            top: list[tuple[str, float]] = []
+            try:
+                top = list(style_profile.match_genre(a))[:1]
+            except Exception:
+                top = []
+            if top and top[0][0] != kind:
+                out.append(Hint("文风", f"本文更像「{top[0][0]}」",
+                                f"与所选文种「{kind}」不一致，请确认文种是否选对",
+                                "info"))
     return out
 
 

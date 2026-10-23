@@ -113,6 +113,29 @@ def _plan_attachments(doc_ids: list[int], limit_bytes: int) -> "tuple[list, list
     return included, excluded
 
 
+def _unique_attachment_path(seen: set[str], name: str) -> tuple[str, str]:
+    """为附件生成**包内唯一**路径；同名时加序号后缀，返回 (路径, 改名说明)。
+
+    为什么要改而不是排除（v1.9b，审计 P1-10）：不同文档挂同名附件（各单位
+    都交「证明材料.pdf」「附件1.docx」是常态）时，老实现把后来者放进
+    ``excluded`` 并写"包内已有同名附件" —— 用户交接出去的包里**少了附件**，
+    而"移交"是责任转移，缺件在对方打开时才发现往往已经来不及补。zip 条目
+    同名会被后者静默顶掉是事实，但解法是改名，不是丢件。
+    改名规则：``stem_2.ext``、``stem_3.ext`` ……（确定性、可读、与
+    `documents/` 段的 ``_<id>`` 后缀风格一致；不引入哈希，便于人工核对）。
+    """
+    base = f"attachments/{safe_filename(name) or 'file'}"
+    if base not in seen:
+        return base, ""
+    p = Path(base)
+    i = 2
+    while True:
+        cand = f"{p.parent}/{p.stem}_{i}{p.suffix}"
+        if cand not in seen:
+            return cand, f"与包内已有附件同名，包内改名为 {Path(cand).name}"
+        i += 1
+
+
 def _sha256(blob: bytes) -> str:
     return hashlib.sha256(blob).hexdigest()
 
@@ -199,17 +222,15 @@ def build(req: ExportRequest, progress_cb=None) -> dict:
                 item["reason"] = "读取失败"
                 excluded.append(item)
                 continue
-            arc = f"attachments/{safe_filename(item['name']) or 'file'}"
-            if arc in seen_arc:
-                # 不同文档的同名附件：zip 条目重名会被后者静默顶掉
-                # （ZipFile 按 NameToInfo 取值），与整库备份同口径——
-                # 挪进 excluded 并写明原因，随 manifest 带给用户。
-                item["reason"] = "包内已有同名附件"
-                excluded.append(item)
-                continue
+            arc, renamed = _unique_attachment_path(seen_arc, item["name"])
             seen_arc.add(arc)
             zf.writestr(arc, blob)
+            # 原名单独留在 manifest 里：包内路径可能带 _2 序号，而用户认得的是
+            # 原文件名（回读/核对清单时要能对上）。
+            item["origin_name"] = item["name"]
             item["path"] = arc
+            if renamed:
+                item["renamed"] = renamed
             item["sha256"] = _sha256(blob)
             total += len(blob)
             att_rows.append(item)

@@ -704,7 +704,8 @@ _RE_MATTER = re.compile(r"关于([^，。；、\n]{2,30}?)的")
 _RE_DATE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?")
 _RE_DEADLINE = re.compile(r"[0-9一二三四五六七八九十两]+\s*个工作日内")
 _RE_COUNT = re.compile(
-    r"[0-9一二三四五六七八九十两]+\s*(?:名|项|个|件|次|人|份|条|台|套|万元|元)")
+    r"(?:\d+(?:\.\d+)?|[0-9一二三四五六七八九十两]+)\s*万?\s*"
+    r"(?:名|项|个|件|次|人|份|条|台|套|元)")
 _RE_CITED = re.compile(r"《[^》\n]{2,40}》(?:（[^）\n]{0,30}〔\d{4}〕\s*\d+\s*号）)?")
 
 # 单位名**不用一条正则整体匹配**，改成"后缀锚定 + 按 jieba 词界向左扩展"。
@@ -716,29 +717,149 @@ _RE_CITED = re.compile(r"《[^》\n]{2,40}》(?:（[^）\n]{0,30}〔\d{4}〕\s*\
 # 为什么用 jieba 词界、而不是"遇到停用字就停"：停用字是个闭集，动词是开放集
 # ——「请各单位报…」挡住了"请"，但「现将有关情况报送长沙市教育局…」照样把
 # "送"吞了进来。分词器本来就给出了词界，按词界切才不会随动词变化而漏。
-_ORG_SUFFIXES = ("委员会", "办公室", "管理局", "支队", "大队", "中心", "集团",
-                 "公司", "学院", "大学", "政府", "党委", "机关", "单位",
-                 "局", "部", "厅", "委", "办", "处", "科")
-# 合并左邻词时，含这些"动词/虚词"字的词立即停下（它们只可能出现在名称之外）
-_ORG_STOP = set("请在由向对给经据要并与和为报将把及或以从到被让使令望拟兹是的了着过"
-                "送交呈抄转发批致于至按依照遵根依")
-# 以单字后缀（局/部/厅/委/办/处/科）结尾的**两字词**，只有本身是机关/组织
-# 简称才成立：「全部/好处/干部/到处/内部」同样以后缀字结尾，不加这道判别
-# 会把整句吞成 {org}（实测「本次工作全部完成。」→「本次工作全部」）。
-# 只做确定性白名单，不做词性/语义推断（规格 C 系列约束）。
+#
+# ---- v1.10（P1-20）收紧：后缀白名单 + 长度上限 + 句读/数字截断 + 前缀兜底 ----
+# 审计在 11 句标注集上实测：类型召回 11/12，但**实体级精确率仅 9/14**，其中
+# 4 个含机构名的句子 0/4 抽对（36 字符整句被吞成 {org}、「市生态环境局」漏抽、
+# 「市住房和城乡建设局」截成「城乡建设局」、「由市教育局…」截成「教育局」）。
+# 根因与对应修法（逐条都能回归）：
+#   ① 左合并跨过逗号/句号/括号 → 新增 `_ORG_BREAK`，遇到句读/数字立即截断；
+#   ② 长度上限比较的是"上一个 token 的长度"，不是累计前缀 → 改为整名长度上限；
+#   ③ `len(word) < 2` 丢弃单字后缀 token → 单字 `局/部/…` 允许当锚点；
+#   ④ `_ORG_STOP` 含「和」→ 把连接词从停用字里拿出来，用 `_conj_blocks` 只截
+#      真正的并列结构（住房和城乡建设局 保留，市教育局和各区县教育局 截断）；
+#   ⑤ 泛化指代（各单位/你局/该院…）与常见非机构词 → `_ORG_GENERIC`/`_ORG_NOT_ORG`；
+#   ⑥ 分词器把单字后缀粘进虚词（「市生态环境|局要」）→ 单字后缀后接虚词时把锚点
+#      截在虚词前（`_ORG_TAIL_PARTICLES`）。
+# 置信不足就不抽：任何候选名必须同时满足"长度 2~_ORG_MAX_LEN、不含句读、首字不是
+# 停用/连接词、两字候选是机关简称或地市名前缀"才输出；不满足则整条丢弃。
+_ORG_SUFFIXES = ("委员会", "办公室", "办事处", "管理局", "总队", "支队", "大队",
+                 "中心", "集团", "公司", "学院", "大学", "政府", "党委", "机关",
+                 "单位", "局", "部", "厅", "委", "办", "处", "科", "院", "所")
+# 单字后缀：既可能单独成 token（「市生态环境|局」），也可能被粘进虚词（「局要」）。
+# 只对 局/部/厅/委/办 开放单字锚点：处/科/院/所 同时是普通名词尾字
+# （光标处、末尾处、财务科、研究所），放开会把「在光标处签字」抽成单位名。
+_ORG_SINGLE_SUFFIX = frozenset("局部厅委办")
+# 粘在单字后缀后的虚词/介词：命中说明该 token 只是"机构名尾字 + 下一个词"，
+# 锚点应截在这个虚词之前；不含这些字的两字词（局部/部门/部署）不还原。
+_ORG_TAIL_PARTICLES = frozenset(
+    "要是的将在于对给向由经据把被让使令望拟并或与和及以从到等中上下内外的了着过里")
+# 合并左邻词时，含这些"动词/虚词"字的词立即停下（它们只可能出现在名称之外）。
+# 注意：连接词「和/与/及/或/并」**不在**此表 —— 它们也是机构名内部的合法用字
+# （住房和城乡建设局、文化和旅游局、国家发展和改革委员会），由 _conj_blocks 判。
+_ORG_STOP = set("请在由向对给经据要报将把被让使令望拟兹为是的了着过"
+                "送交呈抄转发批致于至按依照遵根依个种位些")
+# 停用字里也有**名称内部合法**的用例（发展、交通）：这两个词按整词豁免，
+# 否则「国家发展和改革委员会」会在「发展」处被截成「改革委员会」。
+# 只列确定性白名单，不按字猜 —— 新出现的名称词宁可少合并（宁缺勿滥）。
+_ORG_NAME_WORDS = frozenset({"发展", "交通", "发展改革", "交通运输"})
+_ORG_CONJ_CHARS = frozenset("和与及或并暨")
+_ORG_CONJ_WORDS = frozenset({"和", "与", "及", "或", "并", "暨", "以及", "及其",
+                             "并且", "或者"})
+# 机构名前缀（用于"被停用字粘住时只取末字"的兜底，以及两字简称的合法性判定）
+_ORG_PREFIX_CHARS = frozenset("市县区省州旗镇乡街国中党自治盟")
+# 机构名**不得包含**的字符：句读、括号、数字与常见符号。它们是"名称已经在
+# 别处结束"的证据。「×」「x」刻意放行：公文书里「××市教育局」这类占位写法极常见。
+_ORG_BREAK = frozenset(
+    "，。、；：？！（）()《》〈〉【】〔〕[]“”‘’「」『』\"'·,.;:!?…—－–-/\\|`~"
+    "@#$%^&*+=<>{}→←↑↓\n\r\t \u3000"
+    "0123456789０１２３４５６７８９")
+# 以单字后缀（局/部/厅/委/办/处/科/院/所）结尾的**两字词**，只有本身是机关/
+# 组织简称、或"地市名前缀+后缀"（市局/县局）才成立：「全部/好处/干部/到处/
+# 内部」同样以后缀字结尾，不加这道判别会把整句吞成 {org}（实测「本次工作
+# 全部完成。」→「本次工作全部」）。只做确定性白名单，不做词性/语义推断。
 _ORG_SHORT_OK = frozenset({
     "省委", "市委", "县委", "区委", "地委", "党委", "纪委", "监委", "工委",
     "党组", "工会", "团委", "妇联", "残联", "人大", "政协", "政府", "法院",
     "检察", "公安", "财政", "教育", "卫健", "应急", "审计", "统计", "税务",
     "海关", "总局", "部委", "分局", "支队", "大队", "学校", "医院", "公司",
-    "银行", "集团", "中心", "机关", "单位", "学院", "大学",
+    "银行", "集团", "中心", "机关", "单位", "学院", "大学", "市局", "县局",
+    "区局", "省局", "州局", "分院", "总院", "本院",
 })
 # 三字及以上、但确定不是单位的常见词（同为启发式，宁缺勿滥地只列高频例）
 _ORG_NOT_ORG = frozenset({
     "大部分", "一部分", "小部分", "好处", "坏处", "全部", "干部",
-    "内部", "外部", "局部", "到处", "部分",
+    "内部", "外部", "局部", "到处", "部分", "全局", "大局", "布局", "结局",
+    "格局", "所属", "场所", "住所", "厕所", "诊所",
 })
-_ORG_MAX_PREFIX = 10
+# 泛化指代：写作里到处出现、但**不是可填写单位名**的提法。
+# 「各单位」在审计中 4 例有 2 例被误抽成 org，是最典型的泛化误抽。
+_ORG_GENERIC = frozenset({
+    "单位", "各单位", "各部门", "部门", "各局", "各委", "各办", "各处", "各科",
+    "各院", "各所", "各科室", "该局", "该委", "该办", "该处", "该院", "该所",
+    "本局", "本委", "本办", "本院", "本所", "我局", "我委", "我院", "你局",
+    "你委", "你院", "贵局", "贵委", "贵院", "事业单位", "企业单位", "机关单位",
+    "有关单位", "相关单位", "上述单位", "成员单位", "下属单位", "机构",
+    "党政机关", "军队机关",
+})
+# 机构名长度上限（汉字数）。审计要求"36 字符整句 → ≤12 字且不含句读"；
+# 这里取 20 让「中华人民共和国国家发展和改革委员会」这类全称不被截断，
+# 而"吞句子"由 _ORG_BREAK 与累计长度共同阻断。
+_ORG_MAX_LEN = 20
+
+
+def _org_ends_with_suffix(word: str) -> bool:
+    return bool(word) and any(word.endswith(s) for s in _ORG_SUFFIXES)
+
+
+def _org_two_char_ok(word: str) -> bool:
+    """两字候选是否成立：机关简称白名单 / 地市名前缀 / 「××」占位前缀。"""
+    return (word in _ORG_SHORT_OK or word[0] in _ORG_PREFIX_CHARS
+            or word[0] in "×xX")
+
+
+def _org_anchor_end(word: str, start: int, end: int) -> int | None:
+    """token 是机构名锚点时返回锚点结束位置，否则 None（置信不足就不锚）。"""
+    if word in _ORG_NOT_ORG or word in _ORG_GENERIC:
+        return None
+    if len(word) >= 2 and _org_ends_with_suffix(word):
+        if len(word) == 2 and not _org_two_char_ok(word):
+            return None
+        return end
+    if len(word) == 1 and word in _ORG_SINGLE_SUFFIX:
+        return end
+    if (len(word) == 2 and word[0] in _ORG_SINGLE_SUFFIX
+            and word[1] in _ORG_TAIL_PARTICLES):
+        return start + 1          # 「局要」「局中」：机构名止于单字后缀
+    return None
+
+
+def _conj_blocks(word: str, before: str) -> bool:
+    """左合并遇到连接词时，判断这里是不是**并列结构**（是则截断）。
+
+    名称内部的「和」两侧是修饰语（住房+城乡、文化+旅游、发展+改革），
+    并列结构两侧则各自是完整机构名（市教育局 + 各区县教育局）。判据因此是
+    "连接词左边那段本身是否已以机构后缀结尾"（以及长度/泛化词兜底）。
+    """
+    if word in _ORG_CONJ_WORDS:
+        return (_org_ends_with_suffix(before) or before in _ORG_GENERIC
+                or before in _ORG_NOT_ORG or len(before) < 2)
+    if word and word[-1] in _ORG_CONJ_CHARS:
+        return _org_ends_with_suffix(word[:-1])
+    return False
+
+
+def _org_candidate_ok(cand: str) -> bool:
+    """候选机构名的最终校验：任一条件不满足就整条丢弃（宁缺勿滥）。"""
+    if not 2 <= len(cand) <= _ORG_MAX_LEN:
+        return False
+    if any(ch in _ORG_BREAK for ch in cand):
+        return False
+    if cand in _ORG_NOT_ORG or cand in _ORG_GENERIC:
+        return False
+    # 名称尾部不能落在"普通词"上（「上跑完全部」这类把短语末尾当机构名的吞并）
+    if any(len(w) >= 2 and cand.endswith(w) for w in _ORG_NOT_ORG):
+        return False
+    if cand[0] in _ORG_CONJ_CHARS or cand[-1] in _ORG_CONJ_CHARS:
+        return False
+    # 首字是停用字 → 说明左边还粘着动词/介词；但「发展…」「交通…」这类
+    # 本身以停用字开头的**合法名称词**豁免（交通局、发展和改革委员会）。
+    if cand[0] in _ORG_STOP and not any(
+            cand.startswith(w) for w in _ORG_NAME_WORDS):
+        return False
+    if len(cand) == 2:
+        return _org_two_char_ok(cand)
+    return _org_ends_with_suffix(cand)
 
 
 def _find_org_spans(text: str) -> list[tuple[int, int, str, str]]:
@@ -750,25 +871,33 @@ def _find_org_spans(text: str) -> list[tuple[int, int, str, str]]:
         return []
     out: list[tuple[int, int, str, str]] = []
     for i, (word, start, end) in enumerate(toks):
-        if len(word) < 2 or not any(word.endswith(s) for s in _ORG_SUFFIXES):
+        anchor_end = _org_anchor_end(word, start, end)
+        if anchor_end is None:
             continue
-        if word in _ORG_NOT_ORG:
-            continue                      # 「大部分/好处」这类普通词
-        if len(word) == 2 and word not in _ORG_SHORT_OK:
-            continue                      # 两字词须是机关简称才成立
         beg = start                   # 左合并的游标（不改写循环变量）
         j = i - 1
         while j >= 0:
             pw, ps, pe = toks[j]
             if pe != beg:                         # 中间有空白/换行，不跨过去
                 break
-            if any(ch in _ORG_STOP for ch in pw):
+            if any(ch in _ORG_BREAK for ch in pw):
+                break                             # 句读/数字：名称已在此结束
+            before = toks[j - 1][0] if j >= 1 else ""
+            if _conj_blocks(pw, before):
+                break                             # 并列结构，不跨连接词
+            if any(ch in _ORG_STOP for ch in pw) and pw not in _ORG_NAME_WORDS:
+                # 「由市」这类把介词与地名粘在一起的 token：只回收末字（市）
+                last = pw[-1]
+                if last in _ORG_PREFIX_CHARS and anchor_end - (pe - 1) <= _ORG_MAX_LEN:
+                    beg = pe - 1
                 break
-            if beg - ps > _ORG_MAX_PREFIX:
-                break
+            if anchor_end - ps > _ORG_MAX_LEN:
+                break                             # 累计长度上限（防吞句子）
             beg = ps
             j -= 1
-        out.append((beg, end, "org", "单位名"))
+        cand = text[beg:anchor_end]
+        if _org_candidate_ok(cand):
+            out.append((beg, anchor_end, "org", "单位名"))
     return out
 
 

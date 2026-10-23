@@ -254,7 +254,9 @@ class TestDocRealConversion:
         monkeypatch.setattr(doc_parser, "_convert_via_soffice", _forbidden)
         monkeypatch.setattr(doc_parser, "_extract_text_olefile", _forbidden)
         monkeypatch.setattr(doc_parser, "_extract_text_raw_scan", _forbidden)
-        r = parse_any(str(real_doc))
+        # v1.10.0：.doc 默认改走纯 Python（快约 2400×），COM 是**保真模式**。
+        # 本用例守的是"COM 路径本身能健康解析真实 .doc"，故显式声明保真模式。
+        r = parse_any(str(real_doc), prefer_doc_com=True)
         assert r.ok, f"真实 .doc 解析失败（COM 主路径不可用）：{r.error}"
         joined = "".join(b.text for b in r.tree.blocks)
         assert "第一段正文。" in joined

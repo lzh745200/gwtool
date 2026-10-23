@@ -279,11 +279,19 @@ def test_context_rule_scale_and_compile():
 
 
 # ---------------------------------------------------------------- 真实语料回归
-# 「元文档」：本身就是**讨论纠错规则**的变更记录/审计报告，会引用错形做示例
-# （如 v1.8.0 变更记录里写 `戒骄戒燥→戒骄戒躁` 来说明扫描器修复）。
-# 它们不是"真实行文语料"，把它们算进来等于要求文档不许写错形举例 —— 那会让
-# 这道门禁变成"不许在文档里引用错别字"，与它想防的"规则在真实文本上误报"无关。
-CORPUS_META_DOCS = frozenset({"深审报告_v1.8.md", "v1.8.0增强与修复记录.md"})
+# 「元文档」：本身就是**讨论纠错规则/汇报实测数据**的变更记录、审计报告与方案书。
+# 它们会引用错形做示例（如 `戒骄戒燥→戒骄戒躁`），也会大量书写 `1.5~1.6ms`
+# 这类区间**作为证据数字**——把它们算进"行文语料"等于要求文档不许举例、不许
+# 写区间，那会让这两道门禁变成"文档禁令"，与它想防的"规则在真实文本上误报"无关。
+#
+# 用**文件名特征**而不是逐个列举：每版都会新增"修复记录/审计报告"，列举法必然
+# 每版都要改测试（v1.10 就因此红过一次），特征法一劳永逸且边界清晰 ——
+# 真正的行文类文档（设计说明、UI 方案、规格书…）不含这些字样，仍在语料里。
+CORPUS_META_MARKERS = ("修复记录", "深审报告", "优化建议", "全功能检测")
+
+
+def _is_meta_doc(name: str) -> bool:
+    return any(marker in name for marker in CORPUS_META_MARKERS)
 
 
 def test_new_pairs_never_occur_in_real_corpus():
@@ -294,7 +302,7 @@ def test_new_pairs_never_occur_in_real_corpus():
     快两个数量级，判据却不变。
     """
     corpus = [(name, text) for name, text in _doc_corpus()
-              if name not in CORPUS_META_DOCS]
+              if not _is_meta_doc(name)]
     appeared = [(wrong, name) for wrong, _c in NEW_PAIRS
                 for name, text in corpus if wrong in text]
     assert not appeared, f"真实语料出现了新增错形（需复核）：{appeared}"
@@ -311,14 +319,16 @@ CORPUS_ALLOWED: dict[str, set[str]] = {
 # 上限按"人工复核过的命中数"设，不是随手放的余量：
 #   百分数区间 9 处（6 个不同串，全部是区间首端漏百分号）
 #   范围号   15 处 = 旧语料 9 处 + 深审报告_v1.8.md 6 处（`3.10~5.96` 等性能区间）
-# 语料里新增一份文档就可能顶到上限，届时**必须人工复核新命中再调数**——
-# 这正是这道门禁想要的行为。
+# 语料里新增一份**行文类**文档就可能顶到上限，届时**必须人工复核新命中再调数**；
+# 但变更记录/审计报告属元文档（见 `_is_meta_doc`），不参与本口径 —— 它们书写的
+# 区间是"实测证据数字"，不是行文缺陷。
 CORPUS_ALLOWED_MAX = {"百分数区间": 12, "范围号": 20}
 
 
 def test_number_rules_corpus_hits_are_known_style_deviations():
     """真实语料回归：新数字规则的命中必须全部是白名单内的**真不规范写法**。"""
-    corpus = _doc_corpus()
+    corpus = [(name, text) for name, text in _doc_corpus()
+              if not _is_meta_doc(name)]
     unexpected = []
     counts: dict[str, int] = {}
     for rx, label, _reason, _conf in _v18_number_rules():

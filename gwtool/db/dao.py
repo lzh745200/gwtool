@@ -25,6 +25,16 @@ def text_hash(text: str) -> str:
     return hashlib.sha256("".join((text or "").split()).encode("utf-8")).hexdigest()
 
 
+def _like_escape(text: str) -> str:
+    """把用户输入转义成 LIKE 字面量（`%`/`_`/`\\` 在 LIKE 里是元字符）。
+
+    机关代字、档号前缀都可能来自输入框；不转义时 prefix='_' 会匹配任意单字，
+    "取下一个序号"就可能被顶到全库最大值（审计实测 next_doc_no('%') → 100 号）。
+    """
+    return (str(text or "").replace("\\", "\\\\")
+            .replace("%", "\\%").replace("_", "\\_"))
+
+
 # ---------------------------------------------------------------- dataclasses
 @dataclass
 class Document:
@@ -281,8 +291,18 @@ def _paragraph_update(doc_id: int, blocks_json: str, content_text: str,
     **任何异常都吞掉**：段落索引是派生数据，它没建好不该让"保存文档"失败。
     没建好的代价只是该篇要走"现场派生"（功能照常），而让保存失败是用户
     直接丢数据 —— 两者严重性不对等。
+
+    **体量预算（v1.10）**：在库篇数超过 `paragraph_index_max_docs` 时不建新
+    索引（详见 `paragraph_index_allowed` 的说明）；预算判定本身失败也按"允许"
+    处理 —— 宁可多建，也不能让一个设置读失败阻断文档保存。
     """
     try:
+        try:
+            allowed, _reason = paragraph_index_allowed()
+        except Exception:
+            allowed = True
+        if not allowed:
+            return
         from ..core.paragraph_ref import derive_blocks
         replace_paragraphs(dbconn.get_conn(), doc_id,
                            derive_blocks(blocks_json, content_text),
@@ -1338,25 +1358,171 @@ _DISPATCH_GROUPABLE = ("doc_type", "org", "status", "secret_level", "urgency",
                        "drafter", "approver")
 
 
-def add_dispatch(d: Dispatch) -> int:
-    conn = dbconn.get_conn()
+class DuplicateDocNoError(ValueError):
+    """发文字号已被占用（应用层唯一性）。
+
+    为什么不用 UNIQUE 索引兜底：`dispatch_register.doc_no` 在历史用户库里可能
+    已有重复（v1.9 前的取号竞态），直接加唯一索引会让老库**迁移失败**、程序
+    打不开；而应用层在写入事务内查重同样能拦住所有界面路径，且不改变库结构。
+    异常携带占用方记录，界面可据此给出"被谁占了"的可操作提示。
+    """
+
+    def __init__(self, doc_no: str, existing: "Dispatch | None" = None):
+        self.doc_no = (doc_no or "").strip()
+        self.existing = existing
+        where = ""
+        if existing is not None:
+            title = (existing.title or "未命名").strip()
+            where = f"（已被「{title}」占用，id={existing.id}）"
+        super().__init__(f"发文字号「{self.doc_no}」重复{where}")
+
+
+def _insert_dispatch(conn, d: Dispatch) -> int:
+    """插入一行（不提交），供 add_dispatch 与事务型写入复用。"""
     cols = ",".join(_DISPATCH_COLUMNS)
     marks = ",".join("?" * len(_DISPATCH_COLUMNS))
     cur = conn.execute(
         f"INSERT INTO dispatch_register({cols}) VALUES({marks})",
         [getattr(d, c) for c in _DISPATCH_COLUMNS])
-    conn.commit()
     return int(cur.lastrowid)
 
 
-def update_dispatch(d: Dispatch) -> None:
-    conn = dbconn.get_conn()
+def _update_dispatch(conn, d: Dispatch) -> None:
     assigns = ",".join(f"{c}=?" for c in _DISPATCH_COLUMNS)
     conn.execute(
         f"UPDATE dispatch_register SET {assigns},"
         f"updated_time=datetime('now','localtime') WHERE id=?",
         [getattr(d, c) for c in _DISPATCH_COLUMNS] + [d.id])
+
+
+def add_dispatch(d: Dispatch) -> int:
+    """登记一条发文（**不做重号检查**；界面写入请用 add_dispatch_unique）。
+
+    保留原语义是为了不改变"调用方已自行查重"的既有路径（汇编回填按
+    doc_id 幂等、导入脚本按外部数据落库），它们需要的是"按我给的原样写入"。
+    """
+    conn = dbconn.get_conn()
+    doc_id = _insert_dispatch(conn, d)
     conn.commit()
+    return doc_id
+
+
+def update_dispatch(d: Dispatch) -> None:
+    """更新一条发文（**不做重号检查**；界面写入请用 update_dispatch_unique）。"""
+    conn = dbconn.get_conn()
+    _update_dispatch(conn, d)
+    conn.commit()
+
+
+def find_dispatch_by_doc_no(doc_no: str, exclude_id: int = 0) -> Dispatch | None:
+    """按发文字号精确查找一条登记；exclude_id 用于"编辑自身"时排除自己。"""
+    text = (doc_no or "").strip()
+    if not text:
+        return None
+    conn = dbconn.get_conn()
+    sql = "SELECT * FROM dispatch_register WHERE doc_no=?"
+    params: list = [text]
+    if int(exclude_id or 0):
+        sql += " AND id<>?"
+        params.append(int(exclude_id))
+    sql += " ORDER BY id DESC LIMIT 1"
+    row = conn.execute(sql, params).fetchone()
+    return Dispatch(**dict(row)) if row else None
+
+
+def _lock_write(conn) -> None:
+    """开一个**立即持写锁**的事务（BEGIN IMMEDIATE）。
+
+    并发取号撞号的根因：Python sqlite3 的隐式事务是 DEFERRED —— 多个连接都能
+    在 BEGIN 之后先读到同一个 `max(serial)`，等到 INSERT 才抢写锁，于是拿到
+    同一个号。BEGIN IMMEDIATE 在事务开始就串行化写者，"读 max → 算号 → 插入"
+    整段因此成为原子操作（同进程多线程与多进程实例都适用）。
+    调用前若已有悬挂的隐式事务，先提交掉，否则 SQLite 报
+    "cannot start a transaction within a transaction"。
+    """
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+
+
+def add_dispatch_unique(d: Dispatch) -> int:
+    """登记发文：发文字号已被占用时抛 `DuplicateDocNoError`。
+
+    查重与插入在**同一个写事务**内完成，避免"查的时候没有、插的时候有了"。
+    """
+    conn = dbconn.get_conn()
+    _lock_write(conn)
+    try:
+        dup = _find_doc_no_locked(conn, d.doc_no)
+        if dup is not None:
+            raise DuplicateDocNoError(d.doc_no, dup)
+        doc_id = _insert_dispatch(conn, d)
+        conn.commit()
+        return doc_id
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def update_dispatch_unique(d: Dispatch) -> None:
+    """更新发文：改成已被占用的字号时抛 `DuplicateDocNoError`（排除自身）。"""
+    conn = dbconn.get_conn()
+    _lock_write(conn)
+    try:
+        dup = _find_doc_no_locked(conn, d.doc_no, exclude_id=int(d.id or 0))
+        if dup is not None:
+            raise DuplicateDocNoError(d.doc_no, dup)
+        _update_dispatch(conn, d)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _format_doc_no(prefix: str, year: str, serial: int) -> str:
+    return f"{(prefix or '').strip()}〔{int(year)}〕{int(serial)}号"
+
+
+def add_dispatch_auto(d: Dispatch, prefix: str, year: str = "") -> tuple[int, str]:
+    """原子取号 + 登记：返回 (id, 最终发文字号)。
+
+    "算下一个序号 → 组字号 → 插入"全在 BEGIN IMMEDIATE 内完成，并发调用不会
+    取到同一个号（这是审计里 4 线程 4 行同号的直接修复）。序号仍从
+    `max_doc_no_serial` 接续；万一历史脏数据让算出的号已被占用，则顺延重试。
+    """
+    conn = dbconn.get_conn()
+    _lock_write(conn)
+    try:
+        import datetime
+        y = str(year or datetime.date.today().year)
+        serial = max_doc_no_serial(prefix, y)
+        for _ in range(200):
+            serial += 1
+            doc_no = _format_doc_no(prefix, y, serial)
+            if _find_doc_no_locked(conn, doc_no) is None:
+                d.doc_no = doc_no
+                doc_id = _insert_dispatch(conn, d)
+                conn.commit()
+                return doc_id, doc_no
+        raise DuplicateDocNoError(_format_doc_no(prefix, y, serial))
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _find_doc_no_locked(conn, doc_no: str, exclude_id: int = 0) -> Dispatch | None:
+    """事务内查重（复用同一个连接，避免另开连接看不到未提交状态）。"""
+    text = (doc_no or "").strip()
+    if not text:
+        return None
+    sql = "SELECT * FROM dispatch_register WHERE doc_no=?"
+    params: list = [text]
+    if int(exclude_id or 0):
+        sql += " AND id<>?"
+        params.append(int(exclude_id))
+    sql += " ORDER BY id DESC LIMIT 1"
+    row = conn.execute(sql, params).fetchone()
+    return Dispatch(**dict(row)) if row else None
 
 
 def delete_dispatch(dispatch_id: int) -> None:
@@ -1480,17 +1646,25 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
     用 search 只取第一个，会**低估**已用序号（得 8 而非 12）→ 自动取号给出
     已用过的字号，台账出现重号。旧 docstring 写着「取最大」而代码只取首个，
     两者不一致；现按文档承诺改为真取最大。
+
+    prefix/year 都是输入框来源：LIKE 用 ESCAPE 转义（`%`/`_` 不再是通配符），
+    再用 `前缀+〕` 精确校验行首，防止「×政办发」把「×政办发函」的号算进来。
     """
     conn = dbconn.get_conn()
     rows = conn.execute(
-        "SELECT doc_no FROM dispatch_register WHERE doc_no LIKE ?",
-        (f"{prefix}%〔{year}〕%",)).fetchall()
+        "SELECT doc_no FROM dispatch_register WHERE doc_no LIKE ? ESCAPE '\\'",
+        (f"{_like_escape(prefix)}%〔{_like_escape(str(year))}〕%",)).fetchall()
+    head = re.compile(
+        rf"^\s*{re.escape((prefix or '').strip())}〔\s*{re.escape(str(year))}\s*〕")
     best = 0
     for r in rows:
+        text = r["doc_no"] or ""
+        if not head.match(text):
+            continue
         # 逐段取号：号段里混进异常长数字（误粘贴/脏数据）时只跳过该段，
         # 否则它会把"已用最大序号"顶成天文数字，自动取号随即给出 10^30 量级的号。
         # 注：这里不能用 try/int 兜底 —— `\d+` 捕获的一定是纯数字，int() 永不抛。
-        for tok in re.findall(r"〕\s*(\d+)\s*号", r["doc_no"] or ""):
+        for tok in re.findall(r"〕\s*(\d+)\s*号", text):
             if len(tok) > 9:
                 continue
             best = max(best, int(tok))
@@ -1737,6 +1911,79 @@ def pending_receive(due_within_days: int = 2, today: str = "") -> list[Receive]:
 
 
 # ---------------------------------------------------------------- paragraphs (v7)
+# ---------------------------------------------------------------- paragraphs (v7)
+# 段落索引体量上限（在库篇数）。0 = 不限（**缺省与 v1.9 行为一致**）。
+#
+# 为什么需要这个安全阀：段落索引把同一份正文在 `paragraphs` 与
+# `paragraphs_fts` 里各存一份，审计实测 3000 篇时库体积 +88.3%（规格验收线
+# 40%），且增量随正文线性增长 —— 小库上它换来一个数量级的检索提速，值得；
+# 大库上则是"用磁盘换毫秒"。段落索引本来就是**可缺失的派生数据**
+# （`paragraph_ref` 有现场派生兜底，见其模块头），因此"超过 N 篇就不建"
+# 是一个设计上允许、行为可解释的取舍，而不是功能残缺。
+#
+# 为什么默认不限：不改变既有用户的行为（大库升级后突然"搜索变慢"是更难
+# 解释的回归）。需要控盘的单位把设置改成阈值即可（如 1000）。
+#
+# 为什么不是"改 external content 省掉 content 副本"（P1-35 选项①，已评估未采用）：
+#   · external content 要求源表有与被索引列同名的 `tokenized` 列 —— 把那列加到
+#     paragraphs 表，只是把同一份分词文本从 FTS 挪进源表，**总体积不变**；
+#   · contentless（content=''）确实能省掉 content 副本，但逐行 DELETE 需要
+#     FTS5 的 contentless_delete=1（SQLite ≥ 3.43）；本项目的麒麟/Debian 11
+#     基线是 SQLite 3.34（Python 自带的 sqlite3 用系统库），该选项不可用，
+#     而 external content 的删除必须用 `'delete'` 命令回传旧分词值 —— 能实现，
+#     但要把所有删除/重建路径都改成手工维护索引，风险与收益不成比例。
+#   · 因此本批选择"体量预算 + 现场派生兜底"：大库不建索引，增量归零；
+#     小库照旧享受检索提速。
+PARA_INDEX_MAX_DOCS_KEY = "paragraph_index_max_docs"
+DEFAULT_PARA_INDEX_MAX_DOCS = 0
+
+
+def paragraph_index_max_docs() -> int:
+    """段落索引的篇数上限；0 表示不限。设置值非法/读库失败一律回落默认值。"""
+    try:
+        raw = get_setting(PARA_INDEX_MAX_DOCS_KEY,
+                          str(DEFAULT_PARA_INDEX_MAX_DOCS))
+        value = int(str(raw).strip() or 0)
+    except Exception:
+        return DEFAULT_PARA_INDEX_MAX_DOCS
+    return max(0, value)
+
+
+def paragraph_index_allowed(total_docs: int | None = None) -> tuple[bool, str]:
+    """当前是否应建/保留段落索引：返回 (允许, 不允许时的原因文案)。
+
+    `total_docs` 缺省时现查在库篇数；批量重建路径应把已知总数传进来，
+    避免 N 次 count。
+    """
+    limit = paragraph_index_max_docs()
+    if limit <= 0:
+        return True, ""
+    if total_docs is None:
+        total_docs = count_documents()
+    if total_docs > limit:
+        return False, (f"在库 {total_docs} 篇超过段落索引上限 {limit} 篇，"
+                       f"段落索引改为按需现场派生")
+    return True, ""
+
+
+def trim_paragraph_index(force: bool = False) -> dict:
+    """按预算清理段落索引（维护/体检入口用），返回 {"trimmed", "reason"}。
+
+    只删派生数据（paragraphs / paragraphs_fts / 状态行），不动 documents；
+    释放的空间由 SQLite 复用，若要立刻缩小文件需另行 VACUUM。
+    """
+    conn = dbconn.get_conn()
+    allowed, reason = paragraph_index_allowed()
+    if allowed and not force:
+        return {"trimmed": 0, "reason": ""}
+    before = int(conn.execute("SELECT count(*) FROM paragraphs").fetchone()[0])
+    conn.execute("DELETE FROM paragraphs_fts")
+    conn.execute("DELETE FROM paragraphs")
+    conn.execute("DELETE FROM fts_index_state WHERE kind='paragraphs'")
+    conn.commit()
+    return {"trimmed": before, "reason": reason or "手动清理"}
+
+
 # 段落是**派生数据**：源 = documents.blocks_json（块为空时回落按 content_text
 # 切分）。所有函数都建立在"随时可整表重建"这个前提上，因此这里没有、也不该有
 # 任何"段落数据不可再生"的假设。
@@ -1834,6 +2081,18 @@ def rebuild_paragraphs(progress_cb=None, incremental: bool = True) -> dict[str, 
         "SELECT id, blocks_json, content_text, text_hash FROM documents"
         " WHERE deleted_time=''").fetchall()
     total = len(rows)
+
+    # 体量预算（v1.10）：超上限就不建索引，并清掉旧索引把空间还给用户。
+    # 现场派生兜底在 core.paragraph_ref（索引是加速手段，不是正确性来源）。
+    allowed, reason = paragraph_index_allowed(total_docs=total)
+    if not allowed:
+        _tick(f"{reason}，正在清理旧的段落索引…")
+        conn.execute("DELETE FROM paragraphs_fts")
+        conn.execute("DELETE FROM paragraphs")
+        conn.execute("DELETE FROM fts_index_state WHERE kind='paragraphs'")
+        conn.commit()
+        return {"documents": 0, "paragraphs": 0, "rescanned": 0,
+                "skipped": 1, "reason": reason}
 
     if incremental:
         indexed = {int(r["doc_id"]) for r in conn.execute(

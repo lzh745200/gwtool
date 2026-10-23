@@ -1,22 +1,32 @@
 # -*- coding: utf-8 -*-
-"""大数据量性能基线（D4）。
+"""大数据量性能与**存储**基线（D4 / P1-35）。
 
 **为什么先做基线而不是直接加分页**：方案里 D4 的结论是"先量化再决定"。
 分页/懒加载/虚拟列表都要改 UI 数据流，是典型的"改了不一定有用、
-但一定引入新缺陷"的优化。先用数据回答两个问题再动手：
+但一定引入新缺陷"的优化。先用数据回答再动手：
 
   1. 资料库到几千篇时，列表构建到底慢多少？
   2. 全文检索（FTS5）随数据量增长的曲线如何？
+  3. 段落索引让库**真实**变大了多少（v1.10 起：WAL checkpoint + dbstat 页统计）？
 
 用法：
-    python scripts/bench_scale.py            # 默认 300 / 1000 / 3000 三档
-    python scripts/bench_scale.py 5000       # 指定档位
+    python scripts/bench_scale.py                    # 默认 300 / 1000 / 3000 三档
+    python scripts/bench_scale.py 5000               # 指定档位
+    python scripts/bench_scale.py --para-index-max=1000 3000
+        # 给临时库设「段落索引篇数上限」，观察超预算时的体积（0=不限）
+
+⚠ 体积口径（v1.10 修）：旧实现直接 `stat()` 主库文件，而 WAL 模式下刚写完的
+页还在 `-wal` 里没回主库 —— 于是 300/1000 档打印出 **0.0%**（假数据），
+3000 档才偶然越过 checkpoint 阈值显示 88.9%。现在每次测量前
+`PRAGMA wal_checkpoint(TRUNCATE)`，再用 `dbstat` 按表统计页数（连空闲页、
+各 FTS 影子表都算进去），数字可复现且能归因到具体表。
 
 脚本在**临时数据目录**里跑，不碰用户的真实库。
 """
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -33,6 +43,11 @@ from gwtool.db.schema import init_schema
 SAMPLE = ("为深入贯彻落实上级关于进一步加强和改进新形势下安全生产工作的"
           "各项部署要求，现就有关事项通知如下，请各部门结合实际抓好落实。")
 
+# 段落索引自己在 dbstat 里的表名（含 FTS5 影子表与段落表索引）
+_PARA_TABLES = ("paragraphs", "paragraphs_fts_content", "paragraphs_fts_data",
+                "paragraphs_fts_idx", "paragraphs_fts_docsize",
+                "paragraphs_fts_config", "idx_paragraphs_doc")
+
 
 def _timed(fn, *a, **kw):
     start = time.perf_counter()
@@ -40,13 +55,45 @@ def _timed(fn, *a, **kw):
     return time.perf_counter() - start, result
 
 
-def bench_one(n_docs: int) -> dict:
-    """在独立临时库里造 n_docs 篇文档，测各环节耗时。"""
+def _flush(conn) -> None:
+    """把 WAL 回写主库并截断：否则 `stat()` 量到的是不完整的库文件。
+
+    旧实现正是在这里出的错：刚 rebuild 完的页还在 -wal 里，主库文件没长，
+    于是算出 0.0% 的"零开销"假结论。
+    """
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        pass
+
+
+def _db_mb(path: Path) -> float:
+    return path.stat().st_size / 1024 / 1024
+
+
+def _dbstat_mb(conn) -> dict[str, float]:
+    """按表统计页占用（MB）；sqlite 未编译 dbstat 虚拟表时返回空 dict。"""
+    try:
+        rows = conn.execute(
+            "SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {str(r["name"]): (r["bytes"] or 0) / 1024 / 1024 for r in rows}
+
+
+def _para_mb(pages: dict[str, float]) -> float:
+    return sum(mb for name, mb in pages.items() if name in _PARA_TABLES)
+
+
+def bench_one(n_docs: int, para_index_max: int = 0) -> dict:
+    """在独立临时库里造 n_docs 篇文档，测各环节耗时与存储占用。"""
     tmp = Path(tempfile.mkdtemp(prefix="gwtool_bench_"))
     try:
         paths.set_app_data_dir(tmp)
         dbconn.configure(tmp / "bench.db")
         init_schema(dbconn.get_conn())
+        if para_index_max:
+            dao.set_setting(dao.PARA_INDEX_MAX_DOCS_KEY, str(int(para_index_max)))
 
         conn = dbconn.get_conn()
         insert_t, _ = _timed(_bulk_insert, conn, n_docs)
@@ -54,7 +101,9 @@ def bench_one(n_docs: int) -> dict:
         # 空索引上跑的，得到"0 ms 命中 0 条"的假数据。建索引的耗时不计入
         # 检索指标（真实场景中它发生在写入时，且只做一次）。
         _timed(dao.rebuild_fts)
-        db_mb_before = (tmp / "bench.db").stat().st_size / 1024 / 1024
+        _flush(conn)
+        db_mb_before = _db_mb(tmp / "bench.db")
+        pages_before = _dbstat_mb(conn)
 
         # **预热**：jieba 首次调用要加载词典（数百毫秒）。不预热的话
         # 第一档（300 篇）会把这段固定开销算进检索耗时，得到
@@ -69,12 +118,19 @@ def bench_one(n_docs: int) -> dict:
         para_second_t, para_second = _timed(dao.rebuild_paragraphs)
         dao.search_paragraphs_fts("预热", 5)
         para_search_t, para_hits = _timed(dao.search_paragraphs_fts, "安全生产", 30)
-        db_mb = (tmp / "bench.db").stat().st_size / 1024 / 1024
+        _flush(conn)
+        db_mb = _db_mb(tmp / "bench.db")
+        pages_after = _dbstat_mb(conn)
 
         list_t, rows = _timed(dao.list_documents)
         content_t, rows2 = _timed(dao.list_documents, include_content=True)
         search_t, hits = _timed(dao.search_documents, "安全生产")
         count_t, total = _timed(dao.count_documents)
+
+        para_mb = _para_mb(pages_after)
+        total_pages_mb = sum(pages_after.values()) if pages_after else db_mb
+        growth_pct = ((db_mb - db_mb_before) / db_mb_before * 100
+                      if db_mb_before > 0 else 0.0)
         return {
             "docs": n_docs,
             "insert_s": insert_t,
@@ -88,10 +144,19 @@ def bench_one(n_docs: int) -> dict:
             "count": total,
             "db_mb": db_mb,
             "db_mb_before_para": db_mb_before,
+            "growth_pct": growth_pct,
+            "para_mb": para_mb,
+            "total_pages_mb": total_pages_mb,
+            "para_share_pct": (para_mb / total_pages_mb * 100
+                               if total_pages_mb else 0.0),
+            "pages_before": pages_before,
+            "pages_after": pages_after,
             "para_build_s": para_build_t,
             "para_second_s": para_second_t,
             "para_rescanned2": para_second.get("rescanned", -1),
             "para_count": para_counts.get("paragraphs", 0),
+            "para_skipped": int(para_counts.get("skipped", 0)),
+            "para_reason": para_counts.get("reason", ""),
             "para_search_ms": para_search_t * 1000,
             "para_hits": len(para_hits),
         }
@@ -118,22 +183,38 @@ def _bulk_insert(conn, n_docs: int) -> int:
     return n_docs
 
 
+def _parse_args(argv: list) -> tuple[list[int], int]:
+    sizes: list[int] = []
+    para_max = 0
+    for arg in argv[1:]:
+        if arg.startswith("--para-index-max="):
+            try:
+                para_max = max(0, int(arg.split("=", 1)[1]))
+            except ValueError:
+                para_max = 0
+        elif arg.isdigit():
+            sizes.append(int(arg))
+    return sizes or [300, 1000, 3000], para_max
+
+
 def main(argv: list) -> int:
-    sizes = [int(a) for a in argv[1:] if a.isdigit()] or [300, 1000, 3000]
-    print("大数据量性能基线（临时库，不影响用户数据）")
-    print("-" * 74)
+    sizes, para_max = _parse_args(argv)
+    print("大数据量性能与存储基线（临时库，不影响用户数据）")
+    if para_max:
+        print(f"（本次设置段落索引上限 = {para_max} 篇）")
+    print("-" * 78)
     header = (f"{'文档数':>7} {'入库(s)':>9} {'列表(ms)':>10} "
               f"{'含正文(ms)':>12} {'检索(ms)':>10} {'计数(ms)':>9} {'库(MB)':>8}")
     print(header)
-    print("-" * 74)
+    print("-" * 78)
     results = []
     for n in sizes:
-        r = bench_one(n)
+        r = bench_one(n, para_index_max=para_max)
         results.append(r)
         print(f"{r['docs']:>7} {r['insert_s']:>9.2f} {r['list_ms']:>10.1f} "
               f"{r['list_content_ms']:>12.1f} {r['search_ms']:>10.1f} "
               f"{r['count_ms']:>9.1f} {r['db_mb']:>8.1f}")
-    print("-" * 74)
+    print("-" * 78)
 
     # 结论：按"是否需要在 UI 上做分页"给出可执行的判断
     worst = max(results, key=lambda r: r["list_ms"])
@@ -152,30 +233,46 @@ def main(argv: list) -> int:
 
     # v7 段落参考：回填耗时、体积增量、段落检索与幂等性
     print("\n段落参考（v7）基线")
-    print("-" * 74)
+    print("-" * 78)
     print(f"{'文档数':>7} {'段落数':>8} {'回填(s)':>9} {'二次(s)':>9} "
-          f"{'重切':>5} {'检索(ms)':>10} {'命中':>6} {'体积+%':>8}")
-    print("-" * 74)
+          f"{'重切':>5} {'检索(ms)':>10} {'命中':>6} {'增量%':>8} "
+          f"{'段落占库%':>10} {'索引':>6}")
+    print("-" * 78)
     for r in results:
-        before = r["db_mb_before_para"] or 1e-9
-        growth = (r["db_mb"] - before) / before * 100
+        index_state = "跳过" if r["para_skipped"] else "建立"
         print(f"{r['docs']:>7} {r['para_count']:>8} {r['para_build_s']:>9.2f} "
               f"{r['para_second_s']:>9.3f} {r['para_rescanned2']:>5} "
-              f"{r['para_search_ms']:>10.1f} {r['para_hits']:>6} {growth:>8.1f}")
-    print("-" * 74)
-    worst_para = max(results, key=lambda r: r["para_build_s"])
-    print(f"最长全量回填：{worst_para['para_build_s']:.1f} s"
-          f"（{worst_para['docs']} 篇 / {worst_para['para_count']} 段）"
-          "　—— 注意：它在**后台线程**执行，不阻塞 UI")
-    worst_psearch = max(results, key=lambda r: r["para_search_ms"])
-    print(f"最长段落检索：{worst_psearch['para_search_ms']:.1f} ms"
-          f"（{worst_psearch['docs']} 篇，命中 {worst_psearch['para_hits']} 段）")
-    idem_ok = all(r["para_rescanned2"] == 0 for r in results)
-    print(f"增量幂等（第二次重切数应为 0）：{'通过' if idem_ok else '不通过'}")
-    worst_growth = max((r["db_mb"] - r["db_mb_before_para"])
-                       / (r["db_mb_before_para"] or 1e-9)
-                       for r in results) * 100
-    print(f"段落索引体积增量：{worst_growth:.1f}%（验收线 < 40%）")
+              f"{r['para_search_ms']:>10.1f} {r['para_hits']:>6} "
+              f"{r['growth_pct']:>8.1f} {r['para_share_pct']:>10.1f} "
+              f"{index_state:>6}")
+    print("-" * 78)
+    print("口径：增量% =（checkpoint 后主库大小差 / 加段落索引前大小）；"
+          "段落占库% = dbstat 段落相关表页数 / 全库页数。")
+    built = [r for r in results if not r["para_skipped"]]
+    if built:
+        worst_para = max(built, key=lambda r: r["para_build_s"])
+        print(f"最长全量回填：{worst_para['para_build_s']:.1f} s"
+              f"（{worst_para['docs']} 篇 / {worst_para['para_count']} 段）"
+              "　—— 注意：它在**后台线程**执行，不阻塞 UI")
+        worst_psearch = max(built, key=lambda r: r["para_search_ms"])
+        print(f"最长段落检索：{worst_psearch['para_search_ms']:.1f} ms"
+              f"（{worst_psearch['docs']} 篇，命中 {worst_psearch['para_hits']} 段）")
+        idem_ok = all(r["para_rescanned2"] == 0 for r in built)
+        print(f"增量幂等（第二次重切数应为 0）：{'通过' if idem_ok else '不通过'}")
+        worst_growth = max(built, key=lambda r: r["growth_pct"])
+        print(f"段落索引体积增量：{worst_growth['growth_pct']:.1f}%"
+              f"（{worst_growth['docs']} 篇，验收线 < 40%）")
+        worst_share = max(built, key=lambda r: r["para_share_pct"])
+        print(f"段落索引占库：{worst_share['para_share_pct']:.1f}%"
+              f"（{worst_share['docs']} 篇）")
+        if worst_growth["growth_pct"] >= 40:
+            print("→ 增量超验收线：正文在 documents / documents_fts / paragraphs /"
+                  " paragraphs_fts 各存一份，这是结构性的；控盘手段是设置"
+                  "「段落索引上限」（--para-index-max=N），超限时改为现场派生。")
+    skipped = [r for r in results if r["para_skipped"]]
+    for r in skipped:
+        print(f"→ {r['docs']} 篇：段落索引已跳过（{r['para_reason']}），"
+              f"增量 {r['growth_pct']:.1f}%，检索走现场派生。")
     return 0
 
 

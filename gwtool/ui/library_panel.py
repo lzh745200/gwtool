@@ -2,7 +2,7 @@
 """左侧资料库面板：分类树 + 标签 + 文档列表 + 全文检索 + 附件/回收站入口。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout,
                                QHeaderView,
@@ -17,6 +17,16 @@ from ..ui.widgets import EmptyState, ask, info, warn
 from .material_dialogs import AttachmentDialog, RecycleBinDialog
 
 
+def _is_subsequence(needle: list[int], haystack: list[int]) -> bool:
+    """needle 是否为 haystack 的子序列（顺序保持、可不连续）。
+
+    文档列表增量刷新用它区分三种情况：老 id 是新表的子序列（纯新增）、
+    新 id 是老表的子序列（纯删除）；两者都不是才是真乱序（需要整表重建）。
+    """
+    it = iter(haystack)
+    return all(item in it for item in needle)
+
+
 class LibraryPanel(QWidget):
     """信号：open_document(int)、import_requested()、search_requested(str) 由
     搜索框回车触发（主窗口联动右侧参考面板）。"""
@@ -26,9 +36,25 @@ class LibraryPanel(QWidget):
     # 检索结果单次最多展示的篇数。超出时底部文案会如实写"共 N 篇，显示前 100 篇"
     # —— 硬截断本身可以接受（列表控件不适合塞几千项），**不告诉用户被截断**不行。
     _SEARCH_LIMIT = 100
+    # 输入停止后多久再检索（毫秒）。逐字符全库检索在 3000 篇规模下每次约 10ms，
+    # 但连续输入会叠加成可感知的卡顿；250ms 是"人已经停下、又不会觉得迟"的折中。
+    _SEARCH_DEBOUNCE_MS = 250
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 增量刷新缓存（v1.10.0）：分类树结构签名/节点索引、文档列表行签名。
+        # 结构/行内容没变时只更新计数或跳过，避免每次增删改都全量重建控件。
+        self._cat_sig = None
+        self._root_item = None
+        self._cat_items: dict[int, QTreeWidgetItem] = {}
+        self._doc_sig = None
+        # 上一次同步后的行（id → (id, 文本, 提示)），用于只给"真正变了"的行
+        # 调 QListWidget.item()/setText()（3000 行逐行取 item 约 30ms，只改 1 行
+        # 时没必要付这个成本）。
+        self._doc_rows_by_id: dict[int, tuple[int, str, str]] | None = None
+        # 当前列表的 id 顺序缓存：增量比对不必逐行回调 QListWidget.item()
+        # （3000 行约 30ms）。检索会整表清空，届时置 None 强制重读。
+        self._doc_ids: list[int] | None = None
         self._build_ui()
         self.reload()
 
@@ -43,6 +69,13 @@ class LibraryPanel(QWidget):
         self.search_box.setObjectName("search_box")
         self.search_box.setPlaceholderText("全文检索（回车搜索，Esc 清空，F3 聚焦）")
         self.search_box.returnPressed.connect(self._on_search)
+        # 输入防抖：只在用户**编辑**（textEdited）时排定检索；setText/Esc 等
+        # 程序性改动不触发，保持既有"回车才搜"的确定性，也避免测试里挂定时器。
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(self._SEARCH_DEBOUNCE_MS)
+        self._search_timer.timeout.connect(self._on_search)
+        self.search_box.textEdited.connect(self._schedule_search)
         # §6.3：检索框左侧放大镜图标 + Esc 一键清空
         from . import icons
         ic = icons.icon("search")
@@ -144,36 +177,42 @@ class LibraryPanel(QWidget):
 
     # ------------------------------------------------ 内部
     def _fill_categories(self):
-        self.cat_tree.clear()
-        root = QTreeWidgetItem(["全部文档", ""])
-        root.setData(0, Qt.UserRole, None)
-        self.cat_tree.addTopLevelItem(root)
+        """刷新分类树：结构未变只更新计数，结构变化才重建并恢复展开/选中。
+
+        v1.9.0 的实现在每次增删改/导入后都 ``clear()`` 重建整棵树并在末尾
+        ``setCurrentItem(root)`` —— 3000 篇规模下实测 318ms，且用户展开的
+        分支被收起、选中项被打回「全部文档」。现在：
+          · 分类的 (id, 名称, 父级, 排序) 签名不变 → 只查两次计数并写两列文本；
+          · 签名变化（新建/重命名/删除分类）→ 重建树，但恢复展开状态与当前选中。
+        """
         cats = dao.list_categories()
-        by_parent: dict[int, list] = {}
-        for c in cats:
-            by_parent.setdefault(c.parent_id, []).append(c)
-        nodes: dict[int, QTreeWidgetItem] = {}
-        # 计数（§6.3）：一次查询取各分类在库篇数，再自下而上累加到父节点
-        counts = {}
+        sig = tuple((c.id, c.name, c.parent_id, getattr(c, "sort", 0))
+                    for c in cats)
+        if (sig == self._cat_sig and self._root_item is not None
+                and self.cat_tree.topLevelItemCount() > 0):
+            self._apply_category_counts(cats)
+            return
+        self._rebuild_category_tree(cats, sig)
+
+    def _category_counts(self, cats) -> tuple[int, dict[int, int]]:
+        """一次查询取各分类篇数，自下而上累加；返回 (在库总数, 各节点计数)。"""
         try:
             counts = dao.count_documents_by_category()
         except Exception:
             counts = {}
+        by_parent: dict[int, list] = {}
+        for c in cats:
+            by_parent.setdefault(c.parent_id, []).append(c)
         own: dict[int, int] = {c.id: counts.get(c.id, 0) for c in cats}
-
-        def add_children(parent_item, parent_id):
-            for c in by_parent.get(parent_id, []):
-                node = QTreeWidgetItem([c.name, ""])
-                node.setData(0, Qt.UserRole, c.id)
-                parent_item.addChild(node)
-                nodes[c.id] = node
-                add_children(node, c.id)
-
-        add_children(root, 0)
+        memo: dict[int, int] = {}
 
         def total(cat_id: int) -> int:
-            return own.get(cat_id, 0) + sum(
+            if cat_id in memo:
+                return memo[cat_id]
+            value = own.get(cat_id, 0) + sum(
                 total(ch.id) for ch in by_parent.get(cat_id, []))
+            memo[cat_id] = value
+            return value
 
         # 「全部文档」必须是**在库总篇数**。count_documents_by_category() 按分类
         # 聚合且只统计 category_id>0，未分类文档不在返回里 —— 用 sum(own) 会让
@@ -182,16 +221,65 @@ class LibraryPanel(QWidget):
             root_total = dao.count_documents()
         except Exception:
             root_total = sum(own.values())
-        root.setText(1, str(root_total))
-        root.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+        return root_total, {c.id: total(c.id) for c in cats}
+
+    def _apply_category_counts(self, cats) -> None:
+        """只改两列计数，不重建节点（保留展开状态与选中，O(分类数)）。"""
+        if self._root_item is None:
+            return
+        root_total, totals = self._category_counts(cats)
+        self._root_item.setText(1, str(root_total))
+        self._root_item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
         for c in cats:
-            node = nodes.get(c.id)
+            node = self._cat_items.get(c.id)
             if node is None:
                 continue
-            node.setText(1, str(total(c.id)))
+            node.setText(1, str(totals.get(c.id, 0)))
             node.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-        root.setExpanded(True)
-        self.cat_tree.setCurrentItem(root)
+
+    def _expanded_category_ids(self) -> set[int]:
+        return {cid for cid, node in self._cat_items.items() if node.isExpanded()}
+
+    def _rebuild_category_tree(self, cats, sig) -> None:
+        """结构变化时重建分类树，并恢复用户展开的分支与当前选中分类。"""
+        expanded = self._expanded_category_ids()
+        current_id = self.current_category()
+        by_parent: dict[int, list] = {}
+        for c in cats:
+            by_parent.setdefault(c.parent_id, []).append(c)
+
+        # 重建期间屏蔽信号：clear() 会先把 currentItem 变空，不禁用会触发
+        # 一次"无选中"的 _reload_docs（3000 篇下约 186ms 的无谓全量刷新）。
+        self.cat_tree.blockSignals(True)
+        try:
+            self.cat_tree.clear()
+            root = QTreeWidgetItem(["全部文档", ""])
+            root.setData(0, Qt.UserRole, None)
+            self.cat_tree.addTopLevelItem(root)
+            self._root_item = root
+            self._cat_items: dict[int, QTreeWidgetItem] = {}
+
+            def add_children(parent_item, parent_id):
+                for c in by_parent.get(parent_id, []):
+                    node = QTreeWidgetItem([c.name, ""])
+                    node.setData(0, Qt.UserRole, c.id)
+                    parent_item.addChild(node)
+                    self._cat_items[c.id] = node
+                    add_children(node, c.id)
+
+            add_children(root, 0)
+            self._apply_category_counts(cats)
+            root.setExpanded(True)
+            for cid, node in self._cat_items.items():
+                if cid in expanded:
+                    node.setExpanded(True)
+            self._cat_sig = sig
+        finally:
+            self.cat_tree.blockSignals(False)
+        # 恢复选中（删除分类时回落到根节点）。这里只触发一次 _reload_docs；
+        # 文档列表若没变会在 _sync_doc_list 里直接返回。
+        target = self._cat_items.get(current_id) if current_id is not None else root
+        self.cat_tree.setCurrentItem(target if target is not None else root)
 
     def _reload_docs(self):
         cat = self.current_category()
@@ -200,13 +288,15 @@ class LibraryPanel(QWidget):
         types = sorted({(d.file_type or "文本") for d in docs})
         cur_type = self.type_filter.currentText()
         self.type_filter.blockSignals(True)
-        self.type_filter.clear()
-        self.type_filter.addItem("全部类型")
-        for t in types:
-            self.type_filter.addItem(t)
-        if cur_type in types:
-            self.type_filter.setCurrentText(cur_type)
-        self.type_filter.blockSignals(False)
+        try:
+            self.type_filter.clear()
+            self.type_filter.addItem("全部类型")
+            for t in types:
+                self.type_filter.addItem(t)
+            if cur_type in types:
+                self.type_filter.setCurrentText(cur_type)
+        finally:
+            self.type_filter.blockSignals(False)
         if self.type_filter.currentText() != "全部类型":
             docs = [d for d in docs
                     if (d.file_type or "文本") == self.type_filter.currentText()]
@@ -218,11 +308,15 @@ class LibraryPanel(QWidget):
         elif key == "按最近更新":
             docs.sort(key=lambda d: (d.updated_time or d.import_time or ""),
                       reverse=True)
-        self.doc_list.clear()
+        self._sync_doc_list(self._build_doc_rows(docs))
+
+    def _build_doc_rows(self, docs) -> list[tuple[int, str, str]]:
+        """把文档对象转成列表行 (id, 主文本, 悬停提示)，便于增量比对。"""
         try:
             att_counts = dao.attachment_counts([d.id for d in docs])
         except Exception:
             att_counts = {}
+        rows: list[tuple[int, str, str]] = []
         for d in docs:
             # §6.3：首行标题（列表自动省略），副行放字数/时间等次要信息。
             # "附件N"等既有信息一并保留在副行（外部依赖其文本，如附件测试）。
@@ -234,13 +328,117 @@ class LibraryPanel(QWidget):
                 meta += f" · {when}"
             if d.tags:
                 meta += "  " + d.tags.replace(",", " #").replace("，", " #")
-            item = QListWidgetItem(f"{d.title}\n    {meta}")
-            item.setData(Qt.UserRole, d.id)
-            item.setToolTip(f"{d.title}\n{meta}\n标签：{d.tags or '无'}")
-            self.doc_list.addItem(item)
-        if not docs:
+            text = f"{d.title}\n    {meta}"
+            tip = f"{d.title}\n{meta}\n标签：{d.tags or '无'}"
+            rows.append((d.id, text, tip))
+        return rows
+
+    @staticmethod
+    def _make_doc_item(row: tuple[int, str, str]) -> QListWidgetItem:
+        doc_id, text, tip = row
+        item = QListWidgetItem(text)
+        item.setData(Qt.UserRole, doc_id)
+        item.setToolTip(tip)
+        return item
+
+    def _sync_doc_list(self, rows: list[tuple[int, str, str]]) -> None:
+        """把文档列表同步到 rows：完全相同跳过、同序改文本、增删只动相关行。
+
+        全量重建 3000 项 QListWidgetItem 实测约 140ms；标签/重命名/附件变化
+        只需要改文本，导入/删除只需插入/移除受影响行。只有排序、类型筛选或
+        跨分类移动这类真正改变顺序的操作才走整表重建（并恢复选中与滚动）。
+        """
+        sig = tuple(rows)
+        if sig == self._doc_sig:
+            return
+        if (self._doc_ids is not None
+                and len(self._doc_ids) == self.doc_list.count()):
+            current_ids = list(self._doc_ids)
+        else:
+            current_ids = [self.doc_list.item(i).data(Qt.UserRole)
+                           for i in range(self.doc_list.count())]
+        new_ids = [r[0] for r in rows]
+        previous = self._doc_rows_by_id
+        if current_ids == new_ids:
+            self._update_doc_item_texts(rows, previous)
+        elif _is_subsequence(current_ids, new_ids):
+            # 纯新增（导入新文档）：老行顺序不变，只把新行插到对应位置
+            self._insert_doc_rows(rows, current_ids)
+            self._update_doc_item_texts(rows, previous)
+        elif _is_subsequence(new_ids, current_ids):
+            # 纯删除：只移除消失的行
+            self._remove_doc_rows(current_ids, set(new_ids))
+            self._update_doc_item_texts(rows, previous)
+        else:
+            # 排序/筛选/跨分类移动：整表重建（新行文本已随构造写入，无需再改）
+            self._rebuild_doc_list(rows)
+        self._doc_sig = sig
+        self._doc_rows_by_id = {row[0]: row for row in rows}
+        self._doc_ids = new_ids
+        if rows:
+            self._empty_no_data.set_visible(False)
+            self._empty_no_match.set_visible(False)
+        else:
             self._add_empty_hint()
-        self._set_count_text(f"{len(docs)} 篇")
+        self._set_count_text(f"{len(rows)} 篇")
+
+    def _update_doc_item_texts(self, rows: list[tuple[int, str, str]],
+                               previous: dict[int, tuple] | None = None) -> None:
+        """只更新与上一次同步结果不同的行（未变行不碰 QListWidget）。"""
+        for index, row in enumerate(rows):
+            if previous is not None and previous.get(row[0]) == row:
+                continue
+            item = self.doc_list.item(index)
+            if item is None:
+                continue
+            if item.text() != row[1]:
+                item.setText(row[1])
+            if item.toolTip() != row[2]:
+                item.setToolTip(row[2])
+
+    def _insert_doc_rows(self, rows: list[tuple[int, str, str]],
+                         current_ids: list[int]) -> None:
+        """rows 是 current_ids 的超序列：只把新行插到对应位置，老行原样保留。"""
+        pos = 0
+        for index, row in enumerate(rows):
+            if pos < len(current_ids) and row[0] == current_ids[pos]:
+                pos += 1
+                continue
+            self.doc_list.insertItem(index, self._make_doc_item(row))
+
+    def _remove_doc_rows(self, current_ids: list[int],
+                         keep_ids: set[int]) -> None:
+        """new_ids 是 current_ids 的子序列：从后往前摘掉消失的行。"""
+        for index in range(len(current_ids) - 1, -1, -1):
+            if current_ids[index] not in keep_ids:
+                self.doc_list.takeItem(index)
+
+    def _rebuild_doc_list(self, rows: list[tuple[int, str, str]]) -> None:
+        selected = set(self.selected_doc_ids())
+        current = self.doc_list.currentItem()
+        current_id = current.data(Qt.UserRole) if current is not None else None
+        scroll = self.doc_list.verticalScrollBar().value()
+        self.doc_list.blockSignals(True)
+        self.doc_list.setUpdatesEnabled(False)
+        try:
+            self.doc_list.clear()
+            for row in rows:
+                self.doc_list.addItem(self._make_doc_item(row))
+        finally:
+            self.doc_list.setUpdatesEnabled(True)
+            self.doc_list.blockSignals(False)
+        if selected:
+            for index in range(self.doc_list.count()):
+                item = self.doc_list.item(index)
+                if item is not None and item.data(Qt.UserRole) in selected:
+                    item.setSelected(True)
+        if current_id is not None:
+            for index in range(self.doc_list.count()):
+                item = self.doc_list.item(index)
+                if item is not None and item.data(Qt.UserRole) == current_id:
+                    self.doc_list.setCurrentItem(item)
+                    break
+        self.doc_list.verticalScrollBar().setValue(scroll)
 
     def select_document(self, doc_id: int) -> bool:
         """在材料列表里选中并滚动到指定文档；找不到返回 False。
@@ -302,9 +500,18 @@ class LibraryPanel(QWidget):
         """列表选中项变化 → 刷新底部工具行的多选计数（§6.3）。"""
         self._set_count_text(getattr(self, "_count_base", "0 篇"))
 
+    def _schedule_search(self, _text: str = "") -> None:
+        """输入防抖：用户停止输入 250ms 后才真正检索（回车仍立即检索）。"""
+        self._search_timer.start()
+
     def _on_search(self):
+        self._search_timer.stop()
         kw = self.search_box.text().strip()
         self.doc_list.clear()
+        # 检索结果与分类列表是两种内容：清掉行签名，回到分类列表时强制重算。
+        self._doc_sig = None
+        self._doc_rows_by_id = None
+        self._doc_ids = None
         if not kw:
             self._reload_docs()
             return

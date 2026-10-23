@@ -198,6 +198,19 @@ class DispatchForm(QDialog):
             self._show_form_problems(problems)
             warn(self, "登记信息有误：\n" + "\n".join(f"· {p}" for p in problems))
             return
+        # 发文字号唯一性（P1-29）：库层没有唯一索引（历史库可能已有重复，
+        # 加索引会让老库迁移失败），唯一性由应用层在**保存前**判，并把
+        # "被谁占了"如实告诉用户；用户可一键改用顺延出来的空闲号。
+        problem = registry.uniqueness_problem(rec)
+        if problem:
+            suggest = registry.suggest_for_duplicate(rec)
+            if suggest and ask(self, f"{problem}\n\n是否改用「{suggest}」保存？"):
+                self.ed_doc_no.setText(suggest)
+                rec.doc_no = suggest
+            else:
+                self._show_form_problems([problem])
+                warn(self, problem)
+                return
         self.lbl_form_error.setVisible(False)
         self.accept()
 
@@ -506,11 +519,35 @@ class RegistryDialog(QDialog, SourceOpenMixin):
         self.open_document.emit(doc_id)
 
     # ------------------------------------------------ 操作
+    def _save_record(self, rec: dao.Dispatch, *, is_new: bool) -> bool:
+        """写库并对"并发抢占重号"给出可操作提示；返回是否写入成功。
+
+        表单里已经查过一次重号；这里再兜一次是因为**查重与写入之间仍有窗口**
+        （另一个进程/后台线程刚插入同号）。DAO 的 `*_unique` 在 BEGIN
+        IMMEDIATE 事务内再查一次，把窗口关死。
+        """
+        for attempt in range(2):
+            try:
+                if is_new:
+                    dao.add_dispatch_unique(rec)
+                else:
+                    dao.update_dispatch_unique(rec)
+                return True
+            except dao.DuplicateDocNoError as exc:
+                suggest = registry.suggest_for_duplicate(rec)
+                if suggest and attempt == 0 and ask(
+                        self, f"{exc}\n\n是否改用「{suggest}」后重试？"):
+                    rec.doc_no = suggest
+                    continue
+                warn(self, f"{exc}\n\n请修改发文字号后重试。")
+                return False
+        return False
+
     def add_record(self) -> None:
         form = DispatchForm(self)
         if form.exec() == QDialog.DialogCode.Accepted:
-            dao.add_dispatch(form.value())
-            self.reload()
+            if self._save_record(form.value(), is_new=True):
+                self.reload()
 
     def edit_selected(self) -> None:
         ids = self._selected_ids()
@@ -524,8 +561,8 @@ class RegistryDialog(QDialog, SourceOpenMixin):
             return
         form = DispatchForm(self, rec)
         if form.exec() == QDialog.DialogCode.Accepted:
-            dao.update_dispatch(form.value())
-            self.reload()
+            if self._save_record(form.value(), is_new=False):
+                self.reload()
 
     def delete_selected(self) -> None:
         ids = self._selected_ids()
