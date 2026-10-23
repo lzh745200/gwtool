@@ -70,7 +70,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from urllib.robotparser import RobotFileParser
 
 # ---------------------------------------------------------------- 常量与站点表
 DEFAULT_USER_AGENT = (
@@ -297,14 +296,144 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-# ---------------------------------------------------------------- robots
+# ---------------------------------------------------------------- robots（RFC 9309 自实现）
+# 为什么不用 `urllib.robotparser`：它的规则选择语义**随 Python 版本变化** ——
+# CPython 3.13 起按 RFC 9309 取"最长匹配"，3.9/3.11 取"第一条匹配规则"。
+# 我们的 fixture「`Allow: /` + `Disallow: /zhengce/content/blocked.htm`」在 3.13
+# 被正确拒绝、在 3.9/3.11 却被放行；而生产目标（麒麟）就是 Python 3.9 ——
+# 等于线上会误抓 robots 禁止的页面，属合规缺陷。判定必须与运行时无关，故自实现：
+#   · 按 `User-agent` 分组；组适用 = token 为 `*` 或 token（小写）出现在 UA 中；
+#   · Allow/Disallow 路径支持 `*` 通配与结尾 `$`（正则转义实现）；
+#   · 取所有适用规则里"匹配路径最长"者；等长时 `Allow` 优先；无匹配 → 允许；
+#   · `Crawl-delay` 取所有适用组的最大 delay。
+def _robots_pattern_regex(pattern: str) -> "re.Pattern[str]":
+    """把 robots 路径模式编译成正则（`*` 任意串；结尾 `$` 表示锚定到末尾）。"""
+    anchored = pattern.endswith("$")
+    body = pattern[:-1] if anchored else pattern
+    expr = ".*".join(re.escape(part) for part in body.split("*"))
+    return re.compile("^" + expr + ("$" if anchored else ""))
+
+
+def _robots_rule_match(pattern: str, path: str) -> int:
+    """规则命中返回"匹配到的路径长度"（-1 未命中）；越长越优先。"""
+    if not pattern:
+        return -1
+    try:
+        matched = _robots_pattern_regex(pattern).match(path)
+    except re.error:
+        return -1
+    return matched.end() if matched else -1
+
+
+def parse_robots(text: str) -> dict:
+    """按 RFC 9309 解析 robots.txt（**与 Python 版本无关**）。
+
+    返回 ``{"groups": [{"agents": [...], "rules": [(pattern, allow)],
+    "crawl_delay": ...}], "crawl_delay": 全文件最大 delay}``。
+    非法行/未知字段忽略；`Disallow:`/`Allow:` 空值不生成规则（= 不限制）。
+    """
+    groups: list[dict] = []
+    agents: list[str] = []
+    rules: list[tuple[str, bool]] = []
+    delay: "float | None" = None
+    started = False
+
+    def flush() -> None:
+        nonlocal agents, rules, delay, started
+        if started and agents:
+            groups.append({"agents": agents, "rules": rules,
+                           "crawl_delay": delay})
+        agents, rules, delay, started = [], [], None, False
+
+    for raw in (text or "").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "user-agent":
+            if started:
+                flush()
+            if value:
+                agents.append(value)
+            continue
+        if key in ("allow", "disallow"):
+            if not agents:
+                continue              # 规则出现在任何 User-agent 之前：非法，忽略
+            started = True
+            if value:                 # 空值 = 不限制，不生成规则
+                rules.append((value, key == "allow"))
+            continue
+        if key == "crawl-delay":
+            if not agents:
+                continue
+            started = True
+            try:
+                num = float(value)
+            except ValueError:
+                continue
+            delay = num if delay is None else max(delay, num)
+    flush()
+    all_delays = [g["crawl_delay"] for g in groups
+                  if g["crawl_delay"] is not None]
+    return {"groups": groups,
+            "crawl_delay": max(all_delays) if all_delays else None}
+
+
+def _robots_selected_groups(groups: "list[dict]",
+                            user_agent: str) -> "list[dict]":
+    """选出适用组：token 为 `*`，或 token（小写）出现在 UA（小写）中。
+
+    RFC 9309：存在 UA 专属组时以**最具体**（最长 token）的组为准；否则用 `*` 组。
+    """
+    ua = (user_agent or "").lower()
+    specific: list[tuple[int, dict]] = []
+    wildcard: list[dict] = []
+    for group in groups:
+        for agent in group.get("agents") or ():
+            token = str(agent).strip().lower()
+            if not token:
+                continue
+            if token == "*":
+                wildcard.append(group)
+            elif token in ua:
+                specific.append((len(token), group))
+    if specific:
+        best = max(length for length, _g in specific)
+        return [g for length, g in specific if length == best]
+    return wildcard
+
+
+def robots_allows(robots: dict, user_agent: str, url: str) -> bool:
+    """按 robots 判定单个 URL 是否可抓（版本无关的 RFC 9309 判定）。
+
+    `robots` 为 `fetch_robots()` 的返回值；无声明/无适用规则时放行。
+    """
+    groups = robots.get("groups") or []
+    selected = _robots_selected_groups(groups, user_agent)
+    if not selected:
+        return True
+    path = urllib.parse.urlsplit(url).path or "/"
+    best_len = -1
+    best_allow = True
+    for group in selected:
+        for pattern, allow in group.get("rules") or ():
+            matched = _robots_rule_match(pattern, path)
+            if matched < 0:
+                continue
+            if matched > best_len or (matched == best_len and allow):
+                best_len, best_allow = matched, allow
+    return True if best_len < 0 else best_allow
+
+
 def fetch_robots(list_url: str, *, user_agent: str,
                  timeout: float = DEFAULT_TIMEOUT_S,
                  limiter: "RateLimiter | None" = None) -> dict:
-    """取同源 robots.txt 并解析。
+    """取同源 robots.txt 并解析（判定用自实现 RFC 9309，不依赖 Python 版本）。
 
-    返回 dict：url / state(ok|missing|unreachable) / parser / crawl_delay / note。
-    - ok：拿到并解析；
+    返回 dict：url / state(ok|missing|unreachable) / groups / crawl_delay / note。
+    - ok：拿到并解析（groups 供 `robots_allows()` 使用）；
     - missing：HTTP 4xx（按 RFC 9309 视为"没有声明"，允许抓取）；
     - unreachable：网络错误/5xx（真实采集会终止，dry-run 仅提示）。
     """
@@ -320,30 +449,18 @@ def fetch_robots(list_url: str, *, user_agent: str,
         missing = "HTTP 4" in message
         return {"url": robots_url,
                 "state": "missing" if missing else "unreachable",
-                "parser": None, "crawl_delay": None,
+                "groups": [], "parser": None, "crawl_delay": None,
                 "note": ("未找到 robots.txt（4xx）→ 视为无声明"
                          if missing else f"无法获取 robots.txt：{message}")}
-    parser = RobotFileParser()
-    parser.parse(text.splitlines())
-    try:
-        crawl_delay = parser.crawl_delay(user_agent)
-    except Exception:
-        crawl_delay = None
-    return {"url": robots_url, "state": "ok", "parser": parser,
-            "crawl_delay": crawl_delay,
-            "note": f"robots 已获取（Crawl-delay={crawl_delay}）"
-                    if crawl_delay else "robots 已获取"}
-
-
-def robots_allows(robots: dict, user_agent: str, url: str) -> bool:
-    """按 robots 判定单个 URL 是否可抓（无声明/解析失败时放行并留痕）。"""
-    parser = robots.get("parser")
-    if parser is None:
-        return True
-    try:
-        return bool(parser.can_fetch(user_agent, url))
-    except Exception:
-        return True
+    parsed = parse_robots(text)
+    selected = _robots_selected_groups(parsed["groups"], user_agent)
+    delays = [g["crawl_delay"] for g in selected
+              if g["crawl_delay"] is not None]
+    crawl_delay = max(delays) if delays else None
+    return {"url": robots_url, "state": "ok", "groups": parsed["groups"],
+            "parser": None, "crawl_delay": crawl_delay,
+            "note": (f"robots 已获取（适用组 Crawl-delay={crawl_delay}）"
+                     if crawl_delay else "robots 已获取（RFC 9309 最长匹配判定）")}
 
 
 # ---------------------------------------------------------------- HTML → 纯文本
@@ -805,9 +922,10 @@ def _print_dry_run(args, site_cfg: dict, site_name: str, *, robots: dict,
         print("robots：跳过（--offline：本次不发起任何网络请求）")
     else:
         print(f"robots：{robots['url']} → {robots['state']}（{robots['note']}）")
-        if robots.get("parser") is not None:
+        if robots["state"] in ("ok", "missing"):
             allowed = robots_allows(robots, _user_agent(args, site_cfg), list_url)
-            print(f"        列表页 robots 判定：{'允许' if allowed else '禁止'}")
+            print(f"        列表页 robots 判定：{'允许' if allowed else '禁止'}"
+                  "（RFC 9309 最长匹配，版本无关）")
     auth_text = (authorization_id(auth) if auth is not None
                  else ("无需授权（公开政府文本，仅受 robots 约束）"
                        if not site_cfg["restricted"] else "缺失"))

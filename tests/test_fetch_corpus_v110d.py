@@ -367,6 +367,128 @@ def test_robots_unreachable_aborts_real_run(mod, monkeypatch, capsys, tmp_path):
     assert not out.exists()
 
 
+# ---- RFC 9309 判定（版本无关）：不再经过 urllib.robotparser ----
+RFC_UA = "gwtool-corpus-bot/1.0 (+local research)"
+
+
+def _robots_from_text(mod, text):
+    parsed = mod.parse_robots(text)
+    return {"state": "ok", "url": "https://www.gov.cn/robots.txt",
+            "groups": parsed["groups"], "crawl_delay": parsed["crawl_delay"],
+            "note": "test"}
+
+
+def _fetch_robots_from_text(mod, monkeypatch, text, user_agent=RFC_UA):
+    def fake_get(url, *, timeout=10.0, user_agent=""):
+        return 200, text
+
+    monkeypatch.setattr(mod, "_http_get", fake_get)
+    return mod.fetch_robots("https://www.gov.cn/zhengce/", user_agent=user_agent)
+
+
+def test_robots_broad_allow_before_narrow_disallow_is_denied(mod):
+    """CI 红灯回归：`Allow: /` 在前、窄 Disallow 在后 → 仍必须禁止。
+
+    旧实现直接调 urllib.robotparser.can_fetch：3.9/3.11 取"第一条匹配规则"
+    （Allow: / 命中 → 放行被禁页），3.13 才按 RFC 9309 最长匹配。生产目标是
+    麒麟 Python 3.9，这属于**线上会误抓 robots 禁止页面**的合规缺陷。
+    """
+    text = ("User-agent: *\nAllow: /\n"
+            "Disallow: /zhengce/content/blocked.htm\n")
+    robots = _robots_from_text(mod, text)
+    blocked = "https://www.gov.cn/zhengce/content/blocked.htm"
+    ok = "https://www.gov.cn/zhengce/content/ok.htm"
+    assert mod.robots_allows(robots, RFC_UA, blocked) is False
+    assert mod.robots_allows(robots, RFC_UA, ok) is True
+    # 规则顺序无关
+    reversed_text = ("User-agent: *\nDisallow: /zhengce/content/blocked.htm\n"
+                     "Allow: /\n")
+    assert mod.robots_allows(_robots_from_text(mod, reversed_text),
+                             RFC_UA, blocked) is False
+    # 判定必须与本机 Python 版本无关：模块内不再使用 RobotFileParser
+    import inspect
+
+    assert not hasattr(mod, "RobotFileParser")
+    assert "RobotFileParser" not in inspect.getsource(mod)
+    assert "can_fetch" not in inspect.getsource(mod)
+
+
+def test_robots_disallow_root_with_public_allow_by_longest_match(mod):
+    """`Disallow: /` + `Allow: /public/`：/public/x 放行（更长匹配）、其余禁。"""
+    robots = _robots_from_text(mod, "User-agent: *\nDisallow: /\nAllow: /public/\n")
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/public/x") is True
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/private") is False
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/") is False
+
+
+def test_robots_wildcards_and_end_anchor(mod):
+    """`*` 通配与结尾 `$` 锚定。"""
+    text = ("User-agent: *\nDisallow: /*.pdf$\n"
+            "Disallow: /tmp/*/secret\nDisallow: /x*y\n")
+    robots = _robots_from_text(mod, text)
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/a/b.pdf") is False
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/a/b.pdfx") is True
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/tmp/d/secret") is False
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/tmp/d/public") is True
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/xABCy") is False
+
+
+def test_robots_user_agent_specific_group_wins(mod):
+    """UA 专属组优先于 `*`；更具体（更长 token）的组优先；UA 大小写不敏感。"""
+    text = ("User-agent: *\nDisallow: /\n\n"
+            "User-agent: gwtool-corpus-bot\nAllow: /\n")
+    robots = _robots_from_text(mod, text)
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/a") is True
+    assert mod.robots_allows(robots, "other-bot/1.0",
+                             "https://www.gov.cn/a") is False
+
+    text2 = ("User-agent: gwtool\nDisallow: /\n\n"
+             "User-agent: gwtool-corpus-bot\nAllow: /\n")
+    robots2 = _robots_from_text(mod, text2)
+    assert mod.robots_allows(robots2, "GWTOOL-Corpus-Bot/2",
+                             "https://www.gov.cn/a") is True
+
+
+def test_robots_empty_or_no_rules_allows_all(mod):
+    """空 robots / 只有注释 / 空 Disallow 值 / 4xx 无声明 → 全部放行。"""
+    assert mod.parse_robots("")["groups"] == []
+    assert mod.robots_allows({"state": "ok", "groups": [],
+                              "crawl_delay": None}, RFC_UA,
+                             "https://www.gov.cn/any") is True
+    assert mod.parse_robots("# only comments\nSitemap: https://x/s.xml\n")["groups"] == []
+    assert mod.robots_allows(_robots_from_text(mod, "User-agent: *\nDisallow:\n"),
+                             RFC_UA, "https://www.gov.cn/x") is True
+    assert mod.robots_allows({"state": "missing", "groups": [],
+                              "crawl_delay": None}, RFC_UA,
+                             "https://www.gov.cn/x") is True
+
+
+def test_robots_equal_length_allow_wins(mod):
+    """同一 URL 同时命中等长的 Allow/Disallow → Allow 优先（与规则顺序无关）。"""
+    for text in ("User-agent: *\nDisallow: /x\nAllow: /x\n",
+                 "User-agent: *\nAllow: /x\nDisallow: /x\n"):
+        robots = _robots_from_text(mod, text)
+        assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/x") is True
+        assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/x/y") is True
+
+
+def test_robots_crawl_delay_takes_max_of_applicable_groups(mod, monkeypatch):
+    """Crawl-delay 取**适用组**的最大值（不是全文件最大值）。"""
+    text = ("User-agent: *\nCrawl-delay: 120\nDisallow: /x\n\n"
+            "User-agent: gwtool-corpus-bot\nCrawl-delay: 5\nAllow: /\n\n"
+            "User-agent: gwtool-corpus-bot\nCrawl-delay: 30\nAllow: /y\n")
+    robots = _fetch_robots_from_text(mod, monkeypatch, text)
+    assert robots["state"] == "ok"
+    assert robots["crawl_delay"] == 30.0, robots
+    assert mod.robots_allows(robots, RFC_UA, "https://www.gov.cn/anything") is True
+    assert mod.effective_delay_s(2.0, mod.SITES["gov"],
+                                 robots["crawl_delay"]) == 30.0
+
+    robots2 = _fetch_robots_from_text(
+        mod, monkeypatch, "User-agent: *\nCrawl-delay: 7\nDisallow: /a\n")
+    assert robots2["crawl_delay"] == 7.0
+
+
 # ---------------------------------------------------------------- 限速
 def test_rate_limiter_enforces_minimum_interval(mod):
     """start-to-start 间隔：相邻两次请求的**发起时刻**至少相隔 delay。"""
