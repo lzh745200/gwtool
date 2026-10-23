@@ -14,7 +14,6 @@ import base64
 import hashlib
 import http.client
 import json
-import os
 import subprocess
 import sys
 import time
@@ -78,18 +77,48 @@ def is_skipped_dir(name: str) -> bool:
     return False
 
 
+def _git_visible_files(root: Path) -> list[str]:
+    """**git 会纳入版本控制的文件**：已跟踪 + 未跟踪但未被 .gitignore 忽略。
+
+    为什么不再遍历文件系统（2026-10-24 事故）：`scan_local` 原先 `os.walk` 全盘
+    收集，只用一份**人工维护的目录名单**过滤；而 `.gitignore` 里排除的
+    `doc/corpus/**`（真实公文语料与 AUTHORIZATION.json）不在那份名单里，
+    于是 `--auto` 把 85 个语料文件推上了**公开仓库**。教训：忽略规则只能有一个
+    事实源 —— git 自己。这里直接问 git，`.gitignore`/全局 exclude 全部自动生效。
+    """
+    files: list[str] = []
+    for args in (["ls-files", "-z"],
+                 ["ls-files", "-z", "--others", "--exclude-standard"]):
+        proc = subprocess.run(["git", *args], cwd=str(root),
+                              capture_output=True, timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "无法读取 git 文件清单（请在仓库内运行）："
+                + proc.stderr.decode("utf-8", "replace")[:200])
+        files.extend(p for p in proc.stdout.decode("utf-8", "replace").split("\0")
+                     if p)
+    return files
+
+
 def scan_local(root: Path = Path(".")) -> dict[str, bytes]:
-    """收集本地待比对文件的相对路径与内容。"""
+    """收集本地待上传文件：**只含 git 可见文件**（尊重 .gitignore）。
+
+    历史：① 跳过名单漂移导致 .venv64/packs 全量上传（2026-09-13）；
+    ② build_new/dist_new 再犯（2026-09-22）；③ `.gitignore` 里的语料被推上
+    公开仓库（2026-10-24）。前两次靠扩充名单，第三次改为**以 git 为准**。
+    """
     import fnmatch
     out: dict[str, bytes] = {}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not is_skipped_dir(d)]
-        for name in filenames:
-            if any(fnmatch.fnmatch(name, pat) for pat in SKIP_FILE_PATTERNS):
-                continue
-            full = Path(dirpath) / name
-            rel = full.relative_to(root).as_posix()
-            out[rel] = full.read_bytes()
+    for rel in _git_visible_files(root):
+        full = root / rel
+        if not full.is_file():
+            continue
+        parts = Path(rel).parts
+        if any(is_skipped_dir(part) for part in parts):
+            continue
+        if any(fnmatch.fnmatch(full.name, pat) for pat in SKIP_FILE_PATTERNS):
+            continue
+        out[rel] = full.read_bytes()
     return out
 
 

@@ -45,3 +45,10 @@ node_modules/
 !/doc/corpus/README.md
 !/doc/corpus/采集合规检查表.md
 !/doc/corpus/AUTHORIZATION.example.json
+
+# ---- 开发期临时产物（评测/归因报告等，不入库）----
+/artifacts/
+
+# ---- 开发期临时脚本（API 推送等，不入库）----
+/.tmp_*
+.tmp_*

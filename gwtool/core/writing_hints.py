@@ -48,6 +48,13 @@ _LAYER_RE = re.compile(
 _DATE_RE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 # 主送机关行：句末冒号且不含句号（"各市人民政府："这类）
 _RECIPIENT_RE = re.compile(r"^\s*[^\n。；]{2,30}[：:]\s*$", re.M)
+# 发文字号（「国办发〔2026〕28号」）：公文形态的硬标志之一
+_DOC_NO_RE = re.compile(r"〔\s*\d{4}\s*〕\s*\d+\s*号")
+# 引号内内容（弯引号/直角引号成对）。引语是**原话**，口语化判定要跳过它 ——
+# 新闻/讲话里的「道路一定要搞清楚」是引用，不是作者用语贫乏（v1.14-220）。
+_QUOTED_TEXT_RE = re.compile(r"[“「『][^”」』\n]{0,300}[”」』]")
+# 《…》内的文件名（引用既有文件时的规范重复，不算用语贫乏）
+_DOC_TITLE_RE = re.compile(r"《([^》\n]{2,60})》")
 # 完成时限的**文本级**判据（P1-22）。槽位规则只认「N 个工作日内」，而公文
 # 布置任务时更常用日期式写法（「9月20日前」「本月底前」「年底前」）—— 只认
 # 前一种会把最规范的通知判成"未识别到完成时限"。
@@ -287,7 +294,7 @@ def hints(text: str, kind: str = "") -> list[Hint]:
         (_layer_hints, (text,)),
         (_title_hints, (text,)),
         (_element_hints, (text, kind)),
-        (_cohesion_hints, (text,)),
+        (_cohesion_hints, (text, kind)),
         (_paragraph_hints, (text,)),
         (_style_hints, (text, kind)),
         (_vague_hints, (text,)),
@@ -318,6 +325,35 @@ def _empty_hint(kind: str) -> Hint:
                 "info")
 
 
+def _has_closing(text: str, head: str, closing: str) -> bool:
+    """正文是否已有结束语（v1.14）。
+
+    判据从"骨架那一句是否逐字出现"放宽为"任一等价写法"：真实公文的收束句
+    远不止一种（「请认真贯彻执行」「妥否，请批示」），只认骨架句会把规范公文
+    判成"缺少结束语"（warn 级误报，校准前 6/35 篇全部命中此项）。
+
+    「印发/转发类通知」直接视作已有：这类公文的功能是印发附件，正文以落款＋
+    附件收束，本来就不写结束语（真实国办文件即如此），要求补「特此通知」是错的。
+    """
+    if closing and closing in text:
+        return True
+    if any(mark in head for mark in W.PRINT_NOTICE_MARKS):
+        return True
+    if any(mark in text[-300:] for mark in W.CLOSING_OPTIONAL_TAIL):
+        return True                     # 以附件收束，结束语非必需
+    return any(word in text for word in W.CLOSING_ACCEPT)
+
+
+def _looks_formal(head: str, text: str, kind: str) -> bool:
+    """文本是否具备公文形态 —— 只用来决定**要不要按骨架扣要素**（warn）。
+
+    判据取"标题自报文种"或"有发文字号"：真实公文标题必含文种（「…的通知」），
+    发文字号与之互为佐证。**不能用"有主送机关行"**：新闻报道里的
+    「他说：」这种对话行也满足主送机关的行形态，会把非公文判成公文。
+    """
+    return bool((kind and kind in head) or _DOC_NO_RE.search(text))
+
+
 def _structure_hints(text: str, kind: str) -> list[Hint]:
     """骨架对照：只在**该文种骨架确实要求**的要素缺失时才提示。"""
     out: list[Hint] = []
@@ -329,10 +365,15 @@ def _structure_hints(text: str, kind: str) -> list[Hint]:
         if o.title_hint and kind not in head:
             out.append(Hint("结构", "标题未包含文种",
                             f"该文种标题通常写作「{o.title_hint}」", "info"))
-        if o.closing and o.closing not in text:
+        # warn 只在"确实是公文"时发：语料里一篇军报通讯的副标题是
+        # 「——来自北部战区海军某潜艇部队的报告」，detect_kind 据此判成"报告"，
+        # 于是被要求补「特此报告。」与成文日期 —— 两条 warn 都是纯误报。
+        formal = _looks_formal(head, text, kind)
+        if formal and o.closing and not _has_closing(text, head, o.closing):
             out.append(Hint("结构", "缺少结束语",
-                            f"建议补上「{o.closing}」", "warn"))
-        if o.signature and not _DATE_RE.search(text):
+                            f"建议补上「{o.closing}」（或「请遵照执行」等等价写法）",
+                            "warn"))
+        if formal and o.signature and not _DATE_RE.search(text):
             out.append(Hint("结构", "缺少成文日期",
                             "落款处应写明成文日期（如「2026年10月3日」）", "warn"))
         if o.recipient and not _RECIPIENT_RE.search("\n".join(lines[:4])):
@@ -348,7 +389,16 @@ def _element_hints(text: str, kind: str) -> list[Hint]:
     时限判定是"槽位 ＋ 文本级正则"双判据：槽位只认「N 个工作日内」，日期式
     写法（「9月20日前」「本月底前」「年底前」）由 ``_DEADLINE_RE`` 兜底。
     两者都判据明确，不拿单字「前」兜底，避免把真缺失静默成"已写"。
+
+    **只对公文做要素审查**（v1.14）：kind 明确是 7 种无固定模板文体（讲话、
+    经验材料、理论文章…）时直接返回空 —— 成文日期/主送机关/完成时限本就不是
+    这些文体的必需要素。校准实测：35 篇真实语料里 9 篇被报「未识别到日期」、
+    3 篇「未识别到单位名称」、4 篇「未识别到完成时限」，全部来自新闻稿与
+    理论文章，属纯噪声。kind 为空（用户尚未选文种）时维持原行为，
+    因为那正是"起草阶段该补要素"的提示场景。
     """
+    if kind and not _is_legal_kind(kind):
+        return []
     try:
         from . import paragraph_ref
         slots = paragraph_ref.extract_slots(text)
@@ -371,12 +421,22 @@ def _element_hints(text: str, kind: str) -> list[Hint]:
     return out
 
 
-def _cohesion_hints(text: str) -> list[Hint]:
-    """衔接与结构：长段未分层、全文仅一段且过长（逐段检查见 ``_paragraph_hints``）。"""
+def _cohesion_hints(text: str, kind: str = "") -> list[Hint]:
+    """衔接与结构：长段未分层、全文仅一段且过长（逐段检查见 ``_paragraph_hints``）。
+
+    「正文分层不明显」加**文体门槛**（v1.14-220）：kind 明确是 7 种无固定模板
+    文体（新闻通讯、理论文章、讲话整理稿…）时不出这条。语料依据：220 篇真实
+    语料里这条命中 175 篇（80%），且**全部**来自军报/求是（junbao 114、
+    qstheory 61），国务院公文 18 篇 0 命中 —— 因为媒体文章本来就不用
+    「一、（一）1.」组织，提示"用层级词组织"对它们不成立。
+    kind 为空（起草阶段尚未选文种）时仍然提示：那正是最需要它的场景。
+    """
     out: list[Hint] = []
     paras = [ln for ln in text.split("\n") if len(ln.strip()) > 0]
     body = [ln for ln in paras if len(ln.strip()) > 40]
-    if len(body) >= W.PARA_LAYER_MIN and not _LAYER_RE.search(text):
+    gate_open = (not kind) or _is_legal_kind(kind)
+    if (gate_open and len(body) >= W.PARA_LAYER_MIN
+            and not _LAYER_RE.search(text)):
         out.append(Hint("衔接", "正文分层不明显",
                         "段落较多时建议用「一、」「（一）」「1.」「一是」等层级词组织",
                         "info"))
@@ -592,6 +652,11 @@ def _layer_hints(text: str) -> list[Hint]:
     经验材料、调研报告、经验总结最主要的写法。现在只在出现更浅层级序号
     （即换了父级）时复位；同一父级内重新从「一是」起算按合法重启处理，
     与「（一）」「1.」一致，避免对"另起一组枚举"刷假提示。
+
+    **不再因换父级而硬复位**（v1.14 校准修）：真实「国办发」意见常把二级
+    序号（一）～（十七）**跨一级标题连续编号**（二、下面（一）～（四），
+    三、下面接着（五）），硬复位会把（五）判成"跳号"。现在只保留"从 1
+    重起算"这条放行规则，连续编号自然满足 expected。
     """
     out: list[Hint] = []
     markers = _collect_layer_markers(text)
@@ -606,11 +671,6 @@ def _layer_hints(text: str) -> list[Hint]:
         first_seen.setdefault(level, order)
         if value <= 0:
             continue
-        # 出现更浅层级序号 → 更深一层的序号重新从 1 开始（父级换了）
-        for deeper in range(level + 1, 5):
-            next_val[deeper] = 1
-            last_val[deeper] = 0
-            last_label[deeper] = ""
         expected = next_val[level]
         if value == expected:
             issue = ""
@@ -659,28 +719,38 @@ def _layer_hints(text: str) -> list[Hint]:
 
 # ---------------------------------------------------------------- 检查 5：标点密度
 def _punct_hints(text: str) -> list[Hint]:
-    """感叹号/问号/省略号过量提示（公文以陈述为主）。"""
+    """感叹号/问号/省略号过量提示（公文以陈述为主）。
+
+    两条判据取或（v1.14-220）：
+      * **总量**：超过 ``W.PUNCT_*_TOTAL``（长文里偶发的引语/设问不触发）；
+      * **密度**：超过 ``W.PUNCT_DENSITY`` 个/千字（短稿里 3 个问号也是语气成灾，
+        只看总量会漏掉它——真实语料既有 24 字的短稿，也有 3000 字的长文）。
+    """
     out: list[Hint] = []
     lines = _body_lines(text)
     body = "\n".join(lines)
+    chars = max(1, len(body))
+
+    def _over(count: int, total: int) -> bool:
+        return count >= total or count * 1000.0 / chars >= W.PUNCT_DENSITY
 
     exclaim = body.count("！") + body.count("!")
     if exclaim:
         max_para = max((ln.count("！") + ln.count("!") for ln in lines), default=0)
-        if exclaim >= W.PUNCT_EXCLAIM_TOTAL or max_para >= W.PUNCT_PARA_MAX:
+        if _over(exclaim, W.PUNCT_EXCLAIM_TOTAL) or max_para >= W.PUNCT_PARA_MAX:
             out.append(Hint(
                 "文风", "感叹号使用偏多",
                 f"全文 {exclaim} 个、单段最多 {max_para} 个；公文以陈述为主，"
                 "建议改用句号或调整语气", "info"))
 
     question = body.count("？") + body.count("?")
-    if question >= W.PUNCT_QUESTION_TOTAL:
+    if _over(question, W.PUNCT_QUESTION_TOTAL):
         out.append(Hint(
             "文风", "问号使用偏多",
             f"全文 {question} 个；除讲话稿的有意设问外，建议改为陈述句", "info"))
 
     ellipsis = len(re.findall(r"…{2,}|\.{3,}|。{3,}", body))
-    if ellipsis >= W.PUNCT_ELLIPSIS_TOTAL:
+    if _over(ellipsis, W.PUNCT_ELLIPSIS_TOTAL):
         out.append(Hint(
             "文风", "省略号使用偏多",
             f"全文 {ellipsis} 处；公文一般不用省略号（引文省略除外），建议写全", "info"))
@@ -692,7 +762,13 @@ def _vague_hints(text: str) -> list[Hint]:
     """模糊表述：复用 style_data.BAD_WORDS，并补充公文高频模糊词。
 
     只提示"可进一步具体化"，不判错；BAD_WORDS 的既有文案（「用语偏空泛：X」）
-    与文风口径保持不变。
+    与文风口径保持不变（不设门槛、不设上限）。
+
+    ``W.VAGUE_WORDS`` 那张表**加出现门槛**（v1.14 降噪）：单次出现的「有关」
+    「进一步」在真实公文里是规范用法（「国务院各有关部门」「进一步全面深化
+    改革」），逐词必报等于每篇刷 2–5 条无关痛痒的建议。门槛取
+    「≥ VAGUE_MIN_COUNT 次 或 密度 ≥ VAGUE_DENSITY‰」——重复出现才叫"偏空泛"。
+    短稿因密度天然高仍会提示，起草阶段的逐条提醒不受影响。
     """
     out: list[Hint] = []
     seen: set[str] = set()
@@ -707,12 +783,16 @@ def _vague_hints(text: str) -> list[Hint]:
             seen.add(word)
             out.append(Hint("文风", f"用语偏空泛：{word}", advice, "info"))
     # 新增：公文高频模糊词（每种一次，避免「进一步」这类极常用词刷屏）
+    chars = max(1, len(text))
     extra = 0
     for word, advice in W.VAGUE_WORDS.items():
         if extra >= W.VAGUE_MAX_HINTS:
             break
         if word in seen or not word or word not in text:
             continue
+        count = text.count(word)
+        if count < W.VAGUE_MIN_COUNT and count * 1000.0 / chars < W.VAGUE_DENSITY:
+            continue                    # 只出现一两次 → 属正常用法，不打扰
         seen.add(word)
         extra += 1
         out.append(Hint("文风", f"用语偏空泛：{word}", advice, "info"))
@@ -720,8 +800,14 @@ def _vague_hints(text: str) -> list[Hint]:
 
 
 def _colloquial_hints(text: str) -> list[Hint]:
-    """口语化/网络化表达 → 提示改写（长词优先匹配，避免「搞好」重复命中「搞」）。"""
+    """口语化/网络化表达 → 提示改写（长词优先匹配，避免「搞好」重复命中「搞」）。
+
+    v1.14-220：**引号内的原话跳过** —— 新闻/讲话引用群众原话（「道路一定要
+    搞清楚」）时，口语是**引语**不是作者的用语习惯，改它等于改别人的话。
+    只在引号外出现才算"用语口语化"。
+    """
     body = "\n".join(_body_lines(text))
+    body = _QUOTED_TEXT_RE.sub("", body)          # 引语保留原话，不参与判定
     # 固定搭配先整体剔除，避免「弄虚作假」「东西部」这类正式表述误报
     for allowed in W.COLLOQUIAL_ALLOW:
         body = body.replace(allowed, "")
@@ -747,12 +833,23 @@ def _colloquial_hints(text: str) -> list[Hint]:
     for _at, word in positions:
         if word in emitted:
             continue
+        # 单字口语词（搞/弄/啥…）要求不止一次：一处「搞训练」「搞清楚」不足以
+        # 判"用语口语化"，实测 220 篇里 15/23 的「搞」只是单次出现。
+        if len(word) == 1 and body.count(word) < W.COLLOQUIAL_SINGLE_MIN_COUNT:
+            continue
         emitted.add(word)
         out.append(Hint("用语", f"口语化表达：{word}",
                         W.COLLOQUIAL_WORDS[word], "info"))
         if len(out) >= W.COLLOQUIAL_MAX_HINTS:
             break
     return out
+
+
+#: n-gram 扫描时把非汉字替换成的**断点**标记。**不能直接删掉**（v1.14 修）：
+#: 删掉会把被数字/标点隔开的汉字段拼成假短语 —— 实测条例末尾的
+#: 「2026年8月30日中华人民共和国国务院令第XXX号」被拼成
+#: 「年月日中华人民共和国国务院令第号」，成了 16 字的"重复短语"。
+_NGRAM_BREAK = "\u0000"
 
 
 # ---------------------------------------------------------------- 检查 8：重复短语
@@ -762,6 +859,7 @@ def _longest_stable_phrase(plain: str, gram: str,
 
     只保留所有出现位置都共有的扩展：这样报出的短语次数是准确的，也不会
     因为某两处恰好同头就把 4 字搭配扩成"安全生产是"这类半截搭配。
+    扩展遇到 ``_NGRAM_BREAK``（数字/标点断点）即停止，不跨字段拼接。
     """
     phrase = gram
     active = list(spots)
@@ -773,7 +871,7 @@ def _longest_stable_phrase(plain: str, gram: str,
         if len(nxt) != count:
             break
         ch = plain[active[0] + width]
-        if any(plain[p + width] != ch for p in nxt):
+        if ch == _NGRAM_BREAK or any(plain[p + width] != ch for p in nxt):
             break
         phrase += ch
         active = [p for p in active if p + width < len(plain)]
@@ -783,26 +881,70 @@ def _longest_stable_phrase(plain: str, gram: str,
         if len(prev) != count:
             break
         ch = plain[active[0] - 1]
-        if any(plain[p - 1] != ch for p in prev):
+        if ch == _NGRAM_BREAK or any(plain[p - 1] != ch for p in prev):
             break
         phrase = ch + phrase
         active = [p - 1 for p in active]
     return phrase, count
 
 
+def _heading_terms(text: str) -> str:
+    """取首行标题（去掉 Markdown 标记）—— 标题里的词组视为主题词。
+
+    只把**标题形态**的首行当标题：不以句末标点收尾、长度在扫描上限内。
+    否则单行草稿（整段就是一行）会把整篇当"标题"，所有短语都因"出现在标题里"
+    被豁免——那样重复用语检查会静默失效（实测：一条用例因此从"报"变"不报"）。
+    """
+    for raw in (text or "").split("\n"):
+        ln = _MD_HEAD_RE.sub("", raw.strip())
+        ln = _MD_MARK_RE.sub("", ln).strip()
+        if not ln:
+            continue
+        if len(ln) > W.TITLE_MAX_SCAN or ln.endswith(("。", "！", "？", "；")):
+            return ""                    # 更像正文首段，不是标题
+        return ln
+    return ""
+
+
+def _document_titles(text: str) -> set[str]:
+    """文本里引用过的文件名（《…》内的书名/文件名）。
+
+    公文引用既有文件时会把文件名（《政府信息公开条例》《全民健身计划…》）
+    在一段里写两三遍，那是**规范的引用写法**，不是用语贫乏。校准实测：
+    220 篇里重复用语残留 179 条，抽样后大半是文件名的反复引用。
+    """
+    return {m.group(1).strip() for m in _DOC_TITLE_RE.finditer(text or "")}
+
+
 def _repeat_hints(text: str) -> list[Hint]:
-    """同一段内 4 字以上短语重复出现 ≥2 次 → 用语贫乏提示。"""
+    """同一段内 4 字以上短语重复 ≥``PHRASE_REPEAT_MIN_COUNT`` 次 → 用语贫乏提示。
+
+    v1.14 校准后的四条收窄（每条都有真实语料依据）：
+      1. **断点不复用**：n-gram 只在被数字/标点隔开的汉字段内算（``_NGRAM_BREAK``），
+         否则会被拼出「年月日中华人民共和国国务院令第号」这类假短语；
+      2. **标题主题词不报**：公文要求主题词全文统一（「政府信息」「伟大长征精神」
+         本就是全文反复使用的对象），出现在标题里的短语不判"用语贫乏"；
+      3. **首尾虚词不报**：「和国务院」「了中国共产党」「上闪耀在」是切词事故，
+         不是重复短语（``W.PHRASE_EDGE_BLOCK``）；
+      4. **≥3 次才报**：一段内出现两次在公文里是常态（专名＋回指）。
+    """
     out: list[Hint] = []
     length = W.PHRASE_REPEAT_LEN
+    head = _heading_terms(text)
+    doc_titles = _document_titles(text)
     for para_no, para in enumerate(_body_lines(text), 1):
         if len(para) < length * 2:
             continue
-        plain = _NGRAM_KEEP_RE.sub("", para)[: W.PHRASE_SCAN_MAX_CHARS]
+        # 非汉字**替换**为断点（1:1 替换，长度不变），不删除 —— 删除会跨字段拼短语
+        plain = _NGRAM_KEEP_RE.sub(_NGRAM_BREAK, para)[: W.PHRASE_SCAN_MAX_CHARS]
         if len(plain) < length * 2:
             continue
         positions: dict[str, list[int]] = {}
         for i in range(len(plain) - length + 1):
-            positions.setdefault(plain[i:i + length], []).append(i)
+            gram = plain[i:i + length]
+            if _NGRAM_BREAK in gram:
+                continue
+            positions.setdefault(gram, []).append(i)
         candidates: dict[str, int] = {}
         for gram, spots in positions.items():
             if len(spots) < W.PHRASE_REPEAT_MIN_COUNT:
@@ -810,11 +952,21 @@ def _repeat_hints(text: str) -> list[Hint]:
             if any(gram in old for old in candidates):
                 continue
             phrase, count = _longest_stable_phrase(plain, gram, spots)
-            if len(phrase) >= length and count >= W.PHRASE_REPEAT_MIN_COUNT:
-                # 「项项项项」这类同字重复多半来自表格/版式，不是用语贫乏
-                if len(set(phrase)) <= 1:
-                    continue
-                candidates[phrase] = count
+            if len(phrase) < length or count < W.PHRASE_REPEAT_MIN_COUNT:
+                continue
+            # 「项项项项」这类同字重复多半来自表格/版式，不是用语贫乏
+            if len(set(phrase)) <= 1:
+                continue
+            # 首尾虚词 → 半截搭配（切词事故），不是"短语重复"
+            if phrase[0] in W.PHRASE_EDGE_BLOCK or phrase[-1] in W.PHRASE_EDGE_BLOCK:
+                continue
+            # 标题里的主题词 → 公文要求统一用词，不判贫乏
+            if head and phrase in head:
+                continue
+            # 《…》内的文件名 → 引用既有文件时的规范重复，不判贫乏
+            if doc_titles and any(phrase in t for t in doc_titles):
+                continue
+            candidates[phrase] = count
         if not candidates:
             continue
         chosen: list[str] = []

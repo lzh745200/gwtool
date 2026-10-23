@@ -37,6 +37,21 @@ ADVISORY_CATEGORIES: tuple[str, ...] = (
     # （审计实测 4 处误报，其中 `法制办→司法局` 连方向都是错的）。
     # 这类映射本质上是"时点判断"，词表法没有可靠的正向写法，按红线降为提示级。
     "机构沿革",
+    # 生成层混淆对（v1.14.0 C4，220 篇真实语料 45.7 万字）——**整层**降为提示级：
+    # seed.db 的 39 504 条 generated 对 **confidence 全部是 0.55**（构建期脚本按
+    # 同音/近音程序化生成，没有人工精标），因此这不是"低置信子集降级"，而是
+    # 整个生成层从"可自动替换"变成"只提示、可逐条手动应用"。理由有两条，都是实测：
+    #   ① 精度天花板：220 篇上 26 处生成层命中**全部是误报**（`每打一仗`、
+    #      `心头一震`、`以术济世`、`围了过来`、`捡到`…都是合法构式/合法词序列）；
+    #   ② 没有可行的形态守卫：错形本身就是"一+量词 / 之+名词 / V+了 / 有+X"等
+    #      合法序列，与 E2 样本同形 —— 逐类量过代价（首字=一 杀 5 处但 E2 −11、
+    #      首字=之其 −8、首字=以因随 −6、末字=了 −1…），任何形态守卫都是拿召回
+    #      换精度，违反"E2 不得下降"。
+    # 按项目红线「不静默自动替换」整层降级：命中照常列出（提示可见）、可逐条应用，
+    # 但不进「全部替换 / 批量写回 / 整篇应用」。
+    # 恢复自动替换的**显式入口**：`corrector.correct_block(..., apply_low_confidence=True)`
+    # （默认 False=安全）；或直接删掉本行。评测的 by_category 仍保留分类计数。
+    "错别字(生成)",
 )
 
 
@@ -185,6 +200,28 @@ def check_text(text: str) -> list[Correction]:
     return _apply_gec_layer(text, found)                  # L5 语法纠错
 
 
+_CONJ_ENUM_RX = re.compile(
+    r"只有[^，。；！？\n]{0,12}?[一二三四五六七八九十]?"
+    r"(?:个|种|条|名|项|位|件|次|句|点|份|家|处|只|张|台|辆|门|所)")
+
+
+def _is_conjunction_enumeration_fp(text: str, c: Correction) -> bool:
+    """`只有…就` 规则的**列举句式**误报（v1.14.0 C4，真实语料 3 处）。
+
+    真实语料：`“刁难”的目的只有一个，就是检验部队的极限`、
+    `我们那时只有一个思想，就是无论如何要克服困难` —— 这里的"只有"是
+    "仅仅有"（动词），"就是"是判断句，不是"只有…才"的条件关联。
+    判据（确定性）：同一分句内 `只有` 之后 12 字内出现"一/二…+量词"，
+    说明它是"只有一个/一种/一条"的列举，`就` 属于后一分句的判断词。
+    正例 `只有努力工作，就能成功` 不含数量短语，照报。
+    """
+    if c.category != grammar_rules.CAT_CONJUNCTION or c.wrong != "就":
+        return False
+    # 往前看 40 字（可跨逗号）：FP 的"只有一个/一种"在**前一分句**，
+    # 正则自身的 `[^，。；！？\n]` 保证不会跨句误配。
+    return bool(_CONJ_ENUM_RX.search(text[max(0, c.start - 40):c.start]))
+
+
 def _check_grammar(text: str) -> list[Correction]:
     """L2.5 语法与表达规则层：语义冗余 / 关联词搭配 / 搭配不当 / 成对标点。
 
@@ -193,13 +230,16 @@ def _check_grammar(text: str) -> list[Correction]:
     结构上够不着的区间（对应《纠错系统差距分析》的"多字少字/词序/语法"）。
 
     异常一律咽掉：规则数据损坏、正则编译失败，都只丢本层，绝不拖垮主流程。
+    关联词层另有 `_is_conjunction_enumeration_fp` 收口 `只有…就` 的列举误报。
     """
     try:
-        return [Correction(s, e, w, sug, cat, reason, conf)
+        hits = [Correction(s, e, w, sug, cat, reason, conf)
                 for s, e, w, sug, cat, reason, conf
                 in grammar_rules.all_hits(text)]
     except Exception:
         return []
+    return [c for c in hits
+            if not _is_conjunction_enumeration_fp(text, c)]
 
 
 def _check_repeat(text: str) -> list[Correction]:
@@ -666,21 +706,38 @@ _SKIP_INSIDE_BOOK_TITLE_REASONS = frozenset({
     "中文语境应使用全角逗号",   # 《关于印发,某某,的通知》这类原题
     "中文语境应使用全角冒号",
     "中文语境应使用全角分号",
+    # v1.14.0 C4：引文里的 `？？`/`？？？` 是文学强调（`“出路在哪里？？出路在哪里？？？”`），
+    # 不是排版笔误；改它会篡改引文。与 `(记者 李洋)` 同属**体裁**问题。
+    "标点重复，应只保留一个",
 })
+
+# 引号内同样是**原文引用**（v1.14.0 C4，200 篇语料归因）：
+# `…四周地砖上镌刻着“1936.10.22”，记录着胜利会师的历史时刻` —— 引号里的日期是
+# 被引用的历史刻字，把它提示成"应写 1936年10月22日"是拿今天的行文规范改史料。
+# 数字用法整类（全部是提示标签、不自动替换）在引号/书名号内一律不报；
+# 标点类仍按上面的 reason 白名单处理（成对标点问题必须照报）。
+_SKIP_INSIDE_QUOTE_CATEGORIES = frozenset({"数字用法"})
+
+# 需要整体当作"引用区间"的成对符号（左 -> 右）
+_QUOTE_PAIRS = {"《": "》", "“": "”", "‘": "’", "「": "」", "『": "』"}
 
 
 def _book_title_spans(text: str) -> list[tuple[int, int]]:
-    """全部书名号的区间 [(start, end)]（含《》本身）；未闭合的从《到串尾。
+    """全部**引用区间**（书名号 + 中文引号）[(start, end)]，含符号本身。
 
-    O(n) 单趟扫描，与 `_check_exact` 里的书名号计数同源，但这里需要区间。
+    v1.14.0 从"只看书名号"扩到"书名号 + 中文引号"：语料归因发现引号内的
+    日期/符号同样属于原文引用（见 `_SKIP_INSIDE_QUOTE_CATEGORIES` 注释）。
+    未闭合的右端到串尾 —— 采集残缺时也宁可少报，不改引用内容。
+    O(n) 单趟扫描。
     """
     spans: list[tuple[int, int]] = []
     open_at = -1
+    open_ch = ""
     for i, ch in enumerate(text):
-        if ch == "《":
-            if open_at < 0:
-                open_at = i
-        elif ch == "》" and open_at >= 0:
+        if open_at < 0:
+            if ch in _QUOTE_PAIRS:
+                open_at, open_ch = i, ch
+        elif ch == _QUOTE_PAIRS[open_ch]:
             spans.append((open_at, i + 1))
             open_at = -1
     if open_at >= 0:
@@ -694,18 +751,19 @@ def _inside_any(pos: int, spans: list[tuple[int, int]]) -> bool:
 
 def _check_regex_group(text: str, rules, category: str) -> list[Correction]:
     out: list[Correction] = []
-    title_spans: list[tuple[int, int]] | None = None
+    quote_spans: list[tuple[int, int]] | None = None
     for rx, repl, reason, conf in rules:
         if conf <= 0:
             continue
-        skip_in_title = reason in _SKIP_INSIDE_BOOK_TITLE_REASONS
+        skip_in_quote = (reason in _SKIP_INSIDE_BOOK_TITLE_REASONS
+                         or category in _SKIP_INSIDE_QUOTE_CATEGORIES)
         try:
             for m in re.finditer(rx, text):
-                if skip_in_title:
-                    # 惰性计算：绝大多数规则不需要书名号区间
-                    if title_spans is None:
-                        title_spans = _book_title_spans(text)
-                    if _inside_any(m.start(), title_spans):
+                if skip_in_quote:
+                    # 惰性计算：绝大多数规则不需要引用区间
+                    if quote_spans is None:
+                        quote_spans = _book_title_spans(text)
+                    if _inside_any(m.start(), quote_spans):
                         continue
                 if category == "数字用法":
                     # 数字规则的 repl 是提示标签而非替换文本
@@ -812,6 +870,7 @@ _MARK_STYLE = {
     "数字用法": ("#e0f2f1", "#004d40"),
     "重复字": ("#fce4ec", "#880e4f"),     # L3 同字连（重复字）
     "用户词库": ("#fdecea", "#8c1d18"),
+    "错别字(生成)": ("#fff3e0", "#8a5300"),   # 生成层（v1.14 起提示级，不自动替换）
     "神经纠错": ("#ede7f6", "#4527a0"),   # L4 神经精排（可选增强包）
     "语法纠错": ("#e3f2fd", "#0d47a1"),   # L5 Seq2Seq 语法纠错（可选增强包）
     "语义冗余": ("#fff8e1", "#795500"),   # L2.5 多字赘余（可自动替换）
@@ -862,16 +921,27 @@ def paragraph_no(text: str, pos: int) -> int:
     return text.count("\n", 0, max(0, min(pos, len(text)))) + 1
 
 
-def correct_block(text: str, skip_categories: "set[str] | tuple" = ADVISORY_CATEGORIES
+def correct_block(text: str, skip_categories: "set[str] | tuple" = ADVISORY_CATEGORIES,
+                  *, apply_low_confidence: bool = False
                   ) -> "tuple[str, list[Correction]]":
     """单个文本块（段落/标题/单元格）的纠错：返回 (修正后文本, 命中明细)。
 
-    偏移为块内局部偏移。默认跳过 ``ADVISORY_CATEGORIES``（"数字用法/表达提示/
-    标点规范"）——这些类的 suggestion 是**提示标签而不是替换文本**，
-    直接写回会把正文改成标签；且它们多为需人工判断的规范建议，
-    批量替换容易把编号、日期、成对符号改坏。
+    偏移为块内局部偏移。默认跳过 ``ADVISORY_CATEGORIES``：
+      · "数字用法 / 表达提示 / 标点规范" 的 suggestion 是**提示标签**而不是
+        替换文本，直接写回会把正文改成标签；且多为需人工判断的规范建议，
+        批量替换容易把编号、日期、成对符号改坏；
+      · "机构沿革 / 错别字(生成)"（v1.10/v1.14 降级）的 suggestion **是**替换文本，
+        但前者是"时点判断"、后者是程序化同音配对（全 0.55），按红线不自动写回。
+
+    ``apply_low_confidence``：显式恢复"生成层自动替换"的唯一入口（默认 False=安全）。
+    置 True 时只放开 ``错别字(生成)`` 一类；**提示标签类（数字用法/表达提示/
+    标点规范）永远不放开** —— 它们写回会把正文改成标签。UI 的「全部应用/批量
+    写回」暂不暴露该参数（见 doc/纠错能力校准_v1.14.md 的能力矩阵）。
     """
-    cs = [c for c in check_text(text) if c.category not in skip_categories]
+    skip = set(skip_categories)
+    if apply_low_confidence:
+        skip.discard("错别字(生成)")
+    cs = [c for c in check_text(text) if c.category not in skip]
     out = text
     for c in sorted(cs, key=lambda c: -c.start):
         out = out[:c.start] + c.suggestion + out[c.end:]

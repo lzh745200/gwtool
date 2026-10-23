@@ -90,13 +90,57 @@ CXC_EXCLUDED = frozenset("的")
 #    数量刻意极少 —— 白名单是最后一道兜底，不是主要判据。
 _TOKEN_GUARD_DOC = """①② 见 _inside_longer_token / _is_exact_token 的 docstring。"""
 _QUANTIFIERS = frozenset(
-    "批场簇群排串堆片段条块张户家位名个次遍回阵番层重步项件起波轮代辈支队组级档期届页行列")
+    "批场簇群排串堆片段条块张户家位名个次遍回阵番层重步项件起波轮代辈支队组级档期届页行列"
+    # v1.14.0 C4（200 篇真实语料）：公文里"一+量词+XX"的量词远不止上面这些 ——
+    # 一帧帧/一枚枚/一粒粒/一根根/一寸寸/一座座/一只只 全是合法周遍写法。
+    "帧枚粒根寸座只声棵栋间句字袋桶箱杯碗双套台辆艘架门所处村乡县市省国"
+    "年月日昼夜分秒厘毫亩顷升吨克斤两米里尺丈度倍成把床")
 _FIXED_PHRASES = ("对标对表", "对表对标", "权权交易", "权钱交易", "红旗猎猎")
+# ⑬b 文学叠词白名单（v1.14.0 C4）：这些是汉语里合法的叠字拟态，不是多打一字，
+# 但 jieba 未必并成一个 token（实测 `声声`/`憨憨` 都被切成两个单字）。
+# 只收**极高频且不会与错别字混淆**的叠词；宁少勿滥，新增须能说出语料出处。
+_REDUP_WORDS = frozenset({
+    "声声", "憨憨", "座座", "阵阵", "处处", "人人", "家家", "户户", "年年",
+    "月月", "日日", "夜夜", "事事", "步步", "层层", "深深", "静静", "缓缓",
+    "渐渐", "茫茫", "苍苍", "漫漫", "滚滚", "滔滔", "巍巍", "融融", "栩栩",
+    # 200 篇语料补充：申亮亮（人名里的叠字）、想嗅嗅（动词重叠 VV）、
+    # 岩岩（"岩岩"本义高峻，见《诗经》"泰山岩岩"；语料 `龙舌岩岩壁`）
+    "亮亮", "嗅嗅", "岩岩",
+})
+# ⑬c 动词重叠（VV）引导字：`想嗅嗅`/`去看看`/`试试`/`再想想` —— 前面是能带
+# 动词重叠的助动词/副词。只在"连前一字在此集合内"时放行，判据封闭可枚举。
+_VV_LEADING = frozenset("想要去来试再多该应好")
 # ⑪「连本身是一个 token → 放行」的**例外字**：虚词 + 人称代词。
 # 原因：jieba 的 HMM 会把**孤立输入**里的任意同字连并成一个 token
 # （实测 `及及`/`我我` 单独输入都会并），而这正是既有用例要求报出的
 # "无意义重复"（tests/test_repeat_rules.py::_FUNC_DOUBLES）。
 _EXACT_TOKEN_GUARD_SKIP = FUNCTION_CHARS | frozenset("我你他她它咱您")
+
+# cXc 的两类**结构性护栏**（v1.14.0 C4，真实语料实测）：
+#   · 首字是介词/结构助词（被/把/让/给/将/对/向/跟/和/与）：删除它等于删掉介词，
+#     典型误报 `已被|植被|覆盖` → 被植被→植被、`都要|对|一对` → 对一对→一对；
+#   · 尾字是动态/结构助词（了/着/过/的）：删除它等于删掉体标记，
+#     典型误报 `进一步|了解|了|王戟` → 了解了→了解（原句完全正确）。
+# 两条都只在"另一侧确实是词典词"时生效，因此不会吞掉真重复（是否是/在不在/了完了）。
+_CXC_LEADING_PARTICLES = frozenset("被把让给将对向跟和与")
+_CXC_TRAILING_PARTICLES = frozenset("了着过的")
+
+
+def _is_abac(text: str, i: int, words: set) -> bool:
+    """`A B A C` 四字格（向上向好/对内对外/在职在位/就近就便/过多过频）。
+
+    **必须两侧都是词**（`向上`+`向好`、`对内`+`对外`）才算并列修辞：
+    否则会把 `是否是文件…` 里的 `是否是` 也当成 ABAC（`是否` 是词、`是文`
+    不是词），而 `是否是` 是 cXc 的既有正例（tests/test_repeat_rules.py）。
+    """
+    if i < 0 or i + 4 > len(text):
+        return False
+    w0, w1, w2, w3 = text[i], text[i + 1], text[i + 2], text[i + 3]
+    if not all(_is_cjk(x) for x in (w0, w1, w2, w3)):
+        return False
+    if not (w0 == w2 and w1 != w3 and w0 != w1):
+        return False
+    return (w0 + w1) in words and (w2 + w3) in words
 
 
 def _token_spans(text: str) -> list[tuple[int, int]]:
@@ -128,6 +172,30 @@ def _is_exact_token(i: int, k: int, spans) -> bool:
 def _quantifier_reduplication(text: str, i: int, k: int, c: str) -> bool:
     """③ `一 + X + XX`（一批批/一场场/一簇簇）：量词叠用表周遍。"""
     return (k == 2 and i >= 1 and text[i - 1] == "一" and c in _QUANTIFIERS)
+
+
+def _is_redup_word(i: int, k: int, text: str) -> bool:
+    """③b 连本身是常见的合法叠词（声声/憨憨/座座…）。"""
+    return k == 2 and text[i:i + k] in _REDUP_WORDS
+
+
+def _cross_token_join(i: int, k: int, spans) -> bool:
+    """③c 连横跨"词尾 + 词首"（v1.14.0 C4，真实语料 `十八军军长`）。
+
+    两个确定性形态（都为真才放行）：
+      · 左：存在以连首字**结尾**的多字 token（`十八` 结尾于"军"）；
+      · 右：存在以连第二字**起始**的多字 token（`军长` 起于第二个"军"）。
+    与真重复的区别：`进行行`/`部门门`/`我我们` 的右 token 都是**单字**
+    （`行`/`门`/`我们` 的起点不在连第二字上），删除后仍成句，故不误伤。
+    """
+    left = any(b == i and (b - a) >= 2 for a, b in spans)
+    right = any(a == i + 1 and (b - a) >= 2 for a, b in spans)
+    return left and right
+
+
+def _is_vv_reduplication(text: str, i: int, k: int) -> bool:
+    """③d 动词重叠 VV：`想嗅嗅`/`去看看`/`再想想` —— 前一字是助动词/副词。"""
+    return k == 2 and i >= 1 and text[i - 1] in _VV_LEADING
 
 
 def _in_fixed_phrase(text: str, i: int, k: int) -> bool:
@@ -386,8 +454,14 @@ def _judge_run(text: str, i: int, k: int, c: str, ctx: dict,
         #    token，而它们正是既有用例里必须报出的"无意义重复"（`_FUNC_DOUBLES`）。
         if c not in _EXACT_TOKEN_GUARD_SKIP and _is_exact_token(i, k, spans):
             return None
+        if _cross_token_join(i, k, spans):
+            return None        # ⑭ 两个多字词相接（十八军|军长）
     if _quantifier_reduplication(text, i, k, c):
         return None            # ⑫ 量词叠用表周遍（一批批 / 一场场 / 一簇簇）
+    if _is_redup_word(i, k, text):
+        return None            # ⑬b 合法叠词（声声 / 憨憨 / 亮亮）
+    if _is_vv_reduplication(text, i, k):
+        return None            # ⑬c 动词重叠 VV（想嗅嗅 / 去看看）
     if _in_fixed_phrase(text, i, k):
         return None            # ⑬ 固定搭配白名单（对标对表 / 权权交易）
     # ③ k ≥ 3
@@ -479,9 +553,28 @@ def _check_interval_repeat(text: str, ctx: dict) -> list[Correction]:
                     if _in_fixed_phrase(text, i, 3):
                         i += 1
                         continue
+                    # v1.14.0 C4（200 篇真实语料）三道新护栏，全部是**确定性**形态：
+                    # ① ABAC 四字格（A B A C）：`向上向好`/`对内对外`/`在职在位`/
+                    #    `就近就便`/`过多过频` —— 首尾同字是**并列/递进修辞**，
+                    #    不是多打一字；删掉任意一个 A 都会破坏并列结构。
+                    # ② 结构助词/介词作首字（被/把/让/给/将/对/向/跟/和/与）且
+                    #    右侧成词：`已被|植被|覆盖`、`都要|对|一对` —— 删除首字
+                    #    等于把介词/动词删掉（把对的改错）。
+                    # ③ 体标记/结构助词作尾字（了/着/过/的）且左侧成词：
+                    #    `进一步|了解|了|王戟` —— 尾字是"了"（动态助词），
+                    #    删掉它会把"了解了"变成"了解"。
                     form = text[i:i + 3]
                     keep_left = text[i:i + 2]       # cX（删右侧 c）
                     keep_right = text[i + 1:i + 3]  # Xc（删左侧 c）
+                    if _is_abac(text, i, words):
+                        i += 1
+                        continue
+                    if c in _CXC_LEADING_PARTICLES and keep_right in words:
+                        i += 1
+                        continue
+                    if c in _CXC_TRAILING_PARTICLES and keep_left in words:
+                        i += 1
+                        continue
                     # 判据收紧（2026-09-21，CI 抓到真误报后修）：必须删出一个
                     # **真正的词典词**，不能只看"能否切成词典词"。
                     # 原先允许 `_segmentable` 兜底，而 cX 只有两个字、常见字几乎

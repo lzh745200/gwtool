@@ -220,6 +220,53 @@ def _skipped_or_required(key: str, name: str, value, text: str,
                           reason)
 
 
+def _load_corpus_whitelist(path: str) -> list[dict]:
+    """读入"源文本偏差"白名单（v1.14.0 C4）。
+
+    用途：真实语料里**源文本本身不规范**的地方（如半角逗号 `办公厅,国务院`、
+    `6200多平方米,全部`）被引擎正确报出，但按 E3a 口径会被算成"误报"。若为了
+    把 E3a 压到 0.5 而收紧规则，就会把**正确能力**改坏。故允许人工复核后把这些
+    命中登记为 `source_deviation`，从 E3a 扣除、单独计数（JSON 里逐条留档）。
+
+    文件格式（JSON）：:
+
+        {"source_deviations": [
+            {"wrong": "厅,", "suggestion": "厅，",
+             "note": "源文本用半角逗号（政府网原文）",
+             "contains": "人民政府办公厅,国务院"}   // 可选：限定所在句
+        ]}
+
+    匹配键 = (wrong, suggestion) 且（若给了 contains）该句包含 contains。
+    **不按文件/行**匹配：语料目录结构会变（扁平/分子目录），按句子内容更稳。
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    items = raw.get("source_deviations") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        raise ValueError("白名单格式应为 {\"source_deviations\": [...]} 或数组")
+    out: list[dict] = []
+    for i, it in enumerate(items, 1):
+        if not isinstance(it, dict) or not it.get("wrong"):
+            raise ValueError(f"白名单第 {i} 条缺少 wrong 字段")
+        out.append({"wrong": str(it["wrong"]),
+                    "suggestion": str(it.get("suggestion") or ""),
+                    "contains": str(it.get("contains") or ""),
+                    "note": str(it.get("note") or "")})
+    return out
+
+
+def _match_whitelist(whitelist: list[dict], segment: str, hit) -> str | None:
+    """命中是否落在白名单条目上；命中返回该条备注，否则 None。"""
+    for it in whitelist:
+        if it["wrong"] != hit.wrong:
+            continue
+        if it["suggestion"] and it["suggestion"] != hit.suggestion:
+            continue
+        if it["contains"] and it["contains"] not in segment:
+            continue
+        return it["note"] or "人工复核：源文本偏差"
+    return None
+
+
 def _corpus_files(path: str) -> list[Path]:
     """语料文件列表（目录 -> 同目录 .txt/.md/.csv；单文件原样返回）。
 
@@ -332,6 +379,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--corpus-manifest", default="",
                     help="把语料 sha256 清单写到该 JSON（逐文件+聚合指纹，"
                          "供改前/改后两次评测对比；需同时给 --corpus）")
+    ap.add_argument("--corpus-whitelist", default="",
+                    help="源文本偏差白名单 JSON（人工复核后确认是语料本身不规范、"
+                         "不是引擎改错的命中）。这些命中从 E3a 扣除并单独计入 "
+                         "E3a.source_deviation；格式见 "
+                         "scripts/eval_corrector._load_corpus_whitelist 的 docstring")
     ap.add_argument("--require-packs", action="store_true",
                     help="有增强包机器的验收：E4/E6 必须真实运行；未装包/"
                          "未启用/无真实语料时判 FAIL（默认仍为 SKIP）")
@@ -524,10 +576,25 @@ def main() -> int:
     #   E3b 提示类（category ∈ 提示类）      → **只报告、不参与门禁**；
     #   e3_all 旧总口径（含提示类）           → 保留在 JSON/文本里便于与历史对比。
     t0 = time.perf_counter()
-    fp_hits = []
+    fp_pairs: list[tuple[str, object]] = []
     for s in neg:
-        fp_hits.extend(corrector.check_text(s))
+        for h in corrector.check_text(s):
+            fp_pairs.append((s, h))
     t_neg = time.perf_counter() - t0
+    # ---- 源文本偏差白名单（v1.14.0 C4）：人工复核确认"是语料本身不规范、
+    # 不是引擎改错"的命中（如源文本用半角逗号 `办公厅,国务院`）。它们从 E3a
+    # 扣除、单独计入 source_deviation —— 否则门禁会逼着把正确规则改坏。
+    # 清单文件格式见 `_load_corpus_whitelist`；不给则完全按原口径。
+    whitelist = _load_corpus_whitelist(args.corpus_whitelist) if args.corpus_whitelist else []
+    deviations: list[tuple[str, object, str]] = []
+    rest_pairs: list[tuple[str, object]] = []
+    for seg, h in fp_pairs:
+        note = _match_whitelist(whitelist, seg, h)
+        if note is not None:
+            deviations.append((seg, h, note))
+        else:
+            rest_pairs.append((seg, h))
+    fp_hits = [h for _s, h in rest_pairs]
     hits_a = [h for h in fp_hits if h.category not in e3_advisory]
     hits_b = [h for h in fp_hits if h.category in e3_advisory]
 
@@ -545,12 +612,17 @@ def main() -> int:
     by_cat_b = _by_category(hits_b)
     e3a_value: float | None = round(_per_wan(len(hits_a)), 3)
     e3b_value: float | None = round(_per_wan(len(hits_b)), 3)
-    e3_all_value: float | None = round(_per_wan(len(fp_hits)), 3)
+    # 总口径含提示类 + 源文本偏差（白名单剔除项也仍属"引擎报出的命中"）
+    e3_all_value: float | None = round(
+        _per_wan(len(fp_hits) + len(deviations)), 3)
     e3a_text = (f"可替换类 {len(hits_a)} 处 / {n_chars} 汉字 = "
                 f"{_per_wan(len(hits_a)):.2f} 处/万字"
                 f"（总口径含提示类 {len(fp_hits)} 处 = "
                 f"{_per_wan(len(fp_hits)):.2f}，仅对比）　来源：{neg_src}"
-                f"　分类：{by_cat_a or '无'}")
+                f"　分类：{by_cat_a or '无'}"
+                + (f"　源文本偏差（白名单剔除）{len(deviations)} 处 = "
+                   f"{_per_wan(len(deviations)):.2f} 处/万字"
+                   if deviations else ""))
     e3b_text = (f"提示类 {len(hits_b)} 处 / {n_chars} 汉字 = "
                 f"{_per_wan(len(hits_b)):.2f} 处/万字"
                 f"（只报告、不参与门禁）　分类：{by_cat_b or '无'}")
@@ -579,22 +651,32 @@ def main() -> int:
             f"{e3b_text}{e3b_tail}（提示类不计入门禁）", "提示类只报告、不参与门禁"))
     e3a_status = results[-2].status
     e3b_status = results[-1].status
+    dev_rows = [{"wrong": h.wrong, "suggestion": h.suggestion,
+                 "category": h.category, "note": note,
+                 "context": s[max(0, h.start - 15):h.end + 15]}
+                for s, h, note in deviations]
     data["E3a"] = {"segments": len(neg), "chars": n_chars, "hits": len(hits_a),
                    "per_wan": e3a_value, "by_category": by_cat_a,
                    "threshold": TH_FP_PER_WAN, "corpus": neg_src,
                    "external": external_corpus, "gated": corpus_gated,
-                   "status": e3a_status, "seconds": round(t_neg, 3)}
+                   "status": e3a_status, "seconds": round(t_neg, 3),
+                   "source_deviation": {
+                       "count": len(deviations),
+                       "per_wan": round(_per_wan(len(deviations)), 3),
+                       "whitelist": str(args.corpus_whitelist or ""),
+                       "items": dev_rows}}
     data["E3b"] = {"segments": len(neg), "chars": n_chars, "hits": len(hits_b),
                    "per_wan": e3b_value, "by_category": by_cat_b,
                    "corpus": neg_src, "external": external_corpus,
                    "gated": False, "status": e3b_status,
                    "note": "提示类只报告，不参与门禁"}
     data["e3_all"] = {"segments": len(neg), "chars": n_chars,
-                      "hits": len(fp_hits), "per_wan": e3_all_value,
+                      "hits": len(fp_hits) + len(deviations),
+                      "per_wan": e3_all_value,
                       "by_category": by_cat, "corpus": neg_src,
                       "external": external_corpus, "gated": False,
                       "advisory_categories": sorted(e3_advisory),
-                      "note": "旧 E3 总口径（含提示类），仅对比、不门禁"}
+                      "note": "旧 E3 总口径（含提示类与源文本偏差），仅对比、不门禁"}
     # 兼容旧消费方：data["E3"] 仍是"所有命中"的总口径（数值与 e3_all 相同），
     # 但门禁只认 E3a；新代码请读 E3a / E3b / e3_all。
     data["E3"] = data["e3_all"]
