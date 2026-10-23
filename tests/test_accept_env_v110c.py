@@ -130,3 +130,29 @@ def test_report_does_not_embed_sample_body(tmp_path):
     assert "验收正文样本段落" not in r.stdout
     data = json.loads(r.stdout)
     assert "checks" in data and "environment" in data
+
+def test_quiet_native_stdout_blocks_fd_noise():
+    """fd 级噪声不得污染 `--json` 的 stdout（Linux CI 上 MuPDF 会直接写 fd 1）。
+
+    v1.11.0 首次 CI 的真实故障：`--fast --json` 在 Linux 上 stdout 混入
+    `MuPDF error: ...`，`json.loads` 从 char 0 就失败。修法是 fd 层重定向，
+    这里用一个"直接 os.write(1, ...)"的 C 级噪声来钉住它。
+    """
+    snippet = (
+        "import importlib.util, json, os\n"
+        "spec = importlib.util.spec_from_file_location("
+        f"'accept_env', r'{SCRIPT}')\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(m)\n"
+        "with m._quiet_native_stdout():\n"
+        "    os.write(1, b'NOISE-FROM-C\\n')\n"
+        "print(json.dumps({'ok': True}))\n"
+    )
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+               QT_QPA_PLATFORM="offscreen")
+    r = subprocess.run([sys.executable, "-c", snippet], cwd=str(ROOT),
+                       env=env, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "NOISE-FROM-C" not in r.stdout, r.stdout[:600]
+    assert json.loads(r.stdout.strip()) == {"ok": True}

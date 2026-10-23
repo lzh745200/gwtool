@@ -341,3 +341,55 @@ class TestSimhashDaoRoundtrip:
     def test_to_db_from_db_sign_preserved(self, tmp_db):
         h = simhash.simhash("对称测试文本")
         assert simhash.from_db(simhash.to_db(h)) == h
+
+
+# ---------------------------------------------------------------- Python 3.9 API 闸门
+class TestPy39StdlibApi:
+    """CI 的 Linux job 跑 Python 3.9；语法通过（ast feature_version）不代表 API 可用。
+
+    v1.11.0 首次 CI 的真实故障：测试里用了 `Path.write_text(..., newline=...)`
+    —— `newline` 参数 Python 3.10 才加，3.9 上直接 TypeError，把 build-linux
+    打红。这里做一道几毫秒的静态闸门，把"已知 3.9 不存在的 API"挡在提交前。
+    """
+
+    FORBIDDEN = (
+        (r"write_text\([^)]*\bnewline\s*=", "Path.write_text(newline=) 需 3.10"),
+        (r"read_text\([^)]*\bnewline\s*=", "Path.read_text(newline=) 需 3.13"),
+        (r"itertools\.pairwise\(", "itertools.pairwise 需 3.10"),
+        (r"\bzip\([^)]*\bstrict\s*=", "zip(strict=) 需 3.10"),
+        (r"\.bit_count\(", "int.bit_count 需 3.10"),
+        (r"dataclass\([^)]*\bslots\s*=", "dataclass(slots=) 需 3.10"),
+        (r"typing\.ParamSpec", "typing.ParamSpec 需 3.10"),
+    )
+
+    def test_no_py310_only_stdlib_api(self):
+        import re as _re
+        from pathlib import Path as _Path
+
+        root = _Path(__file__).resolve().parents[1]
+        targets = []
+        for sub in ("gwtool", "scripts", "tests"):
+            targets.extend((root / sub).rglob("*.py"))
+        hits = []
+        for path in targets:
+            # 闸门自身必须写正则字面量，必然命中，跳过。
+            if path.resolve() == _Path(__file__).resolve():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                code = line.strip()
+                # 只查代码行：注释/说明文字里提到 API 名不算"使用"（否则闸门
+                # 会被解释性注释绊倒）。确需豁免某行时写 `# py39-ok`。
+                if not code or code.startswith("#") or "py39-ok" in code:
+                    continue
+                for pattern, why in self.FORBIDDEN:
+                    if _re.search(pattern, code):
+                        hits.append(
+                            f"{path.relative_to(root)}:{lineno}: {why} :: "
+                            f"{code[:70]}")
+        assert not hits, (
+            "使用了 Python 3.10+ 才有的 API（CI 的 Linux job 是 Python 3.9，"
+            "会直接失败）：\n" + "\n".join(hits[:20]))

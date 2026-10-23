@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import platform
@@ -61,6 +62,47 @@ SAMPLE_TAIL = "结语：以上为验收样张，仅用于环境核验，不包�
 # 耗时项样本：含确定的常见错别字/易混词，保证"有命中"这个判据可判定
 PERF_TEXT = ("工作布署已经完成，报名截止本月底，务必抓好落实。"
              * 500)[:10000]
+
+
+@contextlib.contextmanager
+def _quiet_native_stdout():
+    """把**文件描述符 1 临时改道到 stderr**，兜住 C 扩展直接写 fd 的噪声。
+
+    为什么 Python 层 `redirect_stdout` 不够：MuPDF（PyMuPDF 的 C 层）在遇到
+    它不认识的 PDF 字典键时，会用 C 的 stdout 直接打印 `MuPDF error: ...`，
+    完全绕过 `sys.stdout`。Linux CI 上这些行出现在 JSON 之前，导致
+    `--fast --json` 的 stdout 不是纯 JSON（v1.11.0 首次 CI 实测）。
+    这里在 **fd 层** dup2 重定向，并顺手关掉 PyMuPDF 的错误显示
+    （不同版本 API 不同，一律 best-effort，失败不影响主流程）。
+    """
+    try:
+        import pymupdf as _mupdf
+        tools = getattr(_mupdf, "TOOLS", None)
+        if tools is not None:
+            for name in ("mupdf_display_errors", "mupdf_display_warnings"):
+                fn = getattr(tools, name, None)
+                if callable(fn):
+                    try:
+                        fn(False)
+                    except Exception:      # 版本差异，忽略
+                        pass
+    except Exception:                      # 没装/旧版
+        pass
+    try:
+        sys.stdout.flush()
+        saved = os.dup(1)
+    except (OSError, AttributeError, ValueError):
+        yield                              # 拿不到 fd（如被重定向成 StringIO）就退化
+        return
+    try:
+        os.dup2(2, 1)
+        yield
+    finally:
+        try:
+            sys.stdout.flush()
+            os.dup2(saved, 1)
+        finally:
+            os.close(saved)
 
 
 class Report:
@@ -689,22 +731,26 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path(tempfile.mkdtemp(prefix="gwtool_accept_"))
     app = None
     try:
-        app = _ensure_gui()
-        collect_environment(app, report)
+        # `--json` 要求 stdout 是纯 JSON：把整段"干活"过程放进 fd 级静音区，
+        # C 扩展（MuPDF/Qt）直接写 fd 1 的噪声会落到 stderr。
+        quiet = _quiet_native_stdout() if args.json else contextlib.nullcontext()
+        with quiet:
+            app = _ensure_gui()
+            collect_environment(app, report)
 
-        out_dir: Path | None = None
-        if not args.json:
-            out_dir = Path(args.out) if args.out else _product_data_dir_hint()
-            try:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                probe = out_dir / ".gwtool_accept_write_test"
-                probe.write_text("", encoding="utf-8")
-                probe.unlink()
-            except OSError as exc:
-                print(f"报告目录不可写：{out_dir}（{exc}）", file=sys.stderr)
-                return 2
+            out_dir: Path | None = None
+            if not args.json:
+                out_dir = Path(args.out) if args.out else _product_data_dir_hint()
+                try:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    probe = out_dir / ".gwtool_accept_write_test"
+                    probe.write_text("", encoding="utf-8")
+                    probe.unlink()
+                except OSError as exc:
+                    print(f"报告目录不可写：{out_dir}（{exc}）", file=sys.stderr)
+                    return 2
 
-        run_smoke(report, workspace, fast=args.fast)
+            run_smoke(report, workspace, fast=args.fast)
 
         payload = report.payload("fast" if args.fast else "full")
         if args.json:

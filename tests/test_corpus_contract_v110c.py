@@ -87,7 +87,11 @@ def _load_script(path: Path, name: str):
 
 def _write(path: Path, text: str, encoding: str = "utf-8") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding=encoding, newline="\n")
+    # 不用 Path.write_text(..., newline=)：`newline` 是 Python 3.10 才加的参数，
+    # 而本项目的发布基线是 Python 3.9（麒麟 V10 自带）——CI 实测在 3.9 上
+    # 直接 TypeError。open() 的 newline 从 3.3 起就有，语义相同。
+    with open(path, "w", encoding=encoding, newline="\n") as fh:
+        fh.write(text)
     return path
 
 
