@@ -253,6 +253,15 @@ def _corpus_lines():
             if "\u2192" in s:                 # → 前后对照：合成样例行
                 continue
             s = re.sub(r"`[^`]*`", "", s).strip()   # 剥除行内代码，留散文
+            # 不把"文档里引用错误示例"的行当自然散文（v1.14 起校准文档会引
+            # `像一把把出鞘的刀` 这类原句做证据；表格行、加粗标注、含箭头/
+            # 误报字样的行都是**元讨论**，不是行文语料）。
+            if s.lstrip().startswith("|"):
+                continue
+            if "**" in s or "->" in s or "→" in s:
+                continue
+            if any(k in s for k in ("误报", "假阳性", "示例", "命中")):
+                continue
             if len(s) >= 8:                   # 太短的行（纯符号/编号）无暇接意义
                 lines.append(s)
     return lines, names
