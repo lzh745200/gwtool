@@ -87,9 +87,13 @@ def _git_visible_files(root: Path) -> list[str]:
     事实源 —— git 自己。这里直接问 git，`.gitignore`/全局 exclude 全部自动生效。
     """
     files: list[str] = []
+    # `-c safe.directory=*`：CI 容器里仓库属主与运行用户不同，git 会拒绝
+    # 读索引（"detected dubious ownership"）。本工具只读索引、不写仓库，
+    # 放宽这一项是安全的；老版本 git 不认识该键时会忽略，不影响行为。
+    base_cmd = ["git", "-c", "safe.directory=*", "-c", "core.quotepath=false"]
     for args in (["ls-files", "-z"],
                  ["ls-files", "-z", "--others", "--exclude-standard"]):
-        proc = subprocess.run(["git", *args], cwd=str(root),
+        proc = subprocess.run([*base_cmd, *args], cwd=str(root),
                               capture_output=True, timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(
