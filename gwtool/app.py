@@ -172,6 +172,12 @@ def run(import_path: str = "") -> int:
     if app is None:
         return 1
 
+    # 小屏 / 高 DPI 兜底（P1-31）：任何对话框第一次显示后夹进屏幕可用区域。
+    # 装在这里而不是逐个对话框里：对话框有十几处、以后还会新增，逐点补必漏；
+    # 夹取只改尺寸/位置，不动任何布局结构，失败也不影响对话框打开。
+    from .ui.screenfit import install_dialog_autofit
+    install_dialog_autofit(app)
+
     # 全局样式（第 25 轮 UI 完善）：统一字体/间距/控件外观，取值来自 theme token
     from .ui.theme import build_qss
     app.setStyleSheet(build_qss())

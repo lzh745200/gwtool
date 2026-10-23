@@ -39,3 +39,7 @@ node_modules/
 /probe.pdf
 /t1.pdf
 /t2.pdf
+
+# ---- 真实公文语料（含敏感信息，默认不入库；只保留使用说明）----
+/doc/corpus/*
+!/doc/corpus/README.md

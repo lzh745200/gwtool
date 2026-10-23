@@ -37,8 +37,17 @@
     ... scripts/eval_corrector.py
 
     # 指定公文语料（每个文件一篇，UTF-8/GBK 自动探测）作为负样本；
-    # 只有给了 --corpus，E3/E5/E6 才真正参与门禁
+    # 只有给了 --corpus，E3/E5/E6 才真正参与门禁。
+    # 语料必须先过脱敏/编码/规模体检：scripts/corpus_check.py（见 doc/corpus/README.md）
     ... scripts/eval_corrector.py --corpus D:/公文语料
+
+    # 语料 sha256 清单：两次评测（改前/改后）各写一份，对比时先比清单再比数字，
+    # 避免"换了语料还以为指标涨了"
+    ... scripts/eval_corrector.py --profile base --corpus D:/公文语料 \
+            --corpus-manifest artifacts/corpus_before.json
+
+    # 有增强包机器的验收：E4/E6 必须**真实运行**（未装包/未启用/无真实语料即 FAIL）
+    ... scripts/eval_corrector.py --profile all --require-packs --corpus D:/公文语料
 
     # 落盘 JSON 便于版本对比（含 profile / 语料指纹 / 样本量）
     ... scripts/eval_corrector.py --json eval_base.json
@@ -61,6 +70,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 CJK = re.compile(r"[\u4e00-\u9fff]")
+
+# --corpus 目录扫描口径（同目录、不递归；与 scripts/corpus_check.py 的
+# 递归体检不冲突：检查端会连子目录一起查，评测端只吃目录第一层，
+# 避免"我以为评测了全部语料、实际只评测了顶层"这种静默差异）。
+CORPUS_GLOBS = ("*.txt", "*.md", "*.csv")
+# 与 corpus_check.py 同一份豁免：`doc/corpus/README.md` 是契约说明，不是语料。
+# 若把它读进 E3，说明文档里的示例数字/错例会被当成"真实公文误报"。
+SKIP_CORPUS_NAMES = frozenset({"readme.md"})
 
 # ---------------------------------------------------------------- 判定阈值
 # 这些阈值就是"红线"的数值化。改动它们等同于改验收标准，须在提交说明里写明理由。
@@ -159,17 +176,44 @@ def _skipped_result(key: str, name: str, value, text: str,
     return Result(key, name, value, text, STATUS_SKIP, reason)
 
 
+def _skipped_or_required(key: str, name: str, value, text: str,
+                         reason: str, require: bool) -> Result:
+    """增强层项（E4/E6）的 SKIP/FAIL 选择。
+
+    `--require-packs`（有增强包机器的验收）下，"未真实运行"必须判 FAIL 而不是
+    SKIP —— 否则装了增强包的机器跑出全绿，却可能根本没测到增强层，
+    正是 P0-2 那类"假绿"的翻版。普通模式下保持 SKIP（不计 FAIL）。
+    """
+    if require:
+        return Result(key, name, value,
+                      f"{text}（--require-packs：{reason}，增强层验收未通过）",
+                      STATUS_FAIL, reason)
+    return _skipped_result(key, name, value, f"{text}（{reason}，不计入门禁）",
+                          reason)
+
+
+def _corpus_files(path: str) -> list[Path]:
+    """语料文件列表（目录 -> 同目录 .txt/.md/.csv；单文件原样返回）。
+
+    `README.md` 一律跳过：它是 `doc/corpus/` 的契约说明，不是负样本。
+    """
+    p = Path(path)
+    if p.is_dir():
+        files: list[Path] = []
+        for suf in CORPUS_GLOBS:
+            files.extend(f for f in sorted(p.glob(suf))
+                         if f.name.lower() not in SKIP_CORPUS_NAMES)
+        return files
+    if p.exists() and p.name.lower() not in SKIP_CORPUS_NAMES:
+        return [p]
+    return []
+
+
 def _read_corpus(path: str) -> list[str]:
     """读入语料目录/文件，按行切成句子级片段（>=8 个汉字才纳入）。"""
     from gwtool.core.parsers.txt_parser import read_text_smart
 
-    files: list[Path] = []
-    p = Path(path)
-    if p.is_dir():
-        for suf in ("*.txt", "*.md", "*.csv"):
-            files.extend(sorted(p.glob(suf)))
-    elif p.exists():
-        files = [p]
+    files = _corpus_files(path)
     out: list[str] = []
     for f in files:
         try:
@@ -183,6 +227,38 @@ def _read_corpus(path: str) -> list[str]:
             if cjk_len(line) >= 8:
                 out.append(line)
     return out
+
+
+def _corpus_manifest(corpus_path: str, segments: list[str]) -> dict:
+    """语料 sha256 清单：逐文件指纹 + 聚合指纹 + 样本量。
+
+    为什么需要逐文件哈希：两次评测（改前/改后）只有**语料完全同一**时数值才有
+    可比性。聚合指纹相同也可能"文件内容互换了"，逐文件清单能直接看出差异；
+    清单本身不含语料正文，可以随报告一起归档。
+    """
+    root = Path(corpus_path)
+    entries: list[dict] = []
+    for f in _corpus_files(corpus_path):
+        data = f.read_bytes()
+        try:
+            rel = str(f.relative_to(root))
+        except ValueError:                  # corpus 传的是单个文件
+            rel = f.name
+        try:
+            from gwtool.core.parsers.txt_parser import read_text_smart
+            chars = cjk_len(read_text_smart(str(f)))
+        except Exception:
+            chars = 0
+        entries.append({"path": rel, "bytes": len(data), "cjk": chars,
+                        "sha256": hashlib.sha256(data).hexdigest()})
+    digest = hashlib.sha256(
+        "\n".join(f"{e['path']}:{e['sha256']}" for e in entries).encode("utf-8")
+    ).hexdigest()
+    return {"version": 1,
+            "corpus": {"path": str(root), "segments": len(segments),
+                       "chars": sum(cjk_len(s) for s in segments),
+                       "fingerprint": _corpus_fingerprint(segments),
+                       "aggregate_sha256": digest, "files": entries}}
 
 
 def _corpus_fingerprint(segments: list[str]) -> str:
@@ -221,7 +297,15 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="评测档案 base|l4|l5|all（默认 all）。档案不包含的层/"
                          "未安装增强包的项输出 SKIP，不计 FAIL")
     ap.add_argument("--corpus", default="",
-                    help="负样本语料目录/文件；不给时 E3/E5/E6 仅示意、不参与门禁")
+                    help="负样本语料目录/文件（.md/.txt/.csv，同目录扫描）；"
+                         "不给时 E3/E5/E6 仅示意、不参与门禁。"
+                         "正式语料需先过 scripts/corpus_check.py 体检")
+    ap.add_argument("--corpus-manifest", default="",
+                    help="把语料 sha256 清单写到该 JSON（逐文件+聚合指纹，"
+                         "供改前/改后两次评测对比；需同时给 --corpus）")
+    ap.add_argument("--require-packs", action="store_true",
+                    help="有增强包机器的验收：E4/E6 必须真实运行；未装包/"
+                         "未启用/无真实语料时判 FAIL（默认仍为 SKIP）")
     ap.add_argument("--layers", default=None,
                     help="[兼容旧用法] 层组合；等价于 --profile，两者冲突会报错")
     ap.add_argument("--pack-root", default="",
@@ -236,6 +320,8 @@ def main() -> int:
     ap = _build_parser()
     args = ap.parse_args()
     profile = _resolve_profile(args, ap)
+    if args.corpus_manifest and not args.corpus:
+        ap.error("--corpus-manifest 需要同时给 --corpus")
     layers = set(PROFILES[profile])
     enh_requested = bool(layers & {"l4", "l5"})
     external_corpus = bool(args.corpus)
@@ -312,6 +398,8 @@ def main() -> int:
     print(f"增强包：拼写={'已装' if pack_csc else '未装'}"
           f"　语法={'已装' if pack_cgec else '未装'}"
           f"　onnxruntime={'可用' if runtime_l4 or runtime_l5 else '缺失'}")
+    if args.require_packs:
+        print("验收模式：--require-packs（E4/E6 未真实运行判 FAIL，不再 SKIP）")
     print()
 
     # ---------------------------------------------------------- 语料契约
@@ -340,6 +428,21 @@ def main() -> int:
     else:
         print(f"负样本语料：{neg_src}　{len(neg)} 段 / {n_chars} 汉字"
               f"　指纹 {corpus_payload['fingerprint']}\n")
+
+    # ---------------------------------------------------------- 语料清单
+    manifest: dict | None = None
+    if args.corpus_manifest:
+        manifest = _corpus_manifest(args.corpus, neg)
+        m_path = Path(args.corpus_manifest)
+        m_path.parent.mkdir(parents=True, exist_ok=True)
+        m_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1),
+                          encoding="utf-8")
+        meta = manifest["corpus"]
+        print(f"语料清单：{args.corpus_manifest}"
+              f"（{len(meta['files'])} 个文件，聚合 sha256 "
+              f"{meta['aggregate_sha256'][:16]}）")
+        data["corpus_manifest"] = manifest
+        corpus_payload["manifest_path"] = args.corpus_manifest
 
     # ---------------------------------------------------------- E1 精标集
     ok = bad = 0
@@ -425,19 +528,19 @@ def main() -> int:
                f"（词表法天花板，增强层应显著提升）")
     if not enh_requested:
         e4_reason = f"profile={profile}：基础门禁不含 E4"
-        results.append(_skipped_result(
-            "E4", "词表外错字召回", round(oov_recall, 4),
-            f"{e4_text}（{e4_reason}，不计入门禁）", e4_reason))
+        results.append(_skipped_or_required(
+            "E4", "词表外错字召回", round(oov_recall, 4), e4_text,
+            e4_reason, args.require_packs))
     elif not pack_any:
         e4_reason = "未安装增强包（拼写/语法均未装），无补位来源"
-        results.append(_skipped_result(
-            "E4", "词表外错字召回", round(oov_recall, 4),
-            f"{e4_text}（{e4_reason}，不计入门禁）", e4_reason))
+        results.append(_skipped_or_required(
+            "E4", "词表外错字召回", round(oov_recall, 4), e4_text,
+            e4_reason, args.require_packs))
     elif not enh_active:
         e4_reason = "增强包已装但推理栈不可用（onnxruntime 缺失）"
-        results.append(_skipped_result(
-            "E4", "词表外错字召回", round(oov_recall, 4),
-            f"{e4_text}（{e4_reason}，不计入门禁）", e4_reason))
+        results.append(_skipped_or_required(
+            "E4", "词表外错字召回", round(oov_recall, 4), e4_text,
+            e4_reason, args.require_packs))
     else:
         results.append(_gated_result(
             "E4", "词表外错字召回", round(oov_recall, 4), e4_text,
@@ -472,21 +575,28 @@ def main() -> int:
     e6_chars = 0
     # 未参与门禁的 E6 若同时缺 --corpus，也要带上统一标记（与 E3/E5 一致）。
     e6_tail = "" if corpus_gated else ungated_tail
+
+    def _e6_not_run(reason: str) -> Result:
+        """E6 没有真实运行时的结论：普通模式 SKIP；--require-packs 下 FAIL。"""
+        if args.require_packs:
+            return Result("E6", "开启增强层后新增误报", None,
+                          f"未运行（--require-packs：{reason}，增强层验收未通过）",
+                          STATUS_FAIL, reason)
+        return _skipped_result(
+            "E6", "开启增强层后新增误报", None,
+            f"未运行（{reason}，不计入门禁）{e6_tail}", reason)
+
     if not enh_requested:
         e6_reason = f"profile={profile}：不含增强层"
-        results.append(_skipped_result(
-            "E6", "开启增强层后新增误报", None,
-            f"未运行（{e6_reason}，不计入门禁）{e6_tail}", e6_reason))
-        data["E6"] = {"status": STATUS_SKIP, "reason": e6_reason}
+        results.append(_e6_not_run(e6_reason))
+        data["E6"] = {"status": results[-1].status, "reason": e6_reason}
     elif not enh_active:
         if not pack_any:
             e6_reason = "未安装增强包（拼写/语法均未装）"
         else:
             e6_reason = "增强包已装但推理栈不可用（onnxruntime 缺失）"
-        results.append(_skipped_result(
-            "E6", "开启增强层后新增误报", None,
-            f"未运行（{e6_reason}，不计入门禁）{e6_tail}", e6_reason))
-        data["E6"] = {"status": STATUS_SKIP, "reason": e6_reason,
+        results.append(_e6_not_run(e6_reason))
+        data["E6"] = {"status": results[-1].status, "reason": e6_reason,
                       "l4_ready": can_l4, "l5_ready": can_l5,
                       "l4_error": csc_neural.last_error(),
                       "l5_error": csc_gec.last_error()}
@@ -508,6 +618,13 @@ def main() -> int:
                 "E6", "开启增强层后新增误报", round(per_qian, 3), e6_text,
                 per_qian <= TH_NEURAL_FP_PER_QIAN,
                 f"　（阈值 ≤{TH_NEURAL_FP_PER_QIAN} 处/千字）"))
+        elif args.require_packs:
+            # 增强包验收必须在真实语料上做：缺语料时误报率没有分母可比，
+            # 不能拿 224 字内置小样"跑过就算验收"。
+            results.append(Result(
+                "E6", "开启增强层后新增误报", round(per_qian, 3),
+                f"{e6_text}（--require-packs：缺 --corpus，增强层误报无法验收）",
+                STATUS_FAIL, "缺 --corpus（--require-packs）"))
         else:
             results.append(_skipped_result(
                 "E6", "开启增强层后新增误报", round(per_qian, 3),
@@ -541,17 +658,24 @@ def main() -> int:
         print(f"未参与门禁（SKIP，不计 FAIL / 不影响退出码）：{detail}")
     if not external_corpus:
         print(f"说明：E3/E5/E6 缺 --corpus，仅{UNGATED_MARK}；"
-              "发布门禁必须用 --corpus 指向本单位真实公文语料。")
+              "发布门禁必须用 --corpus 指向本单位真实公文语料"
+              "（语料需先过 scripts/corpus_check.py 体检，见 doc/corpus/README.md）。")
+    if args.require_packs:
+        print("说明：--require-packs 下 E4/E6 必须真实运行（增强包 + 真实语料）；"
+              "任一 FAIL 表示增强层验收未完成。")
     print(f"退出码：{1 if failed else 0}（{'有门禁项未达标' if failed else '门禁通过'}）")
 
     # ---------------------------------------------------------- JSON 落盘
     sample_chars = {"E3": n_chars, "E5": probe_chars, "E6": e6_chars}
     data["sample_chars"] = sample_chars
+    data["require_packs"] = bool(args.require_packs)
     if args.json:
         payload = {
             "profile": profile,
             "layers": sorted(layers),
-            "corpus": corpus_payload,
+            "require_packs": bool(args.require_packs),
+            "corpus_manifest": args.corpus_manifest,
+            "corpus": {**corpus_payload, "manifest_path": args.corpus_manifest},
             "sample_chars": sample_chars,
             "results": [r.to_json() for r in results],
             "data": data,

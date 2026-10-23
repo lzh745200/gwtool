@@ -193,6 +193,12 @@ def _status_msg(win, text: str, ms: int = 0) -> None:
 
 
 class MainWindow(QMainWindow):
+    # 最低屏幕声明（P1-31 / 文档口径）：1024×640 @100% 缩放；
+    # 150% 缩放建议 ≥1280×720。低于声明只提示一次（状态栏），不弹模态框。
+    MIN_SCREEN_W = 1024
+    MIN_SCREEN_H = 640
+    _SMALL_SCREEN_SETTING = "small_screen_notice_shown"
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{__version__}（单机离线版）")
@@ -207,6 +213,7 @@ class MainWindow(QMainWindow):
         self._setup_backup_timer()
         self._update_status()
         self.refresh_reminders()
+        self._maybe_small_screen_notice()
         # 数据库自检**不在这里**启动：它要开后台线程，而本方法在构造期执行，
         # 会与"构造完就高频操作界面"的调用方（如遍历触发全部动作的测试）竞争 ——
         # CI 上实测为 `Windows fatal exception: access violation`（后台线程在
@@ -217,6 +224,33 @@ class MainWindow(QMainWindow):
         # 用户第一次启动时窗口还没画出来就被一个技术性警告拦住；且带"只弹一次"
         # 开关，恰恰只在最需要好印象的首启出现。现改为状态栏常驻角标，
         # 在 showEvent 里刷新（见 _refresh_font_notice）。
+
+    def _maybe_small_screen_notice(self) -> None:
+        """可用区域小于最低声明时，显示**一次性**状态栏提示（settings 记忆）。
+
+        为什么不是弹窗：本提示只在"单位机器比建议配置更小"时出现，属于环境
+        说明而非错误；启动即弹模态框会让用户第一眼看到的是技术抱怨。状态栏
+        常显 20 秒足够被看到，且 `settings` 记住后不再打扰。
+        """
+        try:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen is None:
+                return
+            avail = screen.availableGeometry()
+            if (avail.width() >= self.MIN_SCREEN_W
+                    and avail.height() >= self.MIN_SCREEN_H):
+                return
+            if dao.get_setting(self._SMALL_SCREEN_SETTING) == "1":
+                return
+            self.status.showMessage(
+                f"当前屏幕可用区域 {avail.width()}×{avail.height()}，低于建议的"
+                f"最低 {self.MIN_SCREEN_W}×{self.MIN_SCREEN_H}。界面已按可用区域"
+                "自动夹取；可点状态栏右侧「▸」折叠写作参考面板给正文让位。",
+                20000)
+            dao.set_setting(self._SMALL_SCREEN_SETTING, "1")
+        except Exception:
+            # 提示属于环境说明：读屏/读设置失败绝不能拖累启动
+            pass
 
     def _setup_backup_timer(self):
         """定时备份：间隔小时数存于 settings（0=关闭），复用现有轮转策略。
@@ -294,6 +328,19 @@ class MainWindow(QMainWindow):
         self._right_collapsed = False
         self._right_width = 380       # 折叠前记住宽度，展开时还原
         self.setCentralWidget(split)
+        # 小屏最低声明（P1-31）：三栏各自的 layout 最小宽度合计 1216px，会把
+        # `MainWindow.minimumSizeHint` 顶到 1224 —— 在可用宽 984px（1024 屏扣
+        # 任务栏/边距）的老笔记本上，根窗根本放不进声明的最小尺寸。这里给三栏
+        # 设**显式最小宽度**（Qt 以显式值为准、覆盖 layout hint），合计 820px：
+        # 布局结构与分栏比例都不变，窄屏时靠 splitter 压缩 + 右栏折叠让位。
+        #   库栏 240：搜索框 + 一屏能读出标题前几个字（紧凑档本来就是 190，
+        #            再窄连分类树都不可读）；
+        #   编辑栏 320：一行正文 + 行号不折行（`_apply_density` 的中栏下限 360
+        #            本身更宽，这里只是最低保护）；
+        #   参考栏 260：标签行按钮不被截断（折叠后让给编辑区）。
+        self.library.setMinimumWidth(240)
+        self.editor.setMinimumWidth(320)
+        self.reference.setMinimumWidth(260)
 
         tb = self.addToolBar("主工具栏")
         tb.setMovable(False)
@@ -448,6 +495,11 @@ class MainWindow(QMainWindow):
             tier, lib_w, ref_w = "standard", 260, 300
         else:
             tier, lib_w, ref_w = "wide", 320, 340
+        # 档位宽度不得低于各栏的显式最小宽度（P1-31 小屏最低声明）：
+        # 否则 setSizes 会被 Qt 夹回最小宽度，实际三栏之和超过窗口宽度，
+        # 表现为"紧凑档反而把内容挤出画面"。取 max 后档位语义保持不变。
+        lib_w = max(lib_w, self.library.minimumWidth())
+        ref_w = max(ref_w, self.reference.minimumWidth())
         tier_changed = tier != getattr(self, "_density", None)
         if not tier_changed and not getattr(self, "_layout_dirty", False):
             return
