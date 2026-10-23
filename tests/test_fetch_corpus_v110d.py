@@ -851,3 +851,20 @@ def test_compliance_docs_exist_and_cover_required_sections():
     for needle in ("robots", "Crawl-delay", "120", "授权", "退出码",
                    "doc_ref", "manifest", "脱敏", "不得再分发", "签字"):
         assert needle in text, f"合规检查表缺少关键内容：{needle}"
+
+# ---------------------------------------------------------------- 页面标题
+def test_page_title_prefers_og_title_and_strips_noise(mod):
+    """正文页标题优先于列表文本，并清掉"多媒体稿件…"与站点后缀。"""
+    html = ('<html><head><meta property="og:title" content="弘扬伟大长征精神'
+            ' - 多媒体稿件-阅读全文约需-3分钟-2026-10-23" /><title>x</title>'
+            "</head><body></body></html>")
+    assert mod.extract_page_title(html, "junbao") == "弘扬伟大长征精神"
+
+
+def test_page_title_falls_back_to_title_tag_and_suffix(mod):
+    html = "<html><head><title>关于进一步加强安全生产工作的通知_中国军网</title></head></html>"
+    assert mod.extract_page_title(html, "junbao") == "关于进一步加强安全生产工作的通知"
+
+
+def test_page_title_empty_html(mod):
+    assert mod.extract_page_title("<html><body>无标题</body></html>", "gov") == ""

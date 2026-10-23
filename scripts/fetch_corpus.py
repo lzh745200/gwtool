@@ -140,14 +140,16 @@ SITES: dict[str, dict] = {
     "qstheory": {
         "label": "求是网",
         "restricted": True,
-        "list_url": "http://www.qstheory.cn/",
+        # 实测（2026-10-23）：首页静态 HTML 即含文章链接，形态
+        # `/20261023/<32 位 hex>/c.html`；正文容器 `div.text`（在 .content 内）。
+        "list_url": "https://www.qstheory.cn/",
         "robots_user_agent": DEFAULT_USER_AGENT,
         "min_delay_s": DEFAULT_DELAY_S,
         "max_pages_default": 5,
         "max_docs_default": 5,
-        "link_pattern": r"https?://www\.qstheory\.cn/",
-        "content_selectors": ("div#content", "div.content", "div.TRS_Editor",
-                              "article"),
+        "link_pattern": r"https?://www\.qstheory\.cn/\d{8}/[0-9a-f]{8,}/c\.html$",
+        "content_selectors": ("div.text", "div.content div.text",
+                              "div.content", "div#content", "article"),
         "license_note": ("求是网内容受著作权保护；须取得书面授权（doc_ref），"
                          "仅作本地内部评测语料"),
         "robots_note": "qstheory.cn/robots.txt 实测 301（跟随到 https 后取用）",
@@ -155,14 +157,17 @@ SITES: dict[str, dict] = {
     "junbao": {
         "label": "中国军网 / 解放军报（81.cn）",
         "restricted": True,
-        "list_url": "http://www.81.cn/",
+        # 实测（2026-10-23）：首页只有栏目入口；「要闻」列表页静态可解析，
+        # 文章形态 `/yw_208727/16495593.html`；正文容器 `div#article-content`。
+        "list_url": "http://www.81.cn/yw_208727/index.html",
         "robots_user_agent": DEFAULT_USER_AGENT,
         "min_delay_s": DEFAULT_DELAY_S,
         "max_pages_default": 5,
         "max_docs_default": 5,
-        "link_pattern": r"https?://www\.81\.cn/",
-        "content_selectors": ("div.article", "div#article", "div.TRS_Editor",
-                              "article"),
+        "link_pattern": r"https?://www\.81\.cn/[^\s\"]*/\d{8}\.html$",
+        "content_selectors": ("#article-content", "div#article-content",
+                              "div.article-content", "div.article",
+                              "div.content", "article"),
         "license_note": ("解放军报/中国军网内容受著作权保护；须取得书面授权（doc_ref）。"
                          "robots.txt 404（无声明）不等于可以批量转载"),
         "robots_note": "81.cn/robots.txt 实测 404（无 robots 声明）——仍须授权",
@@ -703,6 +708,58 @@ def _sanitize_slug(text: str, fallback: str = "doc") -> str:
     return (slug[:40].strip("-_") or fallback)
 
 
+# 站点标题后缀/噪音（列表链接文本常带"多媒体稿件-阅读全文约需-3分钟"这类尾巴）
+_TITLE_NOISE = re.compile(
+    r"[-_—|]*多媒体稿件.*$|[-_—|]*阅读全文.*$|[-_—|]*点击查看.*$")
+_TITLE_SUFFIXES = {
+    "gov": ("_中国政府网", "_最新政策", "_政策", "_www.gov.cn"),
+    "junbao": ("_中国军网", "-中国军网", "_81.cn", "-81.cn", "_解放军报"),
+    "qstheory": ("_求是网", "-求是网", "_求是", "-求是", "_www.qstheory.cn"),
+    "people": ("_人民网", "-人民网", "_people.com.cn"),
+    "mod": ("_国防部网", "-国防部网"),
+}
+
+
+def extract_page_title(html: str, site_name: str = "") -> str:
+    """从正文页取标题：`og:title` → `<h1>` → `<title>`，并清理站点后缀与噪音。
+
+    为什么要页面标题而不是列表链接文本：列表文本经常是"标题-多媒体稿件-阅读全文约需-3分钟"
+    或空串（qstheory 的 6/10 篇因此成了"未命名"），首行标题会污染语料（数字规则误命中）。
+    """
+    raw = ""
+    m = re.search(
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
+        html or "", re.I)
+    if m:
+        raw = m.group(1)
+    if not raw:
+        m = re.search(r"<h1[^>]*>(.*?)</h1>", html or "", re.S | re.I)
+        if m:
+            raw = m.group(1)
+    if not raw:
+        m = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.S | re.I)
+        if m:
+            raw = m.group(1)
+    title = re.sub(r"<[^>]+>", "", raw)
+    title = html_lib.unescape(title)
+    title = re.sub(r"\s+", " ", title).strip()
+    # 先去掉"多媒体稿件-阅读全文约需…"这类尾巴，再把残留的分隔符剥掉
+    # （列表文本常见形态："标题 - 多媒体稿件-阅读全文约需-3分钟-2026-10-23"）
+    title = _TITLE_NOISE.sub("", title).strip(" -_—|")
+    for suffix in _TITLE_SUFFIXES.get(site_name, ()):
+        if title.endswith(suffix):
+            title = title[: -len(suffix)]
+            break
+    if not title:
+        return ""
+    # 兜底：`标题_栏目_站点` 形态，取第一段
+    if "_" in title:
+        head = title.split("_")[0].strip()
+        if head and not any(k in head for k in ("中国政府网", "中国军网")):
+            title = head
+    return title.strip()
+
+
 def extract_links(html: str, base_url: str, pattern: str,
                   max_links: int) -> list[dict]:
     """从列表页抽取候选正文链接（保留出现顺序、去重、按 pattern 过滤）。
@@ -954,7 +1011,7 @@ def _user_agent(args, site_cfg: dict) -> str:
 
 def _fetch_and_extract(args, site_cfg: dict, user_agent: str,
                        limiter: "RateLimiter", robots: dict,
-                       cand: dict) -> dict:
+                       cand: dict, site_name: str = "") -> dict:
     """抓一页并抽取正文。
 
     status：
@@ -975,6 +1032,10 @@ def _fetch_and_extract(args, site_cfg: dict, user_agent: str,
     except FetchError as exc:
         base.update(status="fetch-failed", reason=f"抓取失败：{exc}")
         return base
+    # 页面标题优先于列表链接文本（列表文本常带"多媒体稿件…"噪音或为空）
+    page_title = extract_page_title(page_html, site_name)
+    if page_title:
+        base["title"] = page_title
     result = extract_content(page_html, site_cfg["content_selectors"])
     result.update(base)
     if result.get("ok"):
@@ -1050,7 +1111,7 @@ def _run_probe(args, site_cfg: dict, site_name: str, *,
         return EXIT_RUNTIME
     candidates = extract_links(list_html, list_url, site_cfg["link_pattern"],
                                max_pages)
-    results = [_fetch_and_extract(args, site_cfg, user_agent, limiter, robots, cand)
+    results = [_fetch_and_extract(args, site_cfg, user_agent, limiter, robots, cand, site_name)
                for cand in candidates]
     stats = _probe_stats(results, len(candidates))
     _print_probe_stats(stats)
@@ -1119,7 +1180,7 @@ def _run_crawl(args, site_cfg: dict, site_name: str,
     used_names: set[str] = set()
     results: list[dict] = []
     for cand in candidates:
-        res = _fetch_and_extract(args, site_cfg, user_agent, limiter, robots, cand)
+        res = _fetch_and_extract(args, site_cfg, user_agent, limiter, robots, cand, site_name)
         results.append(res)
         if res["status"] in ("robots-denied", "fetch-failed"):
             manifest["skipped"].append({"url": res["url"], "reason": res["reason"]})

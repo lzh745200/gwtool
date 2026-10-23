@@ -12,10 +12,43 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from gwtool.core import corrector
+from gwtool.core import corrector, repeat_rules
 from gwtool.core.corrector_data import CONTEXT_RULES, ORG_RENAME_PAIRS
+from gwtool.db import connection as dbconn
+
+ROOT = Path(__file__).resolve().parent.parent
+SEED = ROOT / "gwtool" / "resources" / "data" / "seed.db"
+
+
+@pytest.fixture(scope="class")
+def dict_db(tmp_path_factory):
+    """类级"全量词典"库：重复字层依赖词典证据集，空库会退化成"一律不报"。
+
+    与 `tests/test_repeat_rules.py` 同构（那里是模块级）：从随包 seed.db 导入
+    CC-CEDICT 全量词条，测完恢复原库。**不能**用 `tmp_db`——空库下
+    `check_repeat` 直接返回 []（"宁少报不误报"），负例会"假通过"。
+    """
+    prev = dbconn.current_db_file()
+    d = tmp_path_factory.mktemp("d5_repeat")
+    dbconn.configure(d / "d5.db")
+    conn = dbconn.get_conn()
+    assert SEED.exists(), f"缺少随包词典 {SEED}"
+    conn.execute("ATTACH DATABASE ? AS seeddb", (str(SEED),))
+    conn.execute(
+        "INSERT OR IGNORE INTO dictionary(word,pinyin,definition,example,source)"
+        " SELECT word,pinyin,definition,example,source FROM seeddb.dictionary")
+    conn.commit()
+    conn.execute("DETACH DATABASE seeddb")
+    corrector.invalidate_cache()
+    yield
+    corrector.invalidate_cache()
+    dbconn.close_current_thread()
+    dbconn.configure(prev)
+    corrector.invalidate_cache()
 
 # ---------------------------------------------------------------- 真实语料原句
 S_SCREEN = "室、资料索取点、信息公告栏、电子信息屏等场所、设施，公开政府信息。"
@@ -245,3 +278,136 @@ class TestNoRegression:
             assert not hits, [(c.wrong, c.suggestion) for c in hits]
         else:
             assert any(c.category == cat for c in hits), hits
+
+
+# ============================================================ ⑥ v1.13.0 D5：重复字
+# 真实语料扩到 35 篇 / 9.07 万字（gov 15 + 军报 10 + 求是 10）后，E3a 的 16 处
+# 全部复核为误报，其中 12 处是重复字。逐条原句见 task-29：
+#   一批批官兵 / 买买提江·吾买尔 / 红34师师长 / 第100团团长 / 韩京京 /
+#   红旗猎猎 / 权权交易 / 一场场 / 一簇簇 / 段段接力 / 对标对表
+# 修法是四类**结构性**守卫（与语义无关）：分词 token 覆盖 / token 本身成词 /
+# 量词叠用表周遍 / 固定搭配白名单。
+_REPEAT_FIXTURES = [
+    ("一批批官兵重走长征路。", "批批"),
+    ("买买提江·吾买尔表示。", "买买"),
+    ("红34师师长陈树湘。", "师师"),
+    ("红34师第100团团长韩伟之子韩京京。", "团团"),
+    ("红34师第100团团长韩伟之子韩京京。", "京京"),
+    ("红旗猎猎，长风浩荡。", "猎猎"),
+    ("掩盖的是权权交易、权钱交易。", "权权"),
+    ("在一场场殊死搏杀中。", "场场"),
+    ("播撒下一簇簇革命火种。", "簇簇"),
+    ("层层压实责任、段段接力推进。", "段段"),
+    ("找遵循、找方法，对标对表、校准偏差。", "对对"),
+]
+
+
+@pytest.mark.usefixtures("dict_db")
+class TestMilitaryCorpusRepeatGuard:
+    """军报/求是语料上的 12 类重复字误报 → 全部抑制。"""
+
+    @pytest.mark.parametrize("text,wrong", _REPEAT_FIXTURES)
+    def test_fixture_not_reported(self, text, wrong):
+        hits = [c for c in _hits(text) if c.category == "重复字"]
+        assert not hits, f"{text!r} 仍报 {[(c.wrong, c.suggestion) for c in hits]}"
+        assert not [c for c in hits if wrong in c.wrong], (text, wrong)
+
+    @pytest.mark.parametrize("text,wrong", _REPEAT_FIXTURES)
+    def test_no_other_hits(self, text, wrong):
+        """这些句子除此之外也应洁净（避免"压掉重复字却冒出别的建议"）。"""
+        assert not _hits(text), [(c.category, c.wrong, c.suggestion) for c in _hits(text)]
+
+    # ---------------- 四类守卫的机制证明（关掉守卫就应恢复误报） ----------------
+    def test_token_containment_guard(self, monkeypatch):
+        """⑩ 连被更长 token 覆盖 → 放行。清空 spans 后 `师师长` 应恢复报出。"""
+        assert not [c for c in _hits("红34师师长陈树湘。") if c.category == "重复字"]
+        monkeypatch.setattr(repeat_rules, "_token_spans", lambda _t: [])
+        hits = [c for c in _hits("红34师师长陈树湘。") if c.category == "重复字"]
+        assert hits, "关掉分词守卫后仍未报出，说明归因错了"
+
+    def test_exact_token_guard(self):
+        """⑪ 连本身是 jieba 的词（猎猎/权权/段段）→ 放行。"""
+        text = "红旗猎猎，长风浩荡。"
+        i = text.index("猎猎")
+        spans = repeat_rules._token_spans(text)
+        assert repeat_rules._is_exact_token(i, 2, spans)
+        assert not [c for c in _hits(text) if c.category == "重复字"]
+
+    def test_quantifier_guard(self):
+        """⑫ `一 + X + XX`（一批批/一场场/一簇簇）：量词叠用表周遍。"""
+        assert repeat_rules._quantifier_reduplication("一批批", 1, 2, "批")
+        assert repeat_rules._quantifier_reduplication("一场场", 1, 2, "场")
+        assert not repeat_rules._quantifier_reduplication("一们们", 1, 2, "们")
+        assert not repeat_rules._quantifier_reduplication("批次批", 1, 2, "批")
+
+    def test_fixed_phrase_whitelist(self):
+        """⑬ 固定搭配白名单：`对标对表` 会被 cXc 判成 `对标对`。"""
+        text = "找遵循、找方法，对标对表、校准偏差。"
+        i = text.index("对标对")
+        assert repeat_rules._in_fixed_phrase(text, i, 3)
+        assert not [c for c in _hits(text) if c.category == "重复字"]
+
+    # ---------------- 正例：无意义重复仍要报 ----------------
+    @pytest.mark.parametrize("text,want_wrong", [
+        ("的的", "的的"),
+        ("是是", "是是"),
+        ("进行行。", "行行"),
+        ("部门门。", "门门"),
+        ("我我们出发。", "我我"),
+    ])
+    def test_meaningless_repeats_still_reported(self, text, want_wrong):
+        """守卫只放行"结构性合法重复"，真多打的字必须照报（否则是漏报退化）。"""
+        hits = [c for c in _hits(text) if c.category == "重复字"]
+        assert any(c.wrong == want_wrong for c in hits), (text, hits)
+
+    def test_dictionary_idioms_not_reported(self):
+        """反例守护：词典成语里的叠字不能被"正例"顺手改成报错。
+
+        `卿卿我我`（我我）与 `小时了了`（了了）都是词典词，属既有白名单/④
+        的合法放行 —— 这也是"我我/了了 单独出现不报"的原因，不能为了
+        凑正例把它们变成误报。
+        """
+        for text in ("两人卿卿我我。", "小时了了，大未必佳。"):
+            assert not [c for c in _hits(text) if c.category == "重复字"], (text, _hits(text))
+
+
+# ============================================================ ⑦ v1.13.0 D5：生成对
+@pytest.mark.usefixtures("dict_db")
+class TestAdverbPrefixedGeneratedPair:
+    """`还誓→还是`：低置信生成对首字是常用虚词/副词 → 抑制。"""
+
+    @pytest.fixture(autouse=True)
+    def _pair(self):
+        from gwtool.db import dao
+
+        dao.add_error_pair("还誓", "还是", "测试", 0.55, source="generated")
+        corrector.invalidate_cache()
+        yield
+        corrector.invalidate_cache()
+
+    def test_real_sentence_not_reported(self):
+        text = "截掉伤腿还誓要爬到陕北。"
+        assert not [c for c in _hits(text) if c.wrong == "还誓"], _hits(text)
+
+    def test_guard_is_the_reason(self, monkeypatch):
+        """清空虚词集后应恢复报出 —— 证明抑制来自这条守卫。"""
+        monkeypatch.setattr(corrector, "_LEADING_FUNCTION_CHARS", frozenset())
+        hits = [c for c in _hits("截掉伤腿还誓要爬到陕北。") if c.wrong == "还誓"]
+        assert hits
+
+    def test_measured_expensive_chars_are_excluded(self):
+        """E2 实测：首字为 却/可/只/太/就 的命中是**真实错形**，不能收。
+
+        实测（`--profile base`）收进来会把 E2 从 645/800=80.6% 压到 638=79.8%：
+        `就湿→就是`、`可揖→可以`、`却嗜→却是`、`只妖→只要`、`太样→太阳`。
+        这五个字必须在集合外，否则就是"用召回换精度"。
+        """
+        for ch in "却可只太就":
+            assert ch not in corrector._LEADING_FUNCTION_CHARS, (
+                f"{ch} 有 E2 实测代价，不应放进虚词首字守卫")
+        assert "还" in corrector._LEADING_FUNCTION_CHARS
+
+    def test_curated_pairs_with_same_leading_char_unaffected(self, tmp_db):
+        """高置信精标对（conf≥0.7）不进低置信守卫，首字是虚词也照报。"""
+        hits = [c for c in _hits("这项布署工作要抓紧。") if c.wrong == "布署"]
+        assert hits

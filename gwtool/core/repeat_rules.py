@@ -72,6 +72,76 @@ ONO_CHARS = frozenset(
 # 它写回正文 —— 等于把对的句子改掉。其余虚词（在/是/和…）的 cXc 仍需保留判定。
 CXC_EXCLUDED = frozenset("的")
 
+# ================================================================ v1.13.0 D5
+# 真实语料（中国军网/求是网，35 篇 / 9.07 万字）上 12 处重复字命中**全是误报**，
+# 归成四类结构性"合法重复"。判据全部走**确定性**信号，不做语义猜测：
+#
+# ① 分词 token 守卫：同字连被某个**更长的 jieba token** 完整覆盖 → 是词的一部分。
+#    实测 `红34师师长`（jieba 出 token `师师长`）、`第100团团长`（`团团长`）、
+#    `韩京京`（`韩京京`）、`一批批`（`一批批`）、`买买提江`（`买买提`）全落在这类；
+#    而真正的多打一字（`进行行`、`的的`、`我我`）两侧都是独立 token，不受影响。
+# ② 分词 token == 连本身：jieba 把它当**一个词**（`猎猎`/`权权`/`段段`）。
+#    jieba 对未知的两字组合只会切成两个单字 token，所以"连本身是一个 token"
+#    等价于"jieba 词典认识这个词"，用它替代"查我们的 12 万词典表"更稳
+#    （`猎猎` 在 jieba 里是词、在 CC-CEDICT 表里未必有）。
+# ③ 量词叠用表周遍：`一 + X + XX`（一批批/一场场/一簇簇）。即使 jieba 没并成
+#    一个 token，这也是"每一批/每一场"的合法重叠。
+# ④ 固定搭配白名单：真实语料复核确认的文学/政治固定说法（`对标对表`、`权权交易`）。
+#    数量刻意极少 —— 白名单是最后一道兜底，不是主要判据。
+_TOKEN_GUARD_DOC = """①② 见 _inside_longer_token / _is_exact_token 的 docstring。"""
+_QUANTIFIERS = frozenset(
+    "批场簇群排串堆片段条块张户家位名个次遍回阵番层重步项件起波轮代辈支队组级档期届页行列")
+_FIXED_PHRASES = ("对标对表", "对表对标", "权权交易", "权钱交易", "红旗猎猎")
+# ⑪「连本身是一个 token → 放行」的**例外字**：虚词 + 人称代词。
+# 原因：jieba 的 HMM 会把**孤立输入**里的任意同字连并成一个 token
+# （实测 `及及`/`我我` 单独输入都会并），而这正是既有用例要求报出的
+# "无意义重复"（tests/test_repeat_rules.py::_FUNC_DOUBLES）。
+_EXACT_TOKEN_GUARD_SKIP = FUNCTION_CHARS | frozenset("我你他她它咱您")
+
+
+def _token_spans(text: str) -> list[tuple[int, int]]:
+    """全文 jieba 分词区间（失败时返回空表：守卫整体降级为不过滤）。"""
+    try:
+        import jieba
+
+        from ..db.tokenize import _ensure_jieba
+
+        _ensure_jieba()
+        return [(a, b) for _w, a, b in jieba.tokenize(text)]
+    except Exception:
+        return []
+
+
+def _inside_longer_token(i: int, k: int, spans) -> bool:
+    """① 连被某个更长的 token 完整覆盖（词的一部分，不是多打一字）。"""
+    for a, b in spans:
+        if b - a > k and a <= i and i + k <= b:
+            return True
+    return False
+
+
+def _is_exact_token(i: int, k: int, spans) -> bool:
+    """② 连本身就是 jieba 的一个词（猎猎/权权/段段）。"""
+    return any(a == i and b == i + k for a, b in spans)
+
+
+def _quantifier_reduplication(text: str, i: int, k: int, c: str) -> bool:
+    """③ `一 + X + XX`（一批批/一场场/一簇簇）：量词叠用表周遍。"""
+    return (k == 2 and i >= 1 and text[i - 1] == "一" and c in _QUANTIFIERS)
+
+
+def _in_fixed_phrase(text: str, i: int, k: int) -> bool:
+    """④ 连落在已知固定搭配里（对标对表/权权交易…）。"""
+    for phrase in _FIXED_PHRASES:
+        start = text.find(phrase)
+        if start < 0:
+            continue
+        while start >= 0:
+            if start <= i and i + k <= start + len(phrase):
+                return True
+            start = text.find(phrase, start + 1)
+    return False
+
 
 def invalidate_cache() -> None:
     """词典变化后调用：清空派生缓存，下次判定重新派生。"""
@@ -287,8 +357,13 @@ def _leading_boundary(text: str, i: int) -> bool:
     return i == 0 or not _is_cjk(text[i - 1])
 
 
-def _judge_run(text: str, i: int, k: int, c: str, ctx: dict):
-    """对单个同字连按序短路判定；返回 None（放行）或置信度 float（报告）。"""
+def _judge_run(text: str, i: int, k: int, c: str, ctx: dict,
+               spans=None):
+    """对单个同字连按序短路判定；返回 None（放行）或置信度 float（报告）。
+
+    ``spans``：全文 jieba 分词区间（v1.13.0 D5 的四类合法重复守卫用）；
+    为空表/None 时退化为不过滤（宁可少报，不能因分词不可用把命中全吞掉）。
+    """
     # ①② 放行类
     if _aabb_or_abab(text, i):
         return None
@@ -299,6 +374,22 @@ def _judge_run(text: str, i: int, k: int, c: str, ctx: dict):
     # 优先级应高于一切通用判据。只豁免用户词自己覆盖的那一段。
     if _covered_by_user_term(text, i, k, ctx):
         return None
+    # ⑩-⑬ v1.13.0 D5：真实语料上的四类"合法重复"（详见模块顶部注释）
+    # 只对**两字连**生效：三连及以上走 ③（拟声 0.5 / 其余 0.9），
+    # 且 `哈哈哈` 这类 jieba 会并成一个 token —— 用 token 守卫放行会把
+    # 拟声重复一起吞掉（既有用例 `_ONO` 守这一点）。
+    if spans and k == 2:
+        if _inside_longer_token(i, k, spans):
+            return None        # ⑩ 词的一部分（师师长 / 团团长 / 韩京京 / 一批批）
+        # ⑪ 连本身就是 jieba 的一个 token（猎猎 / 权权 / 段段）。
+        #    虚词与代词除外：jieba 的 HMM 会把**孤立的**"及及/我我"并成一个
+        #    token，而它们正是既有用例里必须报出的"无意义重复"（`_FUNC_DOUBLES`）。
+        if c not in _EXACT_TOKEN_GUARD_SKIP and _is_exact_token(i, k, spans):
+            return None
+    if _quantifier_reduplication(text, i, k, c):
+        return None            # ⑫ 量词叠用表周遍（一批批 / 一场场 / 一簇簇）
+    if _in_fixed_phrase(text, i, k):
+        return None            # ⑬ 固定搭配白名单（对标对表 / 权权交易）
     # ③ k ≥ 3
     if k >= 3:
         if text[i:i + k] in ctx["words"]:
@@ -339,10 +430,10 @@ def _reason_for(k: int, c: str, conf: float) -> str:
     return "疑似重复字符"
 
 
-def _check_runs(text: str, ctx: dict) -> list[Correction]:
+def _check_runs(text: str, ctx: dict, spans=None) -> list[Correction]:
     out: list[Correction] = []
     for i, k, c in _iter_runs(text):
-        conf = _judge_run(text, i, k, c, ctx)
+        conf = _judge_run(text, i, k, c, ctx, spans)
         if conf is None:
             continue
         out.append(Correction(
@@ -384,6 +475,10 @@ def _check_interval_repeat(text: str, ctx: dict) -> list[Correction]:
                             and _right_word_exists(text, i, ctx):
                         i += 1
                         continue
+                    # v1.13.0 D5：固定搭配白名单（`对标对表` 会被判成 `对标对`）
+                    if _in_fixed_phrase(text, i, 3):
+                        i += 1
+                        continue
                     form = text[i:i + 3]
                     keep_left = text[i:i + 2]       # cX（删右侧 c）
                     keep_right = text[i + 1:i + 3]  # Xc（删左侧 c）
@@ -417,5 +512,6 @@ def check_repeat(text: str) -> list[Correction]:
         # 词典不可用：无法做放行判定，宁少报不误报——直接不报。
         return []
     mask = _protected_mask(text)
-    hits = _check_runs(text, ctx) + _check_interval_repeat(text, ctx)
+    spans = _token_spans(text)      # v1.13.0 D5：四类合法重复守卫的分词证据
+    hits = _check_runs(text, ctx, spans) + _check_interval_repeat(text, ctx)
     return [c for c in hits if not mask[c.start]]
