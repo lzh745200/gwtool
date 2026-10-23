@@ -34,6 +34,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECK_SCRIPT = ROOT / "scripts" / "corpus_check.py"
 EVAL_SCRIPT = ROOT / "scripts" / "eval_corrector.py"
 CORPUS_README = ROOT / "doc" / "corpus" / "README.md"
+GOV_CN = ROOT / "doc" / "corpus" / "gov_cn"
+#: 语料目录里"不是语料"的文件：两个脚本必须用同一份跳过清单。
+SKIP_NAMES = {"README.md", "采集合规检查表.md",
+              "AUTHORIZATION.example.json", "AUTHORIZATION.json"}
 
 # 规范公文句（人工确认无错字、无数字规范问题）。
 CLEAN_SENTENCES = [
@@ -328,13 +332,128 @@ def test_readme_is_not_treated_as_corpus(tmp_path):
     assert [p.name for p in eval_mod._corpus_files(str(d))] == ["gongwen.md"]
 
 
+def test_skip_corpus_names_are_shared_by_both_tools():
+    """D 批交付物（检查表/AUTHORIZATION）不是语料：两个脚本的跳过清单必须一致。
+
+    两份常量刻意各存一份（脚本要能单独拷走运行），因此用测试锁住"内容相同"，
+    防止只改一边导致 corpus_check 跳过、eval 却把检查表算进 E3。
+    """
+    check_mod = _load_script(CHECK_SCRIPT, "corpus_check_skip_names")
+    eval_mod = _load_script(EVAL_SCRIPT, "eval_skip_names")
+    assert set(check_mod.SKIP_CORPUS_NAMES) == SKIP_NAMES
+    assert check_mod.SKIP_CORPUS_NAMES == eval_mod.SKIP_CORPUS_NAMES
+
+
+def test_skip_files_are_not_counted_as_corpus(tmp_path):
+    """目录里混入 README / 采集合规检查表 / AUTHORIZATION 时只统计真实语料。"""
+    d = tmp_path / "mixed_corpus"
+    _write(d / "gongwen.md", "\n".join(CLEAN_SENTENCES * 6))
+    _write(d / "采集合规检查表.md", "# 合规检查表\n\n" + "检查项说明。" * 300)
+    _write(d / "README.md", "# 说明\n\n" + CLEAN_SENTENCES[0] * 20)
+    _write(d / "AUTHORIZATION.example.json", '{"authorized": false}\n')
+    _write(d / "AUTHORIZATION.json", '{"authorized": true}\n')
+
+    rc, out = _run_check(str(d), "--min-doc-cjk", "0", "--min-total-cjk", "0")
+    assert rc == 0, out
+    check_mod = _load_script(CHECK_SCRIPT, "corpus_check_skip_count")
+    report = check_mod.scan_corpus(d, min_doc_cjk=0, min_total_cjk=0)
+    assert report["corpus"]["files"] == 1, report["files"]
+    assert [f["path"] for f in report["files"]] == ["gongwen.md"]
+
+    eval_mod = _load_script(EVAL_SCRIPT, "eval_skip_count")
+    assert [p.name for p in eval_mod._corpus_files(str(d))] == ["gongwen.md"]
+
+
+# ---------------------------------------------------------------- 语料质量提示
+def _scan(check_mod, d: Path) -> dict:
+    return check_mod.scan_corpus(d, min_doc_cjk=0, min_total_cjk=0)
+
+
+def test_quality_title_split_positive(tmp_path):
+    """标题被拆成两段（拼接后才是完整标题）→ 质量提示，但不判 FAIL。"""
+    check_mod = _load_script(CHECK_SCRIPT, "corpus_check_title")
+    d = tmp_path / "split_title"
+    body = "\n".join(CLEAN_SENTENCES * 6)
+    _write(d / "split.md",
+           "关于进一步加强安全生产工作\n的通知\n关于进一步加强安全生产工作的通知\n"
+           + body)
+    report = _scan(check_mod, d)
+    assert report["ok"] is True and report["exit_code"] == 0
+    kinds = [q["kind"] for q in report["quality"]]
+    assert "标题跨段" in kinds, report["quality"]
+    assert report["quality"][0]["line"] == 2
+
+    # 已清洗（单段就是完整标题）→ 不得告警
+    clean = tmp_path / "clean_title"
+    _write(clean / "clean.md", "关于进一步加强安全生产工作的通知\n" + body)
+    report2 = _scan(check_mod, clean)
+    assert report2["ok"] is True
+    assert not [q for q in report2["quality"] if q["kind"] == "标题跨段"], \
+        report2["quality"]
+
+
+def test_quality_unpaired_and_long_paragraph(tmp_path):
+    """书名号/引号不配对、单段过长都只提示、不 FAIL。"""
+    check_mod = _load_script(CHECK_SCRIPT, "corpus_check_quality")
+    body = "\n".join(CLEAN_SENTENCES * 6)
+
+    unpaired = tmp_path / "unpaired"
+    _write(unpaired / "q.md", "会议指出“要加强管理。\n" + body)
+    report = _scan(check_mod, unpaired)
+    assert report["ok"] is True and report["exit_code"] == 0
+    assert any(q["kind"] == "成对符号不配对" for q in report["quality"])
+
+    paired = tmp_path / "paired"
+    _write(paired / "q.md", "会议指出“要加强管理”。\n" + body)
+    assert not _scan(check_mod, paired)["quality"]
+
+    longpara = tmp_path / "longpara"
+    _write(longpara / "q.md", "关于工作的通知\n" + "各单位要抓好落实。" * 200)
+    report = _scan(check_mod, longpara)
+    assert report["ok"] is True
+    assert any(q["kind"] == "单段过长" for q in report["quality"])
+
+    normal = tmp_path / "normal"
+    _write(normal / "q.md", "关于工作的通知\n" + body)
+    assert not _scan(check_mod, normal)["quality"]
+
+
+def test_quality_hints_do_not_affect_exit_code(tmp_path):
+    """质量提示再密集也不影响退出码（只有编码/规模/脱敏才 FAIL）。"""
+    d = tmp_path / "many_quality"
+    lines = ["关于进一步加强安全生产工作", "的通知",
+             "关于进一步加强安全生产工作的通知"]
+    lines += ["会议指出“要加强管理。", "各单位要抓好落实。" * 200]
+    lines += CLEAN_SENTENCES * 6
+    _write(d / "q.md", "\n".join(lines))
+    rc, out = _run_check(str(d), "--min-doc-cjk", "0", "--min-total-cjk", "0")
+    assert rc == 0, f"质量提示不应影响退出码，实际 {rc}\n{out}"
+    assert "质量提示" in out
+
+
+@pytest.mark.skipif(not GOV_CN.is_dir(),
+                    reason="本地手采语料 doc/corpus/gov_cn 不存在（gitignored）")
+def test_local_gov_cn_corpus_passes_and_has_no_title_split():
+    """只读回归：已清洗的真实语料必须 PASS，且不再有任何「标题跨段」提示。
+
+    该目录不入 git（含真实公文），CI 上自动跳过；开发机可用它做人工回归。
+    """
+    check_mod = _load_script(CHECK_SCRIPT, "corpus_check_govcn")
+    report = check_mod.scan_corpus(GOV_CN)
+    assert report["ok"] is True and report["exit_code"] == 0, report["errors"]
+    assert report["corpus"]["files"] >= 10
+    title_split = [q for q in report["quality"] if q["kind"] == "标题跨段"]
+    assert not title_split, f"清洗后的语料不应再有标题跨段：{title_split[:3]}"
+
+
 # ---------------------------------------------------------------- 评测联动
 def test_eval_txt_corpus_gates_e3_and_writes_manifest(eval_clean_run):
     """.txt 语料真正参与门禁；--corpus-manifest 写出可对比的 sha256 清单。"""
     rc, out, manifest, json_path = eval_clean_run
     assert rc == 0, f"干净 .txt 语料应 exit 0，实际 {rc}\n{out}"
-    e3 = _line_of(out, "E3")
-    assert e3.startswith("[PASS] E3 ") and "外部语料" in e3 and "示意" not in e3
+    e3 = _line_of(out, "E3a")
+    assert e3.startswith("[PASS] E3a ") and "外部语料" in e3 and "示意" not in e3
+    assert _line_of(out, "E3b").startswith("[SKIP] E3b ")
     assert _line_of(out, "E5").startswith("[PASS] E5 ")
 
     payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
@@ -393,6 +512,8 @@ def test_corpus_readme_documents_contract():
     text = CORPUS_README.read_text(encoding="utf-8")
     for needle in ("doc/corpus", "不入 git", "脱敏", "corpus_check.py",
                    "身份证", "手机号", "邮箱", "银行卡", "座机",
-                   "E3", "E6", "--corpus-manifest", "--require-packs",
-                   "为什么不能拿技术文档当负样本", "100 ms/千字", "0.5 处/万字"):
+                   "E3", "E3a", "E3b", "e3_all", "E6", "--corpus-manifest",
+                   "--require-packs", "为什么不能拿技术文档当负样本",
+                   "100 ms/千字", "0.5 处/万字", "语料质量提示", "标题跨段",
+                   "SKIP_CORPUS_NAMES", "语料清洗要求"):
         assert needle in text, f"语料契约 README 缺少关键内容：{needle}"

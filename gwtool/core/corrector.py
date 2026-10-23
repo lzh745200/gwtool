@@ -31,6 +31,12 @@ ADVISORY_CATEGORIES: tuple[str, ...] = (
     "数字用法",      # 阿拉伯数字年份/百分数等规范提示
     grammar_rules.CAT_ADVISORY,     # 表达提示（跨词冗余）
     grammar_rules.CAT_PUNCT_PAIR,   # 标点规范（成对符号/引号形式）
+    # 机构沿革（v1.10.0 D1，真实语料驱动的修正）：机构新旧对照只能**提示**，
+    # 绝不能自动替换 —— 真实政策文本里"经征求国务院法制办公室…的意见"
+    # "国土资源部"这类历史引述是规范写法，替换成现名会把对的改错
+    # （审计实测 4 处误报，其中 `法制办→司法局` 连方向都是错的）。
+    # 这类映射本质上是"时点判断"，词表法没有可靠的正向写法，按红线降为提示级。
+    "机构沿革",
 )
 
 
@@ -330,20 +336,63 @@ def _check_exact(text: str) -> list[Correction]:
 
 
 _HIST_YEAR_RX = re.compile(r"(?:19|20)\d{2}\s*年")
+# 句子切分：句末点号/换行都算一句的边界（机构沿革判定按"句"取语境）
+_SENT_BREAK_RX = re.compile(r"[。！？；!?;\n]")
+# 历史引述的**句子级**标记（v1.10.0 D1，真实语料驱动）：
+#   · 机构沿革 / 撤销 / 并入 / 更名 / 前身 —— 明说这是沿革叙述；
+#   · 原 / 曾 / 前 —— 单字标记（"原卫生部""曾由…"）；
+#   · 征求……意见 —— 公文里征询旧机构意见的固定句式（真实语料 4 处误报里
+#     有两处就是"经研究/并经征求 X、Y 等单位的意见"）。
+_HIST_MARKERS = ("沿革", "撤销", "并入", "更名", "前身", "改革前", "组建",
+                 "原称", "原名", "原为", "原属", "曾是", "曾用", "前称")
+# "征求"单独出现太宽（"征求各单位意见"是正常现行文），必须与"意见"同句才认。
+_HIST_PAIR_MARKERS = (("征求", "意见"),)
+
+
+def _sentence_of(text: str, i: int) -> str:
+    """取出 pos 所在的句子（以句末点号/换行为界），限制在 200 字内。"""
+    n = len(text)
+    lo = max(0, i - 200)
+    hi = min(n, i + 200)
+    left = 0
+    for m in _SENT_BREAK_RX.finditer(text, lo, i):
+        left = m.end()
+    right = hi
+    m = _SENT_BREAK_RX.search(text, i, hi)
+    if m:
+        right = m.start()
+    return text[left:right]
 
 
 def _looks_historical(text: str, i: int) -> bool:
-    """命中处是否处于"历史引述"语境（机构沿革专用，审计 P2-12）。
+    """命中处是否处于"历史引述"语境（机构沿革专用）。
 
-    只取两种**确定性**信号，不做语义猜测：
-      · 命中前 12 字内出现四位年份 —— `1953年，卫生部`、`1998年组建的国家旅游局`；
-      · 紧邻前缀是「原 / 前 / 撤销」—— `原卫生部`、`前国家旅游局`。
-    命中则不改：把历史引述里的旧机构名改成现名，会把本来正确的引述改错。
+    v1.10.0 D1 增强：真实语料（gov.cn 政策文本）上，仅看"前 12 字年份 + 原/前/撤销"
+    仍漏掉两类规范写法 ——
+      · "经研究，并经征求国务院法制办公室、最高人民法院等单位的意见"（征询旧机构）；
+      · "经研究并书面征求国土资源部、国务院法制办的意见"。
+    这类句子的共同点不是"紧邻年份"，而是**整句都在叙述沿革/征询**。故改为
+    按**句子**取语境，命中下列任一信号即视为历史引述（宁少报不误报）：
+      ① 本句出现四位年份（`1953年，卫生部成立`）；
+      ② 命中紧邻前缀是「原 / 前 / 撤销」（`原卫生部`，与旧行为一致）；
+      ③ 本句出现沿革类词：沿革/撤销/并入/更名/前身/改革前/组建/原称/原名/
+        原为/原属/曾是/曾用/前称（**不用**光秃秃的"原/前/曾" —— 它们会被
+        "目前/原则/前提/原因/以前"大量误触，等于把这条提示整类关掉）；
+      ④ 本句同时出现「征求」与「意见」（征询旧机构意见的固定句式）。
+    本类现已整类降为提示级（`ADVISORY_CATEGORIES`），这里再收紧只是为了
+    让提示本身也别在历史叙述上刷屏。
     """
     head = text[max(0, i - 12):i]
     if _HIST_YEAR_RX.search(head):
         return True
-    return head.rstrip().endswith(("原", "前", "撤销"))
+    if head.rstrip().endswith(("原", "前", "撤销")):
+        return True
+    sent = _sentence_of(text, i)
+    if _HIST_YEAR_RX.search(sent):
+        return True
+    if any(m in sent for m in _HIST_MARKERS):
+        return True
+    return all(a in sent and b in sent for a, b in _HIST_PAIR_MARKERS)
 
 
 def _suppress_inside_common_words(
@@ -431,6 +480,23 @@ def _suppress_inside_common_words(
                 inside = bool(inside_mask[s])
                 if not (both_ends and not inside):
                     continue  # 低置信：跨词/词内命中 -> 误报
+                # v1.10.0 D1（真实语料驱动）：低置信生成对的**跨词相接**判定。
+                # 实测（gov.cn 政策文本）：`…电子信息屏等场所…` 分词为
+                # 电子信息|屏|等|场所，生成对 `屏等→平等`（0.55）两端都落在边界
+                # 上，旧门控全部放行 —— 其实只是"屏"+"等"两个词的相接。
+                # ⚠ 不能写成"有内部边界就压"：E2 的 800 样本里 150 条召回全是
+                # 这种形态（生成器的错形多为"生僻同音字 + 常用字"，jieba 必然切成
+                # 两个词），一刀切会让 E2 从 80.6% 掉到 61.9%（实测）。故只压两类
+                # **结构性**形态：
+                #   · 长度 ≥3 且内部有分词边界 —— 词组被切开，只可能是跨词相接
+                #     （E2 样本里没有这种形态，零代价）；
+                #   · 长度 2 且**末字是列举/语气助词**（等/们/者/吗/呢/吧/啊/呀）——
+                #     这类字只作词尾或独立虚词出现，不会是两字错形的末字；
+                #     实测零代价（150 条内部边界样本全部保住）。
+                # 精标对/用户词条（conf≥0.7）不进这个分支，不受影响。
+                if any(p in boundaries for p in range(s + 1, e)) and (
+                        len(hit) >= 3 or hit[-1] in _CLITIC_TAIL_CHARS):
+                    continue
                 if _is_common_char_sequence(hit):
                     continue  # 逐字皆为高频常用字 -> 结构性误报
         elif tokenized is not None:
@@ -453,6 +519,14 @@ def _suppress_inside_common_words(
 
 
 _LOW_CONF = 0.7            # 低于此置信度走严格门控
+
+# 低置信两字命中"跨词相接"判据里的**词尾虚字集**（v1.10.0 D1）。
+# 依据：真实语料 `电子信息屏等场所` 里 `屏等`（0.55）是两个词相接；
+# 这些字只能作词尾/独立虚词（列举助词"等"、复数"们"、"者"、语气词），
+# 不会成为两字错形的末字。**刻意不收"的/了/着/过/地/得/么"**：实测收进来
+# 会压掉 E2 的 3 条真实召回（士的→似的、湿的→似的、籍地→基地）；
+# 而"士的/湿的"这类错形在真实文本里恰是高频笔误，不该被吞掉。
+_CLITIC_TAIL_CHARS = frozenset("等们者吗呢吧啊呀")
 # “高频常用字”门槛（jieba 单字词频）。取值依据实测权衡（语料：本仓库 2331 段
 # /5.2 万字正常中文；样本：seed.db 4 万条生成对随机 600 条）：
 #     门槛      生成层召回    每万字误报命中
@@ -561,13 +635,58 @@ def _covered_by_known_word(text: str, s: int, e: int) -> bool:
     return False
 
 
+# 书名号内**按原文引用**，其中出现的半角符号是原题写法，不能"规范化"。
+# v1.10.0 D1（真实语料驱动）：`《法治中国建设规划(2020—2025年)》` 里的半角括号
+# 被全角括号规则改掉 —— 改的是**引用中的文件标题**，一旦整篇应用就改了题名。
+# 只对"可自动替换"的标点规则生效（数字用法/表达提示本就只提示）。
+# 用 reason 作键：PUNCT_RULES 是数据表，加键会污染格式；reason 是对外文案、
+# 改动时会连带审文案，比加内部 id 更难被悄悄漂移。
+_SKIP_INSIDE_BOOK_TITLE_REASONS = frozenset({
+    "中文语境应使用全角括号",   # 《…(2020—2025年)》
+    "中文语境应使用全角逗号",   # 《关于印发,某某,的通知》这类原题
+    "中文语境应使用全角冒号",
+    "中文语境应使用全角分号",
+})
+
+
+def _book_title_spans(text: str) -> list[tuple[int, int]]:
+    """全部书名号的区间 [(start, end)]（含《》本身）；未闭合的从《到串尾。
+
+    O(n) 单趟扫描，与 `_check_exact` 里的书名号计数同源，但这里需要区间。
+    """
+    spans: list[tuple[int, int]] = []
+    open_at = -1
+    for i, ch in enumerate(text):
+        if ch == "《":
+            if open_at < 0:
+                open_at = i
+        elif ch == "》" and open_at >= 0:
+            spans.append((open_at, i + 1))
+            open_at = -1
+    if open_at >= 0:
+        spans.append((open_at, len(text)))
+    return spans
+
+
+def _inside_any(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= pos < b for a, b in spans)
+
+
 def _check_regex_group(text: str, rules, category: str) -> list[Correction]:
     out: list[Correction] = []
+    title_spans: list[tuple[int, int]] | None = None
     for rx, repl, reason, conf in rules:
         if conf <= 0:
             continue
+        skip_in_title = reason in _SKIP_INSIDE_BOOK_TITLE_REASONS
         try:
             for m in re.finditer(rx, text):
+                if skip_in_title:
+                    # 惰性计算：绝大多数规则不需要书名号区间
+                    if title_spans is None:
+                        title_spans = _book_title_spans(text)
+                    if _inside_any(m.start(), title_spans):
+                        continue
                 if category == "数字用法":
                     # 数字规则的 repl 是提示标签而非替换文本
                     out.append(Correction(m.start(), m.end(), m.group(0), repl,

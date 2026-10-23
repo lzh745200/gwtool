@@ -126,6 +126,24 @@ def dirty_corpus_dir(tmp_path_factory) -> Path:
     return d
 
 
+#: 只命中"提示类"的句子：数字用法 / 标点规范（引号未配对）/ 机构沿革。
+#: 它们都不该进 E3a（可自动替换类）门禁。
+ADVISORY_LINES = [
+    "二〇二六年十月三日印发的文件，请遵照执行。",
+    "会议指出“要加强管理，确保落实。",
+    "由市环保局负责，市生态环境局配合。",
+]
+
+
+@pytest.fixture(scope="module")
+def advisory_corpus_dir(tmp_path_factory) -> Path:
+    """干净段落 + 三类提示类命中：E3a 应为 0，E3b 应 ≥3。"""
+    d = tmp_path_factory.mktemp("corpus_advisory")
+    lines = CLEAN_PARAGRAPHS * 40 + ADVISORY_LINES
+    (d / "gongwen.md").write_text("\n".join(lines), encoding="utf-8")
+    return d
+
+
 @pytest.fixture(scope="module")
 def base_run(empty_pack_root, out_dir):
     """--profile base：CI 门禁档位，无 --corpus。"""
@@ -159,6 +177,16 @@ def dirty_corpus_run(empty_pack_root, dirty_corpus_dir):
     return rc, out
 
 
+@pytest.fixture(scope="module")
+def advisory_corpus_run(empty_pack_root, advisory_corpus_dir, out_dir):
+    """提示类语料：E3a 应 PASS、E3b 只报告（SKIP）。"""
+    json_path = out_dir / "advisory.json"
+    rc, out = _run("--profile", "base", "--pack-root", str(empty_pack_root),
+                   "--corpus", str(advisory_corpus_dir),
+                   "--gen-sample", str(GEN_SAMPLE), "--json", str(json_path))
+    return rc, out, json_path
+
+
 # ---------------------------------------------------------------- base 档位
 def test_base_profile_exits_zero(base_run):
     """验收：--profile base exit 0（不需要增强包，CI 可直接当门禁）。"""
@@ -172,25 +200,31 @@ def test_base_profile_exits_zero(base_run):
 
 
 def test_base_profile_skips_enhancement_and_ungated_items(base_run):
-    """base 档位：E4/E6 属增强层、E3/E5 缺语料 → 全部 SKIP 且写明原因。"""
+    """base 档位：E4/E6 属增强层、E3a/E3b/E5 缺语料 → 全部 SKIP 且写明原因。"""
     _rc, out, _json = base_run
-    e3 = _line_of(out, "E3")
-    assert e3.startswith("[SKIP] E3 ")
+    e3 = _line_of(out, "E3a")
+    assert e3.startswith("[SKIP] E3a ")
     assert "示意·不参与门禁" in e3 and "缺 --corpus" in e3
+    e3b = _line_of(out, "E3b")
+    assert e3b.startswith("[SKIP] E3b ")
+    assert "提示类" in e3b and "不参与门禁" in e3b
     e4 = _line_of(out, "E4")
     assert e4.startswith("[SKIP] E4 ") and "profile=base" in e4
     e5 = _line_of(out, "E5")
     assert e5.startswith("[SKIP] E5 ") and "示意·不参与门禁" in e5
     e6 = _line_of(out, "E6")
     assert e6.startswith("[SKIP] E6 ") and "不含增强层" in e6
-    # 无 --corpus 时 E3/E5/E6 都要带统一标记（P0-2 验收口径）
+    # 无 --corpus 时 E3a/E3b/E5/E6 都要带统一标记（P0-2 验收口径）
     assert "示意·不参与门禁" in e6
     # SKIP 不计 FAIL，也不影响退出码——汇总必须说清楚
     assert "未参与门禁" in out and "不影响退出码" in out
 
 
 def test_json_contract(base_run):
-    """JSON 必须带 profile / 语料指纹 / 样本量，结果项带 status。"""
+    """JSON 必须带 profile / 语料指纹 / 样本量，结果项带 status。
+
+    同时锁 E3 口径拆分：E3a/E3b/e3_all 三个键都在，且旧键 E3 仍等于总口径。
+    """
     _rc, _out, json_path = base_run
     payload = _json_payload(json_path)
     assert payload["profile"] == "base"
@@ -203,17 +237,28 @@ def test_json_contract(base_run):
     assert len(corpus["fingerprint"].strip("0")) > 0
 
     sample = payload["sample_chars"]
-    assert set(sample) == {"E3", "E5", "E6"}
+    assert set(sample) == {"E3", "E3a", "E3b", "E5", "E6"}
     assert sample["E3"] > 0 and sample["E5"] > 0
+    assert sample["E3a"] == sample["E3"] == sample["E3b"]
 
     statuses = {r["key"]: r["status"] for r in payload["results"]}
-    assert statuses == {"E1": "PASS", "E2": "PASS", "E3": "SKIP",
+    assert statuses == {"E1": "PASS", "E2": "PASS", "E3a": "SKIP", "E3b": "SKIP",
                         "E4": "SKIP", "E5": "SKIP", "E6": "SKIP"}
     for item in payload["results"]:
         assert item["passed"] == (item["status"] == "PASS")
         assert item["status"] in {"PASS", "FAIL", "SKIP"}
-    assert payload["data"]["profile"] == "base"
-    assert payload["data"]["corpus"]["fingerprint"] == corpus["fingerprint"]
+    data = payload["data"]
+    assert data["profile"] == "base"
+    assert data["corpus"]["fingerprint"] == corpus["fingerprint"]
+
+    # E3 口径三件套：E3a 可替换类 / E3b 提示类 / e3_all 旧总口径
+    for key in ("E3a", "E3b", "e3_all"):
+        assert key in data, f"JSON data 缺少 {key}"
+    assert data["E3"] == data["e3_all"], "旧键 E3 应等于 e3_all 总口径"
+    assert data["E3b"]["gated"] is False, "提示类永远不参与门禁"
+    assert "机构沿革" in data["e3_all"]["advisory_categories"]
+    assert {"数字用法", "表达提示", "标点规范"} <= set(
+        data["e3_all"]["advisory_categories"])
 
 
 # ---------------------------------------------------------------- all 档位
@@ -233,12 +278,15 @@ def test_all_profile_without_packs_skips_e4_e6(all_run):
 
 # ---------------------------------------------------------- 语料参与门禁
 def test_clean_corpus_gates_e3_and_e5_to_pass(clean_corpus_run):
-    """给了规范语料后 E3/E5 从 SKIP 变成真门禁，并应 PASS。"""
+    """给了规范语料后 E3a/E5 从 SKIP 变成真门禁，并应 PASS。"""
     rc, out = clean_corpus_run
     assert rc == 0, f"规范语料应 exit 0，实际 {rc}\n{out}"
-    e3 = _line_of(out, "E3")
-    assert e3.startswith("[PASS] E3 ")
+    e3 = _line_of(out, "E3a")
+    assert e3.startswith("[PASS] E3a ")
     assert "外部语料" in e3 and "示意" not in e3
+    e3b = _line_of(out, "E3b")
+    assert e3b.startswith("[SKIP] E3b ")
+    assert "只报告" in e3b and "不参与门禁" in e3b
     e5 = _line_of(out, "E5")
     assert e5.startswith("[PASS] E5 ") and "示意" not in e5
     # 增强层项仍按 profile 跳过
@@ -247,25 +295,59 @@ def test_clean_corpus_gates_e3_and_e5_to_pass(clean_corpus_run):
 
 
 def test_real_failure_sets_exit_code_one(dirty_corpus_run):
-    """有真实 FAIL 才 exit 1：语料里有重复标点 → E3 必然 FAIL。"""
+    """有真实 FAIL 才 exit 1：语料里有重复标点（"标点"属可替换类）→ E3a 必然 FAIL。"""
     rc, out = dirty_corpus_run
     assert rc == 1, f"存在真实误报时应 exit 1，实际 {rc}\n{out}"
-    assert _line_of(out, "E3").startswith("[FAIL] E3 ")
+    assert _line_of(out, "E3a").startswith("[FAIL] E3a ")
+    # 可替换类误报不该被算成提示类
+    assert "可替换类" in _line_of(out, "E3a") and "标点" in _line_of(out, "E3a")
     summary = [ln for ln in out.splitlines() if ln.startswith("门禁项：")]
     assert summary, f"缺少汇总行：\n{out}"
-    assert "E3" in summary[0].split("未达标：", 1)[1]
+    assert "E3a" in summary[0].split("未达标：", 1)[1]
     assert "退出码：1" in out
 
 
 def test_empty_corpus_is_a_real_failure(empty_pack_root, tmp_path):
-    """空语料是配置错误：判 E3 FAIL 并 exit 1，绝不能当门禁通过。"""
+    """空语料是配置错误：判 E3a FAIL 并 exit 1，绝不能当门禁通过。"""
     empty = tmp_path / "no_corpus"
     empty.mkdir()
     rc, out = _run("--profile", "base", "--pack-root", str(empty_pack_root),
                    "--corpus", str(empty), "--gen-sample", "100")
     assert rc == 1, f"空语料应 exit 1，实际 {rc}\n{out}"
-    assert _line_of(out, "E3").startswith("[FAIL] E3 ")
+    assert _line_of(out, "E3a").startswith("[FAIL] E3a ")
     assert "为空或不可读" in out
+
+
+# ---------------------------------------------------------------- E3a/E3b 拆分
+def test_advisory_only_corpus_passes_e3a_but_reports_e3b(advisory_corpus_run):
+    """提示类命中只进 E3b：E3a 必须 PASS，E3b 只报告（SKIP）。"""
+    rc, out, json_path = advisory_corpus_run
+    assert rc == 0, f"只有提示类命中时 E3a 应 PASS，实际 exit {rc}\n{out}"
+    e3a = _line_of(out, "E3a")
+    assert e3a.startswith("[PASS] E3a ")
+    assert "可替换类 0 处" in e3a, e3a
+    assert "标点规范" not in e3a.split("分类：", 1)[1], "提示类不该算进 E3a"
+    e3b = _line_of(out, "E3b")
+    assert e3b.startswith("[SKIP] E3b ") and "提示类" in e3b
+    assert "数字用法" in e3b and "标点规范" in e3b and "机构沿革" in e3b, e3b
+    # 文本输出里两个口径都要能看到
+    assert "E3 口径" in out and "e3_all" in out
+
+    data = _json_payload(json_path)["data"]
+    assert data["E3a"]["hits"] == 0 and data["E3a"]["status"] == "PASS"
+    assert data["E3a"]["gated"] is True
+    assert data["E3b"]["hits"] >= 3 and data["E3b"]["status"] == "SKIP"
+    assert data["E3b"]["gated"] is False
+    assert data["e3_all"]["hits"] == data["E3b"]["hits"]
+    assert data["E3a"]["hits"] + data["E3b"]["hits"] == data["e3_all"]["hits"]
+    assert set(data["E3b"]["by_category"]) >= {"数字用法", "标点规范", "机构沿革"}
+
+
+def test_org_rename_counts_as_advisory():
+    """机构沿革按数据表自注"提示级"归 E3b（改这一行即可翻转口径）。"""
+    ev = _load_module()
+    assert ev.E3_ADVISORY_EXTRA == ("机构沿革",)
+    assert ev.TH_FP_PER_WAN == 0.50, "E3a 阈值是有意固定的红线"
 
 
 # ---------------------------------------------------------------- 参数兼容

@@ -15,11 +15,22 @@
 
 评测档案（--profile）与 SKIP 语义
 --------------------------------
-    base   只跑基础三层：门禁 E1/E2/E3/E5（CI 用的就是这一档；
+    base   只跑基础三层：门禁 E1/E2/E3a/E5（CI 用的就是这一档；
            不需要增强包，任何机器都能通过）
     l4     基础 + 单字精排层：门禁项之外再加 E4/E6（需已装拼写增强包）
     l5     基础 + 序列生成层：同上（需已装语法增强包）
     all    基础 + 两层（默认值，保持旧行为：跑全部 6 项）
+
+E3 口径拆分（v1.12，D2）
+------------------------
+真实语料上"提示类命中"（数字用法 / 表达提示 / 标点规范 / 机构沿革）与
+"可自动替换类误报"混在同一个 0.5 处/万字 门禁里，会把后者掩盖掉。现在拆成：
+
+    E3a  可自动替换类（category ∉ 提示类）→ **硬门禁 ≤0.5 处/万字**
+    E3b  提示类（category ∈ 提示类）      → 只报告，不参与门禁（固定 SKIP）
+    e3_all  旧总口径（含提示类）           → 仅写 JSON/文本供历史对比
+
+提示类集合 = ``corrector.ADVISORY_CATEGORIES`` ＋ ``E3_ADVISORY_EXTRA``（机构沿革）。
 
 **未参与门禁的项输出 [SKIP]，不计 FAIL、不影响退出码**，并在结果行里写明原因：
   - 档案不含的层（如 base 不含 L4/L5）→ SKIP；
@@ -37,7 +48,7 @@
     ... scripts/eval_corrector.py
 
     # 指定公文语料（每个文件一篇，UTF-8/GBK 自动探测）作为负样本；
-    # 只有给了 --corpus，E3/E5/E6 才真正参与门禁。
+    # 只有给了 --corpus，E3a/E5/E6 才真正参与门禁。
     # 语料必须先过脱敏/编码/规模体检：scripts/corpus_check.py（见 doc/corpus/README.md）
     ... scripts/eval_corrector.py --corpus D:/公文语料
 
@@ -75,18 +86,35 @@ CJK = re.compile(r"[\u4e00-\u9fff]")
 # 递归体检不冲突：检查端会连子目录一起查，评测端只吃目录第一层，
 # 避免"我以为评测了全部语料、实际只评测了顶层"这种静默差异）。
 CORPUS_GLOBS = ("*.txt", "*.md", "*.csv")
-# 与 corpus_check.py 同一份豁免：`doc/corpus/README.md` 是契约说明，不是语料。
-# 若把它读进 E3，说明文档里的示例数字/错例会被当成"真实公文误报"。
-SKIP_CORPUS_NAMES = frozenset({"readme.md"})
+# 与 corpus_check.py 同一份"不是语料"清单：`doc/corpus/` 下除真实语料外还会放
+# README、采集合规检查表、AUTHORIZATION*.json（D 批交付物）。不跳过会让 E3 把
+# 检查表当成负样本（实测 1213 汉字，足以改变处/万字）。**两个脚本各存一份同内容
+# 常量**（不新增共享模块，保证脚本可单独拷走），有测试断言两边相等。
+SKIP_CORPUS_NAMES: frozenset[str] = frozenset({
+    "README.md",
+    "采集合规检查表.md",
+    "AUTHORIZATION.example.json",
+    "AUTHORIZATION.json",
+})
+_SKIP_CORPUS_LOWER = frozenset(name.lower() for name in SKIP_CORPUS_NAMES)
 
 # ---------------------------------------------------------------- 判定阈值
 # 这些阈值就是"红线"的数值化。改动它们等同于改验收标准，须在提交说明里写明理由。
 TH_CURATED_RECALL = 1.00        # E1 精标集检出率（人工精标必须 100% 认出）
 TH_GEN_CTX_RECALL = 0.75        # E2 生成对在上下文中的召回（现状 0.82，缓降即预警）
-TH_FP_PER_WAN = 0.50            # E3 公文体负样本误报（现状 0；这是不可退让的红线）
+TH_FP_PER_WAN = 0.50            # E3a 可自动替换类误报（现状 0；这是不可退让的红线）
 TH_OOV_RECALL_BASE = 0.05       # E4 词表外错字：基础三层的期望（现状 0，属已知天花板）
 TH_NEURAL_FP_PER_QIAN = 1.00    # E6 开启神经层后新增误报（处/千字）：现状 57.6，本方案核心待修项
 TH_MS_PER_QIAN_BASE = 100.0     # E5 基础三层耗时（毫秒/千字）
+
+#: E3b「提示类」口径（v1.12，D2）：`corrector.ADVISORY_CATEGORIES`
+#: （数字用法 / 表达提示 / 标点规范）是"建议是提示标签、写回会把正文改成标签"的
+#: 类别，本就不该与"可自动替换类"共用 0.5/万字 的硬门禁。这里再补一项
+#: 「机构沿革」：`corrector_data.ORG_RENAME_PAIRS` 自注"提示级，建议核实后替换"
+#: （corrector_data.py:514），真实语料首轮也把 4 处机构沿革算作提示类。
+#: **若要让机构沿革回到 E3a 门禁，只删这一行即可**（`by_category` 两份都保留，
+#: 可在 JSON 里按任意口径重算）。
+E3_ADVISORY_EXTRA: tuple[str, ...] = ("机构沿革",)
 
 # 评测档案 -> 启用的层。E1/E2 两项在所有档案下都算门禁（基础三层）。
 PROFILES: dict[str, tuple[str, ...]] = {
@@ -195,16 +223,17 @@ def _skipped_or_required(key: str, name: str, value, text: str,
 def _corpus_files(path: str) -> list[Path]:
     """语料文件列表（目录 -> 同目录 .txt/.md/.csv；单文件原样返回）。
 
-    `README.md` 一律跳过：它是 `doc/corpus/` 的契约说明，不是负样本。
+    `SKIP_CORPUS_NAMES` 里的说明/合规文件一律跳过：它们是契约文档与 D 批交付物，
+    不是负样本（检查表有 1200+ 汉字，会被算进 E3）。
     """
     p = Path(path)
     if p.is_dir():
         files: list[Path] = []
         for suf in CORPUS_GLOBS:
             files.extend(f for f in sorted(p.glob(suf))
-                         if f.name.lower() not in SKIP_CORPUS_NAMES)
+                         if f.name.lower() not in _SKIP_CORPUS_LOWER)
         return files
-    if p.exists() and p.name.lower() not in SKIP_CORPUS_NAMES:
+    if p.exists() and p.name.lower() not in _SKIP_CORPUS_LOWER:
         return [p]
     return []
 
@@ -353,6 +382,10 @@ def main() -> int:
     from gwtool.core import corrector, corrector_data, csc_gec, csc_neural
     from gwtool.db import dao
 
+    # E3b 提示类类别集合：以 corrector.ADVISORY_CATEGORIES 为唯一来源，另加
+    # 数据表自注"提示级"的机构沿革（见文件头 E3_ADVISORY_EXTRA 的说明）。
+    e3_advisory = set(corrector.ADVISORY_CATEGORIES) | set(E3_ADVISORY_EXTRA)
+
     def _force_settings(on_l4: bool, on_l5: bool) -> None:
         csc_neural.set_setting(on_l4)
         csc_gec.set_setting(on_l5)
@@ -483,39 +516,88 @@ def main() -> int:
     data["E2"] = {"sample": len(sample), "iso": iso, "ctx": ctx,
                   "iso_recall": iso / n, "ctx_recall": ctx_recall}
 
-    # ---------------------------------------------------------- E3 负样本误报
+    # ------------------------------------------- E3a/E3b 负样本误报（口径拆分）
+    # E3 口径拆分（v1.12，D2）：真实语料首轮 11 处里近一半是提示类（机构沿革 /
+    # 标点规范等）—— 它们的 suggestion 是提示标签或"建议核实后替换"，混进同一个
+    # 0.5/万字 门禁会把"可自动替换类"的误报比例掩盖掉。拆成：
+    #   E3a 可自动替换类（category ∉ 提示类）→ **硬门禁 ≤0.5 处/万字**；
+    #   E3b 提示类（category ∈ 提示类）      → **只报告、不参与门禁**；
+    #   e3_all 旧总口径（含提示类）           → 保留在 JSON/文本里便于与历史对比。
     t0 = time.perf_counter()
     fp_hits = []
     for s in neg:
         fp_hits.extend(corrector.check_text(s))
     t_neg = time.perf_counter() - t0
-    fp_per_wan = len(fp_hits) / max(1, n_chars) * 10000
-    by_cat: dict[str, int] = {}
-    for h in fp_hits:
-        by_cat[h.category] = by_cat.get(h.category, 0) + 1
-    e3_value: float | None = round(fp_per_wan, 3)
+    hits_a = [h for h in fp_hits if h.category not in e3_advisory]
+    hits_b = [h for h in fp_hits if h.category in e3_advisory]
+
+    def _per_wan(count: int) -> float:
+        return count / max(1, n_chars) * 10000
+
+    def _by_category(hits) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for h in hits:
+            out[h.category] = out.get(h.category, 0) + 1
+        return out
+
+    by_cat = _by_category(fp_hits)
+    by_cat_a = _by_category(hits_a)
+    by_cat_b = _by_category(hits_b)
+    e3a_value: float | None = round(_per_wan(len(hits_a)), 3)
+    e3b_value: float | None = round(_per_wan(len(hits_b)), 3)
+    e3_all_value: float | None = round(_per_wan(len(fp_hits)), 3)
+    e3a_text = (f"可替换类 {len(hits_a)} 处 / {n_chars} 汉字 = "
+                f"{_per_wan(len(hits_a)):.2f} 处/万字"
+                f"（总口径含提示类 {len(fp_hits)} 处 = "
+                f"{_per_wan(len(fp_hits)):.2f}，仅对比）　来源：{neg_src}"
+                f"　分类：{by_cat_a or '无'}")
+    e3b_text = (f"提示类 {len(hits_b)} 处 / {n_chars} 汉字 = "
+                f"{_per_wan(len(hits_b)):.2f} 处/万字"
+                f"（只报告、不参与门禁）　分类：{by_cat_b or '无'}")
     if external_corpus and not n_chars:
         results.append(Result(
-            "E3", "负样本误报（基础三层）", None,
+            "E3a", "可自动替换类误报（基础三层）", None,
             f"外部语料为空或不可读（{args.corpus}）：不得把空样本当门禁通过",
             STATUS_FAIL, ungated_reason))
+        results.append(_skipped_result(
+            "E3b", "提示类命中（只报告）", None,
+            f"外部语料为空或不可读（{args.corpus}）：提示类无法统计",
+            ungated_reason))
     else:
-        e3_text = (f"{len(fp_hits)} 处 / {n_chars} 汉字 = {fp_per_wan:.2f} 处/万字"
-                   f"　来源：{neg_src}　分类：{by_cat or '无'}")
         if corpus_gated:
             results.append(_gated_result(
-                "E3", "负样本误报（基础三层）", e3_value, e3_text,
-                fp_per_wan <= TH_FP_PER_WAN,
+                "E3a", "可自动替换类误报（基础三层）", e3a_value, e3a_text,
+                _per_wan(len(hits_a)) <= TH_FP_PER_WAN,
                 f"　（阈值 ≤{TH_FP_PER_WAN} 处/万字）"))
         else:
             results.append(_skipped_result(
-                "E3", "负样本误报（基础三层）", e3_value,
-                f"{e3_text}（{UNGATED_MARK}：{ungated_reason}）",
-                ungated_reason))
-    data["E3"] = {"segments": len(neg), "chars": n_chars, "hits": len(fp_hits),
-                  "per_wan": e3_value, "by_category": by_cat,
-                  "corpus": neg_src, "external": external_corpus,
-                  "gated": corpus_gated, "seconds": round(t_neg, 3)}
+                "E3a", "可自动替换类误报（基础三层）", e3a_value,
+                f"{e3a_text}（{UNGATED_MARK}：{ungated_reason}）", ungated_reason))
+        e3b_tail = "" if corpus_gated else f"（{UNGATED_MARK}：{ungated_reason}）"
+        results.append(_skipped_result(
+            "E3b", "提示类命中（只报告）", e3b_value,
+            f"{e3b_text}{e3b_tail}（提示类不计入门禁）", "提示类只报告、不参与门禁"))
+    e3a_status = results[-2].status
+    e3b_status = results[-1].status
+    data["E3a"] = {"segments": len(neg), "chars": n_chars, "hits": len(hits_a),
+                   "per_wan": e3a_value, "by_category": by_cat_a,
+                   "threshold": TH_FP_PER_WAN, "corpus": neg_src,
+                   "external": external_corpus, "gated": corpus_gated,
+                   "status": e3a_status, "seconds": round(t_neg, 3)}
+    data["E3b"] = {"segments": len(neg), "chars": n_chars, "hits": len(hits_b),
+                   "per_wan": e3b_value, "by_category": by_cat_b,
+                   "corpus": neg_src, "external": external_corpus,
+                   "gated": False, "status": e3b_status,
+                   "note": "提示类只报告，不参与门禁"}
+    data["e3_all"] = {"segments": len(neg), "chars": n_chars,
+                      "hits": len(fp_hits), "per_wan": e3_all_value,
+                      "by_category": by_cat, "corpus": neg_src,
+                      "external": external_corpus, "gated": False,
+                      "advisory_categories": sorted(e3_advisory),
+                      "note": "旧 E3 总口径（含提示类），仅对比、不门禁"}
+    # 兼容旧消费方：data["E3"] 仍是"所有命中"的总口径（数值与 e3_all 相同），
+    # 但门禁只认 E3a；新代码请读 E3a / E3b / e3_all。
+    data["E3"] = data["e3_all"]
 
     # ---------------------------------------------------------- E4 词表外错字
     oov = [(w, c) for w, c in OOV_CASES
@@ -663,10 +745,14 @@ def main() -> int:
     if args.require_packs:
         print("说明：--require-packs 下 E4/E6 必须真实运行（增强包 + 真实语料）；"
               "任一 FAIL 表示增强层验收未完成。")
+    print(f"E3 口径：E3a 可自动替换类（硬门禁 ≤{TH_FP_PER_WAN} 处/万字）＋ "
+          f"E3b 提示类（{'/'.join(sorted(e3_advisory))}，只报告、不参与门禁）；"
+          "JSON 的 e3_all 保留旧总口径便于对比。")
     print(f"退出码：{1 if failed else 0}（{'有门禁项未达标' if failed else '门禁通过'}）")
 
     # ---------------------------------------------------------- JSON 落盘
-    sample_chars = {"E3": n_chars, "E5": probe_chars, "E6": e6_chars}
+    sample_chars = {"E3": n_chars, "E3a": n_chars, "E3b": n_chars,
+                    "E5": probe_chars, "E6": e6_chars}
     data["sample_chars"] = sample_chars
     data["require_packs"] = bool(args.require_packs)
     if args.json:

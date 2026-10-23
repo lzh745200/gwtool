@@ -43,3 +43,5 @@ node_modules/
 # ---- 真实公文语料（含敏感信息，默认不入库；只保留使用说明）----
 /doc/corpus/*
 !/doc/corpus/README.md
+!/doc/corpus/采集合规检查表.md
+!/doc/corpus/AUTHORIZATION.example.json
