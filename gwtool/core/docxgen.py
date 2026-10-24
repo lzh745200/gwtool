@@ -13,13 +13,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Mm, Pt, RGBColor
 
+from . import compile_norm
 from .model import DocTree, HEADING, LIST_ITEM, TABLE
-from .template import DocTemplate, HeadingStyle, material_label
+from .template import DocTemplate, HeadingStyle, cover_visible, material_label
 
 _ALIGN = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -166,14 +168,13 @@ def _enable_even_odd_footers(doc) -> None:
 
 
 # ------------------------------------------------------------------ 主流程
-def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
-    doc = Document()
-    # P1-01：先把模板自带的段后距清零，后续每段再显式写 0，两处一起才保证
-    # "正文 28 磅固定行距、每面 22 行" 的版心口径在 Word/WPS 里都成立。
-    _zero_doc_defaults_spacing(doc)
+def _apply_page_setup(sec, tpl: DocTemplate) -> None:
+    """把模板的纸张与页边距写进某一节。
 
-    # 页面设置
-    sec = doc.sections[0]
+    v1.15 起"封面+目录"与"正文"分成两节（正文页码要从 1 起算）。
+    `add_section()` 虽会复制上一节的页面设置，但模板参数可被用户改、
+    不同 Word/WPS 版本对 sectPr 复制的处理也有差异，显式再设一遍更稳。
+    """
     sec.page_width = Mm(tpl.page_width_mm)
     sec.page_height = Mm(tpl.page_height_mm)
     sec.top_margin = Mm(tpl.margin_top_mm)
@@ -182,14 +183,40 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
     sec.right_margin = Mm(tpl.margin_right_mm)
     sec.footer_distance = Mm(20)
 
+
+def _restart_page_numbering(sec) -> None:
+    """让本节页码从 1 重新起算（`<w:pgNumType w:start="1"/>`）。
+
+    规范要求：封面、目录不编号，正文首页是"— 1 —"。只"不给封面盖页码"
+    不够 —— 正文若沿用全文连续编号，首页会显示"— 3 —"，与目录里写的"1"
+    对不上。分节 + `pgNumType@start=1` 才能让 PAGE 域在正文节重新计数
+    （Word 与 WPS 都支持的标准 OOXML 元素）。
+    """
+    sect_pr = sec._sectPr
+    pg_num = sect_pr.find(qn("w:pgNumType"))
+    if pg_num is None:
+        pg_num = OxmlElement("w:pgNumType")
+        sect_pr.append(pg_num)
+    pg_num.set(qn("w:start"), "1")
+    pg_num.set(qn("w:fmt"), "decimal")
+
+
+def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
+    doc = Document()
+    # P1-01：先把模板自带的段后距清零，后续每段再显式写 0，两处一起才保证
+    # "正文 28 磅固定行距、每面 22 行" 的版心口径在 Word/WPS 里都成立。
+    _zero_doc_defaults_spacing(doc)
+
+    front_sec = doc.sections[0]
+    _apply_page_setup(front_sec, tpl)
+
     # 页码：奇偶页脚（外侧）+ 打开自动更新域
     _enable_even_odd_footers(doc)
     _enable_update_fields(doc)
-    if tpl.page_number_enabled:
-        _build_footers(sec, tpl)
 
-    # 1) 封面
-    if tpl.cover.enabled:
+    # 1) 封面（v1.15：内置模板默认带封面；要素全空时不出页，见 cover_visible）
+    has_cover = cover_visible(tpl)
+    if has_cover:
         _build_cover(doc, tpl)
         doc.add_page_break()
 
@@ -205,22 +232,53 @@ def generate_docx(trees: list[DocTree], tpl: DocTemplate, out_path: str) -> str:
         run = p.add_run(tpl.toc_title)
         _set_run_font(run, "宋体", 22, bold=True)
         toc_p = doc.add_paragraph()
-        _add_field(toc_p, r' TOC \o "1-3" \h \z \u ', "（打开文档后按提示更新目录页码）")
+        # 目录层级：toc_max_level 按**公文层级**计（1=一、，2=（一），3=1.）。
+        # 材料标题额外占一级 Heading，故 Word 域的层级上限要加 shift（封顶 4）。
+        toc_levels = max(1, min(4, int(getattr(tpl, "toc_max_level", 2))
+                                + (1 if tpl.insert_material_titles else 0)))
+        _add_field(toc_p, f' TOC \\o "1-{toc_levels}" \\h \\z \\u ',
+                   "（打开文档后按提示更新目录页码）")
         doc.add_page_break()
 
-    # 3) 红头：紧随目录、与正文首页同页（P1-04，不再单独占一页）
+    # 3) 分节：封面/目录属于"前置部分"，不编号；正文另起一节、页码从 1 起算
+    if has_cover or tpl.toc_enabled:
+        body_sec = doc.add_section(WD_SECTION.NEW_PAGE)
+        _apply_page_setup(body_sec, tpl)
+        _restart_page_numbering(body_sec)
+        if tpl.page_number_enabled:
+            _build_footers(body_sec, tpl)
+    elif tpl.page_number_enabled:
+        _build_footers(front_sec, tpl)   # 无前置部分：单节，页码自然从 1 起
+
+    # 4) 红头：紧随目录、与正文首页同页（P1-04，不再单独占一页）
     if tpl.red_header.enabled:
         _build_red_header(doc, tpl)
 
-    # 4) 正文
+    # 5) 正文
     for mat_no, tree in enumerate(trees, 1):
-        if tpl.insert_material_titles and tree.title:
+        has_mat_title = bool(tpl.insert_material_titles and (tree.title or "").strip())
+        # v1.15：材料标题占用 Heading 1（小标宋），材料内部层级整体下移一级
+        # （`rebase_material_levels`）。字体必须跟着**公文层级**走，否则「一、」
+        # 会落到 Heading 2 的楷体（实测缺陷）：style_lv = 层级 − shift，
+        # 一级黑体 / 二级楷体 / 三级仿宋加粗保持不变。
+        shift = 1 if has_mat_title else 0
+        if has_mat_title:
             label = material_label(tpl.material_title_prefix, mat_no)
-            _add_heading(doc, f"{label}{tree.title}", 1, tpl.h1, tpl.line_spacing_pt)
+            # v1.15：材料/公文标题用小标宋二号（GB/T 9704），与一级标题「一、」
+            # 的黑体三号区分开；仍挂在 Heading 1 样式上，TOC 域才能抓到它。
+            _add_heading(doc, f"{label}{tree.title}", 1, tpl.doc_title,
+                         tpl.line_spacing_pt)
         for blk in tree.effective_blocks(tpl.insert_material_titles):
             if blk.type == HEADING:
-                hs = {1: tpl.h1, 2: tpl.h2, 3: tpl.h3}.get(blk.level, tpl.h4)
-                _add_heading(doc, blk.text, min(blk.level, 3), hs, tpl.line_spacing_pt)
+                raw = max(int(blk.level or 1), 1)
+                # 字体按**公文序号**判定（一、黑体 / （一）楷体 / 1. 仿宋加粗）；
+                # 序号判定不出来时才退回"层级 − shift"，两者对已重定基/未重定基
+                # 的树都成立（直接调用 generate_docx 的入口也不会错位）。
+                off = compile_norm.official_level(blk.text)
+                style_lv = off if off else min(max(raw - shift, 1), 3)
+                style_lv = min(max(style_lv, 1), 3)
+                hs = {1: tpl.h1, 2: tpl.h2, 3: tpl.h3}[style_lv]
+                _add_heading(doc, blk.text, min(raw, 4), hs, tpl.line_spacing_pt)
             elif blk.type == TABLE and blk.rows:
                 _add_table(doc, blk.rows, tpl)
             elif blk.type == LIST_ITEM:
@@ -374,8 +432,12 @@ def _build_red_header(doc, tpl: DocTemplate) -> None:
 
 
 def _add_heading(doc, text: str, level: int, hs: HeadingStyle, line_pt: float) -> None:
-    """用 Heading 样式（供目录抓取）并覆盖字体。"""
-    par = doc.add_paragraph(style=f"Heading {min(level, 3)}")
+    """用 Heading 样式（供目录抓取）并覆盖字体。
+
+    level 到 4：材料标题占 Heading 1 后，公文三级「1.」可能落在 Heading 4；
+    TOC 域按层级上限（toc_max_level + shift）决定是否收录它。
+    """
+    par = doc.add_paragraph(style=f"Heading {min(level, 4)}")
     par.alignment = _ALIGN.get(hs.align, WD_ALIGN_PARAGRAPH.LEFT)
     _set_line_exact(par, line_pt)
     if hs.indent_chars:

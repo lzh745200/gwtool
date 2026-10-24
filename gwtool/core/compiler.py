@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .. import logs
 from ..db import dao
+from . import compile_norm
 from .model import DocTree
 from .template import DocTemplate
 from . import docxgen
@@ -30,11 +31,21 @@ class CompileRequest:
     include_sources: bool = False                          # 追加材料来源清单
 
 
-def load_trees_ex(doc_ids: list[int], extra_paths: list[str]
+def load_trees_ex(doc_ids: list[int], extra_paths: list[str], *,
+                  insert_material_titles: bool = False
                   ) -> tuple[list[DocTree], list[tuple[str, str]], list[bool]]:
     """`load_trees` 的完整形态：同时返回失败清单与"输入槽位是否成功"。
 
     返回 `(成功解析的 trees, failures, slot_ok)`：
+      - 每棵树在返回前都过一遍 ``compile_norm.normalize_tree``（v1.15）：
+        纯文本/markdown/PDF 提取文本会被规范化为标题/层级/正文结构，
+        使 TOC、字体与缩进对任意来源材料同样成立；
+      - ``insert_material_titles=True`` 时（DOCX 与内置 PDF 两条输出路径都
+        从这里取树）：对**有标题的树**调用
+        ``compile_norm.rebase_material_levels``，把材料内部 heading 整体降一级
+        ——材料标题会以 Heading 1 插入，否则目录里两者同为一级、层级扁平。
+        无标题的树不动（不凭空造层）。这是"材料标题重定基"的**唯一事实源**，
+        调用方不要再自己做一遍；
       - failures 元素为 `(展示名, 原因)`，展示名对文档是 `文档#id`、
         对文件是 `Path(p).name`（仅用于日志/提示，不做身份匹配）；
       - `slot_ok` 与输入 `[*doc_ids, *extra_paths]` **逐位对齐**，第 i 位
@@ -69,6 +80,10 @@ def load_trees_ex(doc_ids: list[int], extra_paths: list[str]
             for line in (d.content_text or "").splitlines():
                 if line.strip():
                     tree.blocks.append(Block(text=line.strip()))
+        # 汇编口径规范化（v1.15）：markdown 标记剥离、标题/层级/主送/落款识别、
+        # 硬换行续接。纯文本/markdown/PDF 提取文本都靠它得到可排版的公文结构；
+        # 已由 docx 解析器给出 heading 的树原样保留标题块（只做标记清理）。
+        tree = compile_norm.normalize_tree(tree)
         trees.append(tree)
         slot_ok.append(True)
     from .importer import parse_any
@@ -80,22 +95,36 @@ def load_trees_ex(doc_ids: list[int], extra_paths: list[str]
             reason = str(exc) or exc.__class__.__name__
             r = None
         if r is not None and r.ok and r.tree:
-            trees.append(r.tree)
+            trees.append(compile_norm.normalize_tree(r.tree))
             slot_ok.append(True)
         else:
             failures.append((Path(p).name, reason or "解析失败"))
             slot_ok.append(False)
+    if insert_material_titles:
+        # 材料标题会以 Heading 1 插入（docxgen 与 pdfrender 同口径）：内部
+        # heading 整体降一级，避免目录里材料标题与"一、"同为一级（T4 实测）。
+        # DOCX 与内置 PDF 两条路径都从这里取树，口径只有这一处。
+        trees = [compile_norm.rebase_material_levels(t)
+                 if (t.title or "").strip() else t
+                 for t in trees]
     return trees, failures, slot_ok
 
 
-def load_trees(doc_ids: list[int], extra_paths: list[str]) -> list[DocTree]:
+def load_trees(doc_ids: list[int], extra_paths: list[str], *,
+               insert_material_titles: bool = False) -> list[DocTree]:
     """合并资料库文档与额外文件的解析结果（保持既有签名：只返回 trees）。
+
+    ``insert_material_titles=True`` 时，对**有标题的树**做材料标题重定基
+    （内部 heading 整体降一级，封顶 3），与 ``compile_docx`` 的 DOCX 产物
+    口径完全一致 —— 内置 PDF 路径（``PdfRenderWorker``）必须传它，否则同一
+    批材料导出 DOCX 与 PDF 的目录层级会不一致。
 
     ⚠ 进不了汇编的输入（解析失败 / 文档不存在 / 已进回收站）会被**静默
     丢弃**且调用方无从得知 —— 需要失败清单或要做"材料标题对齐"的调用方
     请改用 `load_trees_ex`。
     """
-    return load_trees_ex(doc_ids, extra_paths)[0]
+    return load_trees_ex(doc_ids, extra_paths,
+                         insert_material_titles=insert_material_titles)[0]
 
 
 def collect_sources(doc_ids: list[int], extra_paths: list[str],
@@ -176,7 +205,15 @@ def build_sources_tree(sources: list[dict]) -> DocTree:
 
 def compile_docx(req: CompileRequest) -> str:
     tpl = req.template or DocTemplate()
-    trees, failures, slot_ok = load_trees_ex(req.doc_ids, req.extra_paths)
+    # 历史调用方（如 CompileWorker 的旧用例）可能把模板以 JSON 字符串传入；
+    # 这里用 getattr 取开关，保持"空材料必须报 ValueError"的既有契约不被
+    # AttributeError 顶掉（真正非空时 docxgen 仍按原行为处理该入参）。
+    insert_titles = bool(getattr(tpl, "insert_material_titles", True))
+    # 材料标题重定基（缺陷 a）由 load_trees_ex 统一完成：DOCX 与内置 PDF
+    # 两条输出路径共用同一入口，避免两处各做一遍后口径漂移。
+    trees, failures, slot_ok = load_trees_ex(
+        req.doc_ids, req.extra_paths,
+        insert_material_titles=insert_titles)
     for name, reason in failures:
         # 静默丢材料是"用户以为进汇编了，其实没有"——必须留痕。
         # UI 主路径（向导）的材料先入库再汇编，失败在导入步已逐条点名；
@@ -194,6 +231,13 @@ def compile_docx(req: CompileRequest) -> str:
         for t, title in zip(trees, aligned):
             if title:
                 t.title = title
+    if insert_titles:
+        # material_titles 可能在加载**之后**才给"无标题材料"补标题，这类树
+        # 没经过 load_trees_ex 的重定基，这里补一次。rebase 带树级标记：
+        # 已重定基的树原样返回，不会双重降级。
+        trees = [compile_norm.rebase_material_levels(t)
+                 if (t.title or "").strip() else t
+                 for t in trees]
     if req.include_sources:
         # 把成功解析的额外文件传下去，避免同一批文件被解析两遍
         ok_extra = [p for p, ok in zip(req.extra_paths,

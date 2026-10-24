@@ -41,8 +41,9 @@ def test_generate_docx_structure(tmp_path):
     xml = doc.settings.element.xml
     assert "updateFields" in xml
     assert "evenAndOddHeaders" in xml
-    # 页脚包含 PAGE 域
-    sec = doc.sections[0]
+    # 页脚包含 PAGE 域（v1.15：封面/目录不编号 → 页码只写在**正文节**，
+    # 因此取最后一节而不是 sections[0]）
+    sec = doc.sections[-1]
     assert "PAGE" in sec.footer.paragraphs[0]._p.xml
     assert "PAGE" in sec.even_page_footer.paragraphs[0]._p.xml
     # 正文行距 28 磅

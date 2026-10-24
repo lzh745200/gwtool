@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import os
+
 
 try:
     import pymupdf as fitz
@@ -20,13 +22,20 @@ except ImportError:  # pragma: no cover
 from PySide6.QtCore import QMarginsF, QByteArray, QSizeF
 from PySide6.QtGui import QFont, QPainter, QPageLayout, QPageSize, QPdfWriter, QTextDocument
 
+from . import compile_norm
 from .model import DocTree, HEADING, LIST_ITEM, TABLE
-from .template import DocTemplate, material_label
+from .template import DocTemplate, cover_visible, material_label
 
 _MM = 2.834645669  # mm -> pt
 
 # 目录每页行数（28磅行距 A4 经验值；首页扣除目录标题约占 2 行）
 _TOC_LINES_PER_PAGE = 22
+
+# 强制分页的 HTML 占位块（Qt 富文本只支持 page-break-before）。
+# v1.15：目录/正文分节、封面与目录之间都靠它分页；必须定义在模块级，
+# 早前重构时它被误删，导致 render 时 NameError（已由单测覆盖）。
+_PAGE_BREAK = ("<p style='page-break-before:always;font-size:1pt;"
+               "line-height:0;margin:0'>&nbsp;</p>")
 
 
 def _toc_chunks(n_rows: int) -> list[int]:
@@ -139,7 +148,10 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
                  font-size:{tpl.red_header.org_size_pt}pt; color:#ff0000;
                  text-align:center; margin:0; }}
       .doc-no {{ text-align:center; margin:2pt 0; }}
-      .cover-title {{ font-size:28pt; text-align:center; margin-top:110pt; }}
+      /* v1.15：封面题字与材料/公文标题都用小标宋，与 docx 侧同字体，
+         否则同一份汇编导出两个格式，标题字形不一样。 */
+      .cover-title {{ font-family:'{_font_family(tpl.doc_title.font, "宋体")}';
+                     font-size:30pt; text-align:center; margin-top:110pt; }}
       table.toc {{ width:100%; }}
       table.toc td {{ font-size:{tpl.body_size_pt}pt; padding:1pt 0; }}
     </style>"""
@@ -151,7 +163,10 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
     # 发文字号），**必须逐项 `_esc`**：Qt 的 `setHtml` 会把 `<b>` 当标签渲染，
     # 用户本想打「<试行>」结果整段被吞掉；更糟的是内容里若带 `<img src=...>`
     # 之类的标签，就成了一个可被外部文本触发的本地渲染面。
-    if tpl.cover.enabled:
+    # `cover_visible` 与 docx 共用同一判据（要素全空时不出封面页），
+    # 保证同一份内容导出 docx/PDF 的封面与页数一致。
+    has_cover = cover_visible(tpl)
+    if has_cover:
         parts.append(f"<p class='cover-title'>{_esc(tpl.cover.title or tpl.name)}</p>")
         if tpl.cover.subtitle:
             parts.append("<p style='text-align:center;text-indent:0'>"
@@ -167,8 +182,9 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
 
     # ---- 目录（独立页；行数超一页时按 _toc_chunks 分页） ----
     if tpl.toc_enabled:
-        brk = "page-break-before:always;" if tpl.cover.enabled else ""
-        parts.append(f"<h1 style='text-align:center;text-indent:0;{brk}'>{tpl.toc_title}</h1>")
+        if has_cover:
+            parts.append(_PAGE_BREAK)
+        parts.append(f"<h1 style='text-align:center;text-indent:0'>{tpl.toc_title}</h1>")
         # Qt 不认 width=100%，用显式像素宽让页码列顶到版心右缘
         content_px = int((tpl.page_width_mm - tpl.margin_left_mm - tpl.margin_right_mm)
                          / 25.4 * 96)
@@ -186,8 +202,7 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
         pos = 0
         for ci, size in enumerate(chunks):
             if ci > 0:
-                parts.append("<p style='page-break-before:always;font-size:2pt;"
-                             "margin:0'>&nbsp;</p>")
+                parts.append(_PAGE_BREAK)
             parts.append(f"<table class='toc' border='0'>"
                          f"{''.join(rows[pos:pos + size])}</table>")
             pos += size
@@ -195,8 +210,9 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
 
     # ---- 红头（正文首页顶部；无封面时紧随目录） ----
     if tpl.red_header.enabled:
-        brk = "page-break-before:always;" if has_front else ""
-        parts.append(f"<p class='red-org' style='{brk}'>{tpl.red_header.org}</p>")
+        if has_front:
+            parts.append(_PAGE_BREAK)
+        parts.append(f"<p class='red-org'>{tpl.red_header.org}</p>")
         if tpl.red_header.doc_number:
             parts.append(f"<p class='doc-no' style='text-indent:0'>{tpl.red_header.doc_number}</p>")
         if tpl.red_header.red_line:
@@ -211,11 +227,15 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
         # 红头已开启正文首页，首份材料不再分页；否则有前置内容时分页
         first_break = (idx > 0) or (has_front and not tpl.red_header.enabled)
         blocks = tree.effective_blocks(tpl.insert_material_titles)
+        has_mat_title = bool(tpl.insert_material_titles and (tree.title or "").strip())
         # 组装 (tag, inner_html, extra_style) 元素序列
         elems: list[tuple[str, str, str]] = []
-        if tpl.insert_material_titles and tree.title:
+        if has_mat_title:
             label = material_label(tpl.material_title_prefix, idx + 1)
-            elems.append(("h1", _esc(f"{label}{tree.title}"), ""))
+            # v1.15：材料/公文标题用小标宋二号并居中（GB/T 9704），与 docx 侧
+            # 同一判据（`tpl.doc_title`）；内联样式而非 class，因为下面的
+            # 页首分页逻辑要往同一个 style 串前面拼 page-break-before。
+            elems.append(("h1", _esc(f"{label}{tree.title}"), _doc_title_style(tpl)))
         for blk in blocks:
             if blk.type == TABLE and blk.rows:
                 ncols = max(len(r) for r in blk.rows)
@@ -229,7 +249,15 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
                 continue
             t = _esc(blk.text)
             if blk.type == HEADING:
-                elems.append((f"h{min(blk.level, 3)}", t, ""))
+                # level 可能是 0 或 >4（导入侧未规范化）：夹到 1..4，
+                # 否则会拼出 Qt 不认识的 <h0> 标签，标题静默丢失。
+                raw = min(max(int(blk.level or 0), 1), 4)
+                # 字体按**公文序号**判定（一、黑体 / （一）楷体 / 1. 仿宋加粗），
+                # 与 docx 侧同一判据；序号判不出时才退回"层级 − shift"。
+                off = compile_norm.official_level(blk.text)
+                style_lv = off if off else min(max(raw - (1 if has_mat_title else 0), 1), 3)
+                style_lv = min(max(style_lv, 1), 3)
+                elems.append((f"h{style_lv}", t, ""))
             elif blk.type == LIST_ITEM:
                 elems.append(("p", f"• {t}", f"text-indent:{indent_px}px"))
             else:
@@ -237,7 +265,11 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
         for i, (tag, inner, extra) in enumerate(elems):
             style = extra
             if i == 0 and first_break:
-                style = ("page-break-before:always;" + style)
+                # v1.15 根治：分页一律由**独立的空占位块**承担，内容块本身不再
+                # 带 page-break-before —— 带分页属性的块会被 Qt 在上一页底部
+                # 再画一遍（材料标题因此重影到上一页）；占位块是空的，
+                # 即便真有重复也看不见。
+                parts.append(_PAGE_BREAK)
             if tag == "table":
                 parts.append(f"<table border='1' cellspacing='0' cellpadding='2' "
                              f"style='{style}'>{inner}</table>")
@@ -250,6 +282,14 @@ def trees_to_html(trees: list[DocTree], tpl: DocTemplate,
 
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _doc_title_style(tpl: DocTemplate) -> str:
+    """材料/公文标题的 CSS（小标宋二号、居中）——与 docx 的 `tpl.doc_title` 对齐。"""
+    weight = "bold" if tpl.doc_title.bold else "normal"
+    return (f"font-family:'{_font_family(tpl.doc_title.font, '宋体')}';"
+            f"font-size:{tpl.doc_title.size_pt}pt;font-weight:{weight};"
+            "text-align:center;text-indent:0;margin:10pt 0 8pt 0")
 
 
 # ------------------------------------------------------------------ 行距（P1-02）
@@ -347,7 +387,6 @@ def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
     之前是为了让分页按新行高重算（`doc.pageCount()` 才准）。
     """
     from PySide6.QtCore import QRectF
-    from PySide6.QtGui import QAbstractTextDocumentLayout
 
     writer = QPdfWriter(out_pdf)
     margins = QMarginsF(tpl.margin_left_mm, tpl.margin_top_mm,
@@ -372,7 +411,6 @@ def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
     doc.setPageSize(QSizeF(page_rect.width(), page_rect.height()))
 
     painter = QPainter(writer)
-    ctx = QAbstractTextDocumentLayout.PaintContext()
     try:
         n = max(1, doc.pageCount())
         for page in range(n):
@@ -381,13 +419,92 @@ def _render_html_to_pdf(html: str, tpl: DocTemplate, out_pdf: str) -> int:
             painter.save()
             # QPdfWriter 画笔原点已在内容区左上角（边距已含），仅需纵向逐页偏移
             painter.translate(0, -page * page_rect.height())
-            ctx.clip = QRectF(0, page * page_rect.height(),
-                              page_rect.width(), page_rect.height())
-            doc.documentLayout().draw(painter, ctx)
+            # v1.15 根治：`drawContents(rect)` 逐页只绘制该页区域。
+            # 旧实现是"整篇文档 + 只给 PaintContext 一个 clip"，而 ctx.clip
+            # **只裁剪绘制区域、不阻止落笔** —— 下一页的行会被画进上一页底部：
+            # 60 段样张实测第 4 页 23 行（超出版心 22 行容量）、封面页底部还
+            # 印出了目录表。drawContents 在布局层按矩形裁剪，同一样张实测
+            # 恢复为每页 ≤22 行、正文页无跨页文字外溢。
+            doc.drawContents(painter, QRectF(0, page * page_rect.height(),
+                                             page_rect.width(),
+                                             page_rect.height()))
             painter.restore()
     finally:
         painter.end()
     return _page_count(out_pdf)
+
+
+# ---------------------------------------------------------- 封面页重影清理（v1.15）
+# 现象：手动逐页绘制时，**下一页的第一行文字会在上一页底部再画一遍**。
+# 实测（探针）：带封面的 3 页产物里，封面页文本 = "材料汇编 目 录" ——
+# 目录标题既在目录页首行（正确），又被画到封面页版心最下方（错误、且像素级
+# 可见）；换成 doc.print_()/drawContents() 同样复现，属 Qt 富文本分页绘制的
+# 表现，绘制层（ctx.clip 只裁剪绘制区域、不阻止落笔）无法消除。
+#
+# 这里只清理**封面页**：封面是唯一有"确定性判据"的页面 —— 封面要素（汇编名/
+# 单位/日期）只出现在页面中上部，若封面页**底部窄带**里出现了与下一页顶部
+# 完全相同的文字，那必然是跨页重影，删掉它不会伤到任何封面要素。
+# 正文页不做同样处理：正文里同一句话在相邻两页重复出现是完全正常的（公文
+# 套话），按"文本相同"删会误删正文，代价远大于收益 —— 已在审计报告里作为
+# 既有问题另行记录。
+_BLEED_BAND_PT = 80.0      # 底部判定窄带（约 3 行 28 磅行距）
+
+
+def _text_spans(page) -> list[tuple["fitz.Rect", str]]:
+    out: list[tuple[fitz.Rect, str]] = []
+    for blk in page.get_text("dict").get("blocks", []):
+        for line in blk.get("lines", []):
+            for span in line.get("spans", []):
+                text = (span.get("text") or "").strip()
+                if text:
+                    out.append((fitz.Rect(span["bbox"]), text))
+    return out
+
+
+def _strip_cover_page_bleed(pdf_path: str, tpl: DocTemplate) -> int:
+    """抹掉封面页底部的跨页重影文字，返回抹掉的行数。
+
+    只在"模板带封面且产物 ≥2 页"时生效；判据是**封面页底部窄带**里的文字与
+    **下一页顶部**的文字相同（比较前去掉所有空白：重影是同一段文字第二次落笔，
+    字号/字距会有细微差异，实测同一串"目  录"在上一页抽出来是"目录"、在下一页
+    是"目 录"，按字面比对会漏掉）。封面要素不会出现在底部窄带里，因此不会误删。
+    覆盖写盘走 tmp + os.replace（与 stamp_page_numbers 同一纪律）。
+    """
+    if not cover_visible(tpl):
+        return 0
+    doc = fitz.open(str(pdf_path))
+    tmp = ""
+    removed = 0
+    try:
+        if doc.page_count < 2:
+            return 0
+        top = tpl.margin_top_mm * _MM
+        bottom = doc[0].rect.height - tpl.margin_bottom_mm * _MM
+
+        def _key(text: str) -> str:
+            return "".join(text.split())
+
+        next_top = {_key(t) for r, t in _text_spans(doc[1])
+                    if r.y0 < top + _BLEED_BAND_PT}
+        if not next_top:
+            return 0
+        targets = [r for r, t in _text_spans(doc[0])
+                   if r.y1 > bottom - _BLEED_BAND_PT and _key(t) in next_top]
+        if not targets:
+            return 0
+        page = doc[0]
+        for rect in targets:
+            page.add_redact_annot(rect, fill=False)
+        # PyMuPDF 1.2x：redaction 是**页级** API（Document 上的同名方法已移除）
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        removed = len(targets)
+        tmp = pdf_path + ".bleed.tmp"
+        doc.save(tmp, garbage=3, deflate=True)
+    finally:
+        doc.close()
+    if tmp:
+        os.replace(tmp, pdf_path)
+    return removed
 
 
 def _page_count(pdf_path: str) -> int:
@@ -427,46 +544,81 @@ def _locate_headings(pdf_path: str, headings: list[str], start_page: int = 0) ->
 
 
 def collect_headings(trees: list[DocTree], tpl: DocTemplate) -> list[tuple[str, int]]:
-    """[(标题文本, 级别)]，含材料标题（若启用）；与渲染时相同的去重与编号逻辑。"""
+    """[(标题文本, 级别)]，含材料标题（若启用）；与渲染时相同的去重与编号逻辑。
+
+    v1.15 健壮性：只认 `Block.type == HEADING`，并且
+      · 空标题跳过（否则目录里出现空行、还会占一行分页预算）；
+      · `level` 夹到 1..3（导入侧没规范化时常见 0）；>3 的块不进目录，
+        与 docx 侧 `TOC \\o "1-3"` 的口径一致。
+    规范化（T2）未接入、标题全是 paragraph 时，这里自然只收到材料标题，
+    不会崩。
+    """
     out = []
     for mat_no, tree in enumerate(trees, 1):
-        if tpl.insert_material_titles and tree.title:
+        has_mat_title = bool(tpl.insert_material_titles and (tree.title or "").strip())
+        if has_mat_title:
             label = material_label(tpl.material_title_prefix, mat_no)
-            out.append((f"{label}{tree.title}", 1))
+            out.append((f"{label}{tree.title}".strip(), 1))
+        shift = 1 if has_mat_title else 0
         for blk in tree.effective_blocks(tpl.insert_material_titles):
-            if blk.type == HEADING and blk.level <= 3:
-                out.append((blk.text, blk.level))
+            if blk.type != HEADING:
+                continue
+            text = (blk.text or "").strip()
+            if not text:
+                continue
+            raw = max(int(blk.level or 1), 1)
+            # 目录按**公文层级**过滤（材料标题另占一级）：默认 2 收
+            # 一、/（一），1. 枚举不进目录；toc_max_level=3 时三级才进。
+            # 显示层级用 raw（含材料标题的偏移），保证目录缩进能体现
+            # 材料标题 → 一、 → （一）的父子关系；封顶 4 防止异常层级撑破缩进。
+            pl = min(max(raw - shift, 1), 3)
+            max_level = max(1, min(3, int(getattr(tpl, "toc_max_level", 2))))
+            if pl > max_level:
+                continue
+            out.append((text, min(raw, 4)))
     return out
 
 
 def render_compiled_pdf(trees: list[DocTree], tpl: DocTemplate, out_pdf: str) -> str:
-    """两遍渲染：输出带真实目录页码与外侧页码的 A4 PDF。"""
+    """两遍渲染：输出带真实目录页码与外侧页码的 A4 PDF。
+
+    页序：封面 → 目录 → 正文（红头与正文首页同页）。
+    页码（v1.15）：封面与目录**不编号**，正文首页为"— 1 —"并连续到最后；
+    目录里写的是**正文页序**（与成品纸面页码一致），不是 PDF 的物理页序。
+    """
     headings = collect_headings(trees, tpl)
 
     # ---- 第一遍：占位页码渲染（目录页数与最终一致，分页稳定） ----
     toc_placeholder = [[(t, lv, 0) for (t, lv) in headings]]
     html1 = trees_to_html(trees, tpl, toc_pages=toc_placeholder, toc_placeholder=True)
     _render_html_to_pdf(html1, tpl, out_pdf)
+    # 封面页重影清理（v1.15）：第一遍也清 —— 否则"下一页首行"被重复画到封面
+    # 底部时，_locate_headings 可能把标题定位到早一页。
+    _strip_cover_page_bleed(out_pdf, tpl)
 
     # 前置页数解析式计算（与 trees_to_html 的分片逻辑一致）：
-    # 封面固定 1 页；目录页数 = _toc_chunks 的分片数
+    # 封面按 cover_visible 判（要素全空不出页，见 template.cover_visible）；
+    # 目录页数 = _toc_chunks 的分片数
     body_start = 0
-    if tpl.cover.enabled:
+    if cover_visible(tpl):
         body_start += 1
     if tpl.toc_enabled:
         body_start += max(1, len(_toc_chunks(len(headings))))
 
     # 定位正文标题页码（占位渲染已含完整目录页，页码无需偏移）
     pages = _locate_headings(out_pdf, [t for t, _ in headings], start_page=body_start)
+    # 物理页号 -> 纸面页码：正文从 1 起算，前置页（封面/目录）不计入
+    printed = [(p - body_start) if p > body_start else 0 for p in pages]
 
     # ---- 第二遍：真实页码渲染（未命中的标题目录页码显示“—”） ----
-    toc_real = [[(t, lv, p) for (t, lv), p in zip(headings, pages)]]
+    toc_real = [[(t, lv, p) for (t, lv), p in zip(headings, printed)]]
     html2 = trees_to_html(trees, tpl, toc_pages=toc_real, toc_placeholder=False)
     _render_html_to_pdf(html2, tpl, out_pdf)
+    _strip_cover_page_bleed(out_pdf, tpl)   # 成品同样清理（封面页不得混入目录标题）
 
-    # ---- 盖页码（外侧：奇右偶左） ----
+    # ---- 盖页码（封面/目录跳过；外侧：奇右偶左，按**纸面页码**判奇偶） ----
     if tpl.page_number_enabled:
-        stamp_page_numbers(out_pdf, tpl)
+        stamp_page_numbers(out_pdf, tpl, skip_pages=body_start)
     # ---- 水印/密级标注 ----
     if (tpl.watermark_text or "").strip():
         from .watermark import stamp_watermark_pdf
@@ -477,7 +629,13 @@ def render_compiled_pdf(trees: list[DocTree], tpl: DocTemplate, out_pdf: str) ->
 
 
 def stamp_page_numbers(pdf_path: str, tpl: DocTemplate, skip_pages: int = 0) -> None:
-    """奇数页右下角、偶数页左下角盖页码 “— N —”（从 1 起）。
+    """盖页码"— N —"：奇数页右下、偶数页左下（外侧）。
+
+    参数
+    ----
+    skip_pages : 前置页数（封面 + 目录）。前 skip_pages 页**不盖任何页码**，
+                 之后从"— 1 —"开始连续编号；左右位置按**纸面页码**的奇偶判定
+                 （规范里"奇数页在右"指的是页码为奇数的页，不是物理页序）。
 
     写临时文件再 os.replace：save 中途失败（磁盘满、文件被占用）时原 PDF
     保持完整，不会留下半截文件；文档对象用 try/finally 关闭，避免句柄泄漏。
@@ -488,9 +646,13 @@ def stamp_page_numbers(pdf_path: str, tpl: DocTemplate, skip_pages: int = 0) -> 
         font = _cjk_font()
         size = tpl.page_number_size_pt
         gray = 0.25
+        skip = max(0, int(skip_pages or 0))
         for pno in range(d.page_count):
+            if pno < skip:
+                continue                       # 封面/目录：不编号
             page = d[pno]
-            label = fmt.replace("{page}", str(pno + 1))
+            printed = pno - skip + 1           # 纸面页码：正文从 1 起
+            label = fmt.replace("{page}", str(printed))
             rect = page.rect
             bottom = rect.height - max(12, tpl.margin_bottom_mm * _MM * 0.45)
             try:
@@ -498,9 +660,9 @@ def stamp_page_numbers(pdf_path: str, tpl: DocTemplate, skip_pages: int = 0) -> 
             except Exception:
                 tw = len(label) * size * 0.85  # 宽度估算兜底
             margin = tpl.margin_left_mm * _MM
-            if (pno + 1) % 2 == 1:  # 奇数页：右侧
+            if printed % 2 == 1:  # 奇数页：右侧
                 x = rect.width - margin - tw
-            else:                   # 偶数页：左侧
+            else:                 # 偶数页：左侧
                 x = margin
             page.insert_text((x, bottom), label, fontname=font, fontsize=size,
                              color=(gray, gray, gray))

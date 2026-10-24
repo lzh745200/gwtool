@@ -7,17 +7,21 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QProgressBar, QPushButton, QVBoxLayout, QWizard,
-                               QWizardPage, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QProgressBar, QPushButton,
+                               QScrollArea, QVBoxLayout, QWizard, QWizardPage,
+                               QWidget)
 
 from .. import config, logs
+from ..core import fontcheck
 from ..core.registry import SECRET_LEVELS, URGENCY_LEVELS
 from ..core.registry import doc_types as from_registry_doc_types
 from ..core.registry import from_compile as registry_from_compile
@@ -58,6 +62,9 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.last_docx = ""
         self.last_pdf = ""
         self.last_booklet = ""
+        # 输出目录：None = 用 export_dir()（保持旧行为，也便于测试 monkeypatch）。
+        # 用户点「选择目录…」后才固定到具体路径。
+        self._out_dir: Path | None = None
         # 本轮产物：(路径, 标题) 列表 —— 完成面板与"登记到台账"都从这里取，
         # 不再靠 last_docx/last_pdf 这类"当前值"字段拼凑（它们会被下一轮覆盖）
         self._products: list[tuple[str, str]] = []
@@ -111,11 +118,21 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.material_list.setToolTip(
             "勾选要汇编的材料；拖动条目或用下方「上移/下移」调整顺序，\n"
             "汇编按列表顺序合并（把主件放最前，附件紧跟其后）")
-        self._order: list[int] = [d.id for d in dao.list_documents()]
+        docs = dao.list_documents()
+        # list_documents 为省内存不带 blocks_json；这里一次批量取回（不是逐篇
+        # get_document 的 N+1），供"识别结果"统计使用。
+        try:
+            blocks_by_id = {int(r["id"]): r.get("blocks_json", "")
+                            for r in dao.iter_documents_content()}
+        except Exception:
+            blocks_by_id = {}
+        self._order: list[int] = [d.id for d in docs]
         self._checked: set[int] = set(self._order)      # 默认全勾（可一键取消）
+        self._analysis: dict[int, dict] = {
+            d.id: self._analyze_document(d, blocks_by_id.get(d.id, "[]"))
+            for d in docs}
         self._labels: dict[int, str] = {
-            d.id: f"{d.title}  [{d.file_type or '文本'}]"
-            for d in dao.list_documents()}
+            d.id: self._material_label(d) for d in docs}
         self._render_materials()
         self.material_list.itemChanged.connect(self._on_item_changed)
         self.material_list.model().rowsMoved.connect(self._on_rows_moved)
@@ -149,6 +166,141 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.chk_titles.setChecked(True)
         v.addWidget(self.chk_titles)
         return page
+
+    # ---- 材料识别结果（T2 规范化为可选增强，接口未就绪时用本地统计兜底）----
+    def _analyze_document(self, doc, blocks_json: str = "[]") -> dict:
+        """统计一份材料的块结构：标题/一级/二级/正文块数。
+
+        优先复用 T2 的 `compile_norm.analyze_tree`（若已合入）；接口不存在、
+        返回结构不同或解析失败时，退回本地 blocks_json 统计。**任何情况都不抛**：
+        向导打开时一份坏数据不能让整个材料列表打不开。
+        `blocks_json` 由调用方一次性批量取回（list_documents 不含该列）。
+        """
+        blocks: list = []
+        try:
+            raw = json.loads(blocks_json or "[]")
+            if isinstance(raw, list):
+                blocks = [b for b in raw if isinstance(b, dict)]
+        except Exception:
+            blocks = []
+
+        stats = self._count_blocks(doc, blocks)
+        # T2 规范化接口（约定 analyze_tree；实际落点是 normalize_tree_ex /
+        # normalize_tree，二者都算"等价接口"）。存在则用其统计覆盖本地兜底；
+        # 接口未就绪/签名不同/内部异常一律退回本地统计，绝不向 UI 冒泡。
+        try:
+            from ..core import compile_norm
+            from ..core.model import DocTree
+            tree = DocTree.from_json(getattr(doc, "title", "") or "",
+                                     blocks_json or "[]")
+            fn_ex = getattr(compile_norm, "normalize_tree_ex", None)
+            fn_analyze = getattr(compile_norm, "analyze_tree", None)
+            mapped = None
+            source = ""
+            if fn_ex is not None:
+                norm_tree, norm_stats = fn_ex(tree)
+                mapped = self._analysis_from_normalized(norm_tree, norm_stats)
+                source = "compile_norm.normalize_tree_ex"
+            elif fn_analyze is not None:
+                mapped = self._coerce_analysis(fn_analyze(tree))
+                source = "compile_norm.analyze_tree"
+            if mapped:
+                stats.update({"source": source, **mapped})
+        except Exception:
+            # 接口未就绪/签名不同/内部异常：保留本地统计，不向 UI 冒泡
+            log.debug("compile_norm 不可用，使用本地统计兜底")
+        return stats
+
+    @staticmethod
+    def _analysis_from_normalized(norm_tree, norm_stats) -> dict | None:
+        """把 T2 规范化后的树 + NormStats 折算成 4 键识别统计。"""
+        if norm_tree is None:
+            return None
+        from ..core.model import HEADING, TABLE
+        h1 = h2 = body = 0
+        for b in getattr(norm_tree, "blocks", []) or []:
+            if getattr(b, "type", "") == HEADING:
+                level = int(getattr(b, "level", 0) or 1)
+                if level <= 1:
+                    h1 += 1
+                elif level == 2:
+                    h2 += 1
+            elif getattr(b, "type", "") == TABLE:
+                body += 1
+            else:
+                body += 1
+        title = 1 if (getattr(norm_tree, "title", "")
+                      or getattr(norm_stats, "title", "")) else 0
+        headings = getattr(norm_stats, "headings", {}) or {}
+        if headings and not (h1 or h2):
+            h1 = int(headings.get(1, 0) or 0)
+            h2 = int(headings.get(2, 0) or 0)
+        return {"title": title, "h1": h1, "h2": h2, "body": body}
+
+    @staticmethod
+    def _count_blocks(doc, blocks: list) -> dict:
+        h1 = h2 = body = 0
+        for b in blocks:
+            btype = str(b.get("type", "") or "")
+            if btype == "heading":
+                level = int(b.get("level") or 1)
+                if level <= 1:
+                    h1 += 1
+                elif level == 2:
+                    h2 += 1
+            else:
+                body += 1
+        return {"title": 1 if (getattr(doc, "title", "") or "").strip() else 0,
+                "h1": h1, "h2": h2, "body": body,
+                "source": "blocks_json"}
+
+    @staticmethod
+    def _coerce_analysis(result) -> dict | None:
+        """把 T2 可能返回的 dict/对象适配成统一 4 键统计。
+
+        兼容常见别名（h1/level1/一级…），适配不到就返回 None（走本地兜底）。
+        """
+        if result is None:
+            return None
+
+        def _get(*names):
+            if isinstance(result, dict):
+                for n in names:
+                    if n in result:
+                        return result[n]
+                return None
+            for n in names:
+                if hasattr(result, n):
+                    return getattr(result, n)
+            return None
+
+        def _int(v):
+            try:
+                if isinstance(v, (list, tuple, set, dict)):
+                    return len(v)
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+
+        title = _get("title", "title_blocks", "标题")
+        h1 = _get("h1", "level1", "heading1", "一级", "h1_blocks")
+        h2 = _get("h2", "level2", "heading2", "二级", "h2_blocks")
+        body = _get("body", "paragraph", "paragraphs", "正文", "body_blocks")
+        if all(v is None for v in (title, h1, h2, body)):
+            return None
+        return {"title": _int(title) or 0, "h1": _int(h1) or 0,
+                "h2": _int(h2) or 0, "body": _int(body) or 0}
+
+    def _material_label(self, doc) -> str:
+        """列表项文案：标题 + 类型 + **识别结果**（标题/一级/二级/正文块数）。"""
+        a = self._analysis.get(doc.id) or {}
+        return (f"{doc.title or '（无标题）'}  [{doc.file_type or '文本'}]  "
+                f"识别：标题 {a.get('title', 0)} · 一级 {a.get('h1', 0)} · "
+                f"二级 {a.get('h2', 0)} · 正文 {a.get('body', 0)}")
+
+    def material_analysis(self, doc_id: int) -> dict:
+        """给测试/调用方读取某份材料的识别统计（未知 id 返回空 dict）。"""
+        return dict(self._analysis.get(int(doc_id), {}))
 
     # ---- 选材筛选与勾选（U6）----
     def _visible_ids(self) -> list[int]:
@@ -281,31 +433,87 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         page = QWizardPage()
         page.setTitle("选择模板与封面信息")
         page.setSubTitle("模板可在「模板管理」中自定义；封面要素留空则与不填时完全一致。")
-        v = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        # 本页字段较多（方案/模板/封面/目录/页码/台账要素），小屏 1366×768
+        # 或 150% 缩放下容易溢出，用滚动区保证所有控件都够得着。
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        v = QVBoxLayout(inner)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("字体方案："))
+        self.cmb_scheme = QComboBox()
+        self.cmb_scheme.addItem("标准公文（GB/T 9704）", "standard")
+        self.cmb_scheme.addItem("军队公文（GJB 5100A）", "military")
+        self.cmb_scheme.addItem("自定义模板", "custom")
+        self.cmb_scheme.setToolTip(
+            "标准公文与军队公文的版式参数一致（A4/37-35-28-26mm、22行×28字）；"
+            "差异在文种与要素编排。选「自定义模板」时用下面的模板下拉框。")
+        row.addWidget(self.cmb_scheme, 1)
+        v.addLayout(row)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("模板："))
         self.tpl_combo = QComboBox()
         self.tpl_combo.setToolTip(
-            "选用哪套版式（字体/字号/行距/页边距）。缺字体的模板会在生成结果里提示")
+            "选用哪套版式（字体/字号/行距/页边距）。缺字体的模板会在下方提示")
         self._fill_templates()
         row.addWidget(self.tpl_combo, 1)
-        btn_edit = QPushButton("打开模板管理…")
-        btn_edit.clicked.connect(lambda: self.parent().open_template_editor()
-                                if hasattr(self.parent(), "open_template_editor") else None)
-        row.addWidget(btn_edit)
+        self.btn_tpl_edit = QPushButton("打开模板管理…")
+        self.btn_tpl_edit.clicked.connect(
+            lambda: self.parent().open_template_editor()
+            if hasattr(self.parent(), "open_template_editor") else None)
+        row.addWidget(self.btn_tpl_edit)
         v.addLayout(row)
 
-        v.addWidget(QLabel("封面标题（可空）："))
+        # 字体方案展示：当前模板会实际用到哪些字体 + 本机缺哪些（复用 fontcheck）。
+        self.lbl_fonts = QLabel("")
+        self.lbl_fonts.setWordWrap(True)
+        self.lbl_fonts.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_fonts)
+
+        v.addWidget(QLabel("汇编名（封面标题，可空）："))
         self.ed_title = QLineEdit()
-        self.ed_title.setToolTip("同时用作产物文件名与台账登记标题")
+        self.ed_title.setToolTip("封面汇编名；同时用作默认输出文件名与台账登记标题")
         v.addWidget(self.ed_title)
-        v.addWidget(QLabel("汇编单位（可空）："))
+        v.addWidget(QLabel("副标题（可空）："))
+        self.ed_subtitle = QLineEdit()
+        self.ed_subtitle.setToolTip("封面副标题，留空则不显示这一行")
+        v.addWidget(self.ed_subtitle)
+        v.addWidget(QLabel("单位名称（可空）："))
         self.ed_org = QLineEdit()
         v.addWidget(self.ed_org)
-        v.addWidget(QLabel("落款日期（可空，如 2026年8月）："))
-        self.ed_date = QLineEdit()
+        today = datetime.now()
+        v.addWidget(QLabel("封面日期（默认今天，可清空）："))
+        self.ed_date = QLineEdit(f"{today.year}年{today.month}月{today.day}日")
+        self.ed_date.setToolTip("盖章/落款日期；清空则封面不显示日期行")
         v.addWidget(self.ed_date)
+
+        self.chk_cover = QCheckBox("生成封面页（默认开）")
+        self.chk_cover.setChecked(True)
+        self.chk_cover.setToolTip(
+            "关闭后产物不生成封面；所有封面字段留空时，行为与旧版完全一致")
+        v.addWidget(self.chk_cover)
+
+        # 目录 / 页码（默认开；正文页码固定从 1 开始，封面与目录不计入正文页码）
+        self.chk_toc = QCheckBox("生成目录（自动收集各级标题）")
+        self.chk_toc.setChecked(True)
+        v.addWidget(self.chk_toc)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("目录标题："))
+        self.ed_toc_title = QLineEdit("目  录")
+        self.ed_toc_title.setToolTip("目录页顶部的标题文字（默认「目  录」）")
+        row.addWidget(self.ed_toc_title, 1)
+        v.addLayout(row)
+        self.chk_page_numbers = QCheckBox("生成页码（奇数页右、偶数页左）")
+        self.chk_page_numbers.setChecked(True)
+        v.addWidget(self.chk_page_numbers)
+        self.lbl_page_start = QLabel("正文页码从 1 开始；封面与目录页不计入正文页码。")
+        self.lbl_page_start.setWordWrap(True)
+        self.lbl_page_start.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_page_start)
 
         # P1-6：公文封面的法定要素。**全部可空**，留空时既不进封面也不进台账，
         # 生成的 docx 与改动前逐字节一致（docxgen/pdfrender 对空串本就是跳过）。
@@ -335,11 +543,85 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.ed_doc_no.setToolTip("只写入封面与台账，不参与自动取号（取号在台账里做）")
         v.addWidget(self.ed_doc_no)
 
-        self.chk_cover = QCheckBox("生成封面页")
-        self.chk_cover.setChecked(True)
-        v.addWidget(self.chk_cover)
         v.addStretch(1)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+        self.cmb_scheme.currentIndexChanged.connect(self._on_template_changed)
+        self.tpl_combo.currentIndexChanged.connect(self._on_template_changed)
+        self._on_template_changed()
         return page
+
+    # ---- 模板方案 / 字体方案展示 ----
+    def _load_selected_template(self) -> DocTemplate:
+        """沿用旧行为：按 tpl_combo 取用户保存的模板，取不到再用默认模板。"""
+        name = self.tpl_combo.currentData()
+        if name:
+            cfg = dao.get_template_config(name)
+            if cfg:
+                return DocTemplate.from_json(cfg)
+        cfg = dao.default_template_config()
+        if cfg:
+            return DocTemplate.from_json(cfg)
+        return default_template()
+
+    def _on_template_changed(self, *_a) -> None:
+        """方案切换：刷新字体方案提示。
+
+        模板下拉框**始终保持可用**（保持既有"模板选择"交互不变）：即使方案是
+        标准/军队公文，用户仍可在这里换具体模板；军队公文方案会临时覆盖为内置
+        版式，见 `load_template()`。
+        """
+        if hasattr(self, "btn_tpl_edit"):
+            self.btn_tpl_edit.setEnabled(True)
+        self._refresh_font_notice()
+
+    def _template_font_pairs(self, tpl: DocTemplate) -> list[tuple[str, str]]:
+        """模板实际会引用的字体（封面标题/各级标题/正文/页码）。"""
+        return [
+            ("封面标题", "方正小标宋简体"),
+            ("一级标题", tpl.h1.font),
+            ("二级标题", tpl.h2.font),
+            ("三级标题", tpl.h3.font),
+            ("正文", tpl.body_font),
+            ("页码", tpl.page_number_font),
+        ]
+
+    def _refresh_font_notice(self) -> None:
+        label = getattr(self, "lbl_fonts", None)
+        if label is None:
+            return
+        try:
+            tpl = self.load_template()
+            pairs = self._template_font_pairs(tpl)
+        except Exception:
+            label.setText("字体方案：模板读取失败（生成时会回落到默认模板）")
+            return
+        try:
+            from PySide6.QtGui import QFontDatabase
+            installed = set(QFontDatabase.families())
+        except Exception:
+            installed = None
+        try:
+            global_missing = set(fontcheck.missing_fonts())
+        except Exception:
+            global_missing = set()
+        missing: list[str] = []
+        for _label, font in pairs:
+            if not font:
+                continue
+            if font in global_missing or (installed is not None
+                                          and font not in installed):
+                if font not in missing:
+                    missing.append(font)
+        shown = "；".join(f"{label} {font}" for label, font in pairs)
+        text = f"字体方案：{shown}"
+        if missing:
+            text += ("\n⚠ 本机缺少：" + "、".join(missing)
+                     + "（Word/WPS 会用替代字体，字宽与行距可能偏差）")
+        else:
+            text += "\n✓ 本机字体齐全"
+        label.setText(text)
 
     # ---- P1-6：封面要素 → CoverInfo ----
     def _cover_extra_lines(self) -> list[str]:
@@ -362,20 +644,28 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         """把第 2 步的所有封面输入写进模板副本。
 
         集中一处是因为这条赋值序列原先在三处（`_start`/`_run_batch`/`_run_pdf`）
-        各写一遍，P1-6 新增四个字段后任何一处漏改都会造成"docx 有封面要素、
-        pdf 没有"的不一致。
+        各写一遍：新增字段后任何一处漏改都会造成"docx 有封面要素、pdf 没有"
+        或"docx 有目录、pdf 没有"的不一致。
+
+        空值语义保持旧版：所有封面字段可空，`docxgen` / `pdfrender` 对空串
+        本就是"跳过该行"，因此全留空不会崩、也不会产生空行。
         """
         tpl.cover.enabled = self.chk_cover.isChecked()
         tpl.cover.title = self.ed_title.text().strip()
+        tpl.cover.subtitle = self.ed_subtitle.text().strip()
         tpl.cover.org = self.ed_org.text().strip()
         tpl.cover.date = self.ed_date.text().strip()
         tpl.cover.extra_lines = self._cover_extra_lines()
         tpl.insert_material_titles = self.chk_titles.isChecked()
+        tpl.toc_enabled = self.chk_toc.isChecked()
+        tpl.toc_title = self.ed_toc_title.text().strip() or "目  录"
+        tpl.page_number_enabled = self.chk_page_numbers.isChecked()
 
     def cover_meta(self) -> dict[str, str]:
         """交给 `registry.from_compile` 的封面元数据（台账登记用）。"""
         return {
             "title": self.ed_title.text().strip(),
+            "subtitle": self.ed_subtitle.text().strip(),
             "org": self.ed_org.text().strip(),
             "date": self.ed_date.text().strip(),
             "doc_type": self.ed_doc_type.currentText().strip(),
@@ -395,15 +685,20 @@ class CompileWizard(ThreadSafeDialog, QWizard):
                                    t["name"])
 
     def load_template(self) -> DocTemplate:
-        name = self.tpl_combo.currentData()
-        if name:
-            cfg = dao.get_template_config(name)
-            if cfg:
-                return DocTemplate.from_json(cfg)
-        cfg = dao.default_template_config()
-        if cfg:
-            return DocTemplate.from_json(cfg)
-        return default_template()
+        """按「字体方案」返回模板。
+
+        - 标准公文 / 自定义模板：沿用旧行为（tpl_combo 选中的模板 → 默认模板）；
+          默认方案是「标准公文」，因此不改变任何既有用户的模板选择。
+        - 军队公文：GJB 5100A 与 GB/T 9704 的页面参数一致，用内置模板副本并
+          标注名称；差异在文种与要素编排（不是排版参数）。
+        """
+        scheme = self.cmb_scheme.currentData() if hasattr(
+            self, "cmb_scheme") else "standard"
+        if scheme == "military":
+            tpl = default_template()
+            tpl.name = "军队公文"
+            return tpl
+        return self._load_selected_template()
 
     # ------------------------------------------------ 第3步：输出
     def _page_output(self):
@@ -411,6 +706,38 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         page.setTitle("生成")
         page.setSubTitle("选择输出内容，点击开始。")
         v = QVBoxLayout(page)
+
+        # 输出位置一目了然：目录（只读展示，可「选择目录…」）与文件名（可编辑）。
+        # 目录默认显示 export_dir()，但真正解析在 _start() 里动态取 ——
+        # 这样测试/调用方 monkeypatch export_dir 后仍然生效。
+        row = QHBoxLayout()
+        row.addWidget(QLabel("输出目录："))
+        self.ed_out_dir = QLineEdit(str(export_dir()))
+        self.ed_out_dir.setReadOnly(True)
+        self.ed_out_dir.setToolTip("产物输出目录；点右侧按钮可更换")
+        row.addWidget(self.ed_out_dir, 1)
+        self.btn_out_dir = QPushButton("选择目录…")
+        self.btn_out_dir.clicked.connect(self._choose_out_dir)
+        row.addWidget(self.btn_out_dir)
+        v.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("文件名："))
+        self.ed_out_name = QLineEdit()
+        self.ed_out_name.setPlaceholderText("默认用汇编名；留空则为「汇编成果」")
+        self.ed_out_name.setToolTip(
+            "不含扩展名；同名文件已存在时会自动追加时间戳，避免静默覆盖")
+        row.addWidget(self.ed_out_name, 1)
+        v.addLayout(row)
+
+        self.lbl_out_preview = QLabel("")
+        self.lbl_out_preview.setWordWrap(True)
+        self.lbl_out_preview.setStyleSheet(f"color:{theme.MUTED};")
+        v.addWidget(self.lbl_out_preview)
+        self.ed_out_name.textChanged.connect(self._refresh_out_preview)
+        self.ed_title.textChanged.connect(self._refresh_out_preview)
+        self._refresh_out_preview()
+
         self.chk_docx = QCheckBox("生成规范 Word 文档（.docx，WPS 兼容）")
         self.chk_docx.setToolTip("生成可直接编辑、打印的 Word 文档（推荐）")
         self.chk_docx.setChecked(True)
@@ -420,6 +747,8 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self.chk_booklet = QCheckBox("生成 A3 横向小册子 PDF（骑马钉，需先选 A4 PDF）")
         self.chk_booklet.setToolTip("把 A4 双面打印后对折成 A3 骑马钉小册子")
         self.chk_booklet.setChecked(False)
+        # A3 由 A4 拼版：勾选 A3 时自动补勾 A4（这是硬依赖，不是可选项）。
+        self.chk_booklet.toggled.connect(self._on_booklet_toggled)
         self.chk_batch = QCheckBox("批量模式：每份材料单独生成一份规范公文")
         self.chk_batch.setToolTip("勾选后按第1步顺序，对每份材料独立输出一份 docx")
         v.addWidget(self.chk_docx)
@@ -478,16 +807,51 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         v.addStretch(1)
         return page
 
+    # ---- 输出位置 ----
+    def _choose_out_dir(self) -> None:
+        """选择输出目录（默认从当前目录开始）。取消则保持原值。"""
+        start = self._out_dir or export_dir()
+        chosen = QFileDialog.getExistingDirectory(self, "选择输出目录", str(start))
+        if not chosen:
+            return
+        self._out_dir = Path(chosen)
+        self.ed_out_dir.setText(chosen)
+        self._refresh_out_preview()
+
+    def _refresh_out_preview(self) -> None:
+        """文件名/目录可见：把最终会写出的 .docx/.pdf 路径显示出来。"""
+        label = getattr(self, "lbl_out_preview", None)
+        if label is None:
+            return
+        try:
+            from ..core.batch import safe_filename
+            name = (self.ed_out_name.text().strip()
+                    or self.ed_title.text().strip() or "汇编成果")
+            name = safe_filename(name) or "汇编成果"
+            base = self._out_dir or export_dir()
+            label.setText(f"将输出到：{base / name}.docx / .pdf")
+        except Exception:
+            label.setText("将输出到：输出目录")
+
+    def _on_booklet_toggled(self, checked: bool) -> None:
+        """A3 骑马钉由 A4 拼版：勾选 A3 必须同时有 A4 PDF。"""
+        if checked and not self.chk_pdf.isChecked():
+            self.chk_pdf.setChecked(True)
+
     def _start(self):
         ids = self.selected_doc_ids()
         if not ids:
-            info(self, "请先在第1步勾选材料。")
+            # 健壮性：空选择给中文提示，不弹模态框（与"失败只写状态"同一约定）。
+            self.lbl_result.setText("请先在第1步勾选材料，再开始生成。")
+            self.banner.show_result("warn", "尚未勾选任何材料",
+                                    [("0 份", "warn")])
             return
         # 批量模式：每份材料独立出一份 docx
         if self.chk_batch.isChecked():
             self._run_batch(ids)
             return
-        # 小册子基于 A4 PDF 重排，勾选小册子时自动补选 PDF
+        # 小册子基于 A4 PDF 重排，勾选小册子时自动补选 PDF（双保险：
+        # 正常由 toggled 信号勾上；这里兜住程序性 setChecked 不触发信号的场景）
         if self.chk_booklet.isChecked() and not self.chk_pdf.isChecked():
             self.chk_pdf.setChecked(True)
         tpl = self.load_template()
@@ -498,16 +862,20 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         # 「报告 v1.2 终稿」→「报告 v1.docx」，用户拿到一个名字莫名其妙
         # 甚至互相覆盖的产物。
         title = self.ed_title.text().strip() or "汇编成果"
-        # 用户输入的标题直接拼输出路径：非法字符（\/:*?"<>|）在 Windows 上
+        # 文件名：优先用「文件名」输入框；留空时沿用旧行为（汇编名/汇编成果）。
+        # 用户输入直接拼输出路径：非法字符（\/:*?"<>|）在 Windows 上
         # 生成失败或产生意外子目录，统一过一遍 safe_filename 清洗。
         from ..core.batch import safe_filename
-        title = safe_filename(title) or "汇编成果"
-        out_base = export_dir() / title
+        file_name = (self.ed_out_name.text().strip() or title)
+        file_name = safe_filename(file_name) or "汇编成果"
+        base_dir = self._out_dir or export_dir()
+        out_base = base_dir / file_name
         out_base.parent.mkdir(parents=True, exist_ok=True)
         stem = str(out_base)
         any_output = self.chk_docx.isChecked() or self.chk_pdf.isChecked()
         if not any_output:
-            info(self, "请至少勾选一种输出。")
+            self.lbl_result.setText("请至少勾选一种输出（DOCX / A4 PDF / A3 小册子）。")
+            self.banner.show_result("warn", "尚未选择输出格式", [("0 种", "warn")])
             return
         # 防重入兜底：按钮虽已 disable，但 docx / 批量 / PDF 三条分支各自新建
         # worker，统一在这里把三个 worker 都拦一道 —— 旧线程仍在写同一输出
@@ -516,14 +884,13 @@ class CompileWizard(ThreadSafeDialog, QWizard):
                   getattr(self, "_batch_worker", None),
                   getattr(self, "_pdf_worker", None)):
             if w is not None and w.isRunning():
-                info(self, "上一次生成仍在进行，请稍候。")
+                self.lbl_result.setText("上一次生成仍在进行，请稍候。")
                 return
         # 防静默覆盖：同名输出已存在时追加时间戳
         if ((self.chk_docx.isChecked() and Path(stem + ".docx").exists())
                 or (self.chk_pdf.isChecked() and Path(stem + ".pdf").exists())):
-            from datetime import datetime as _dt
-            stem = str(export_dir() / f"{title}_"
-                       f"{_dt.now().strftime('%Y%m%d_%H%M%S')}")
+            stem = str(base_dir / f"{file_name}_"
+                       f"{datetime.now().strftime('%Y%m%d_%H%M%S')}")
             info(self, "同名输出已存在，本次输出将追加时间戳。")
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)  # 忙碌指示
@@ -959,10 +1326,13 @@ class CompileWizard(ThreadSafeDialog, QWizard):
         self._register_from_compile(ask_first=True, silent_ok=True)
 
     def _fail(self, msg: str):
+        # 失败只写状态面板（中文原因），不弹模态框：向导是长任务场景，
+        # 弹窗只会打断用户阅读已有的产物/错误信息。
         self.progress.setVisible(False)
         self.btn_start.setEnabled(True)
-        self.lbl_result.setText(f"失败：{msg}")
-        info(self, f"生成失败：{msg}")
+        self.lbl_result.setText(f"生成失败：{msg}")
+        self.banner.show_result("danger", "生成未完成", [("失败", "danger")])
+        log.warning("一键汇编失败：%s", msg)
 
     def _open_dir(self):
         p = str(export_dir())

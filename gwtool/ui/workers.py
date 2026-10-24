@@ -208,7 +208,12 @@ class PdfRenderWorker(QThread):
         try:
             from ..core import pdfrender
             self.progress.emit("正在加载材料…")
-            trees = compiler.load_trees(self.doc_ids, self.extra_paths)
+            # 材料标题重定基与 DOCX 同一口径（见 compiler.load_trees_ex）；
+            # getattr 兼容历史调用方把模板以 JSON 字符串传入的旧用法。
+            trees = compiler.load_trees(
+                self.doc_ids, self.extra_paths,
+                insert_material_titles=getattr(self.template,
+                                               "insert_material_titles", True))
             if not trees:
                 raise ValueError("没有可汇编的材料")
             self.progress.emit("第一遍渲染（计算目录页码）…")

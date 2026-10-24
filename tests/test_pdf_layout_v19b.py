@@ -179,7 +179,9 @@ class TestPdfLineSpacing:
             for text, _lv in heads:
                 for pno in range(front, doc.page_count):
                     if doc[pno].search_for(text[:12]):
-                        actual[text] = pno + 1
+                        # v1.15：封面/目录不编号，正文从 1 起算 —— 目录里写的是
+                        # **纸面页码**，比物理页号少 front
+                        actual[text] = pno + 1 - front
                         break
             wrong = [(t, pg, actual.get(t)) for t, pg in pairs if actual.get(t) != pg]
             assert not wrong, f"目录页码与正文不一致：{wrong[:4]}"

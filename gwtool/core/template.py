@@ -84,6 +84,12 @@ class DocTemplate:
     first_line_indent_chars: float = 2
     align: str = "justify"
     # 标题层级样式
+    #   公文标题（材料标题/汇编名）：小标宋二号、居中、不缩进（GB/T 9704）
+    #   一级「一、」黑体三号 / 二级「（一）」楷体三号 / 三级「1.」仿宋加粗
+    doc_title: HeadingStyle = field(
+        default_factory=lambda: HeadingStyle(font=FONT_XBS, size_pt=22,
+                                             bold=False, align="center",
+                                             indent_chars=0))
     h1: HeadingStyle = field(default_factory=lambda: HeadingStyle(font=FONT_HEI, bold=False))
     h2: HeadingStyle = field(default_factory=lambda: HeadingStyle(font=FONT_KAI, bold=False))
     h3: HeadingStyle = field(default_factory=lambda: HeadingStyle(font=FONT_BODY, bold=True))
@@ -98,6 +104,9 @@ class DocTemplate:
     cover: CoverInfo = field(default_factory=CoverInfo)
     toc_enabled: bool = True
     toc_title: str = "目  录"
+    # 目录收录到第几级标题（1~3）。默认 2：公文目录通常只到"一、/（一）"，
+    # 收录三级会把"1. 2. 3."这类枚举清单也塞进目录（实测 30 条清单占 3 页）。
+    toc_max_level: int = 2
     colophon: Colophon = field(default_factory=Colophon)
     # 汇编选项
     insert_material_titles: bool = True     # 每份材料标题作为一级标题
@@ -117,8 +126,11 @@ class DocTemplate:
         if not isinstance(d, dict):
             raise ValueError("模板配置非法")
         # 嵌套对象重建（逐层过滤未知键，兼容跨版本存取）
+        # ⚠ doc_title 必须一起重建：漏掉它时 from_json/clone 会让 doc_title
+        # 退化成普通 dict，docxgen 取 `tpl.doc_title.font` 直接 AttributeError
+        # ——批量汇编逐篇生成会整批失败（v1.15 加字段时踩到过）。
         h = {}
-        for k in ("h1", "h2", "h3", "h4"):
+        for k in ("doc_title", "h1", "h2", "h3", "h4"):
             if k in d and isinstance(d[k], dict):
                 h[k] = HeadingStyle(**_known_fields(HeadingStyle, d[k]))
         rh_raw = d.pop("red_header", {})
@@ -177,12 +189,38 @@ def _known_fields(dc_cls, data: dict) -> dict:
     return {k: v for k, v in data.items() if k in allowed}
 
 
+def cover_visible(tpl: "DocTemplate") -> bool:
+    """封面是否真的要出一页：开关打开**且至少有一个要素非空**。
+
+    为什么要加"非空"这一条：v1.15 起内置模板默认带封面（`default_template()`
+    的 cover.enabled=True），而 `report.py` / `archive.export_manifest` 这类
+    "复用公文体式"的通路也走 `default_template()`。它们不填封面要素，若只判
+    开关，归档移交清单会凭空多出一页只有模板名的封面 —— 那不是这些文书的体式。
+    因此统一在这里判"有内容才出封面"，docx 与 PDF 两条渲染通路共用同一判据
+    （否则同一份内容导出两个格式，页数会不一样）。
+    """
+    cover = tpl.cover
+    if not cover.enabled:
+        return False
+    lines = [cover.title, cover.subtitle, cover.org, cover.date,
+             *(cover.extra_lines or [])]
+    return any((s or "").strip() for s in lines)
+
+
 def default_template() -> DocTemplate:
-    """内置「标准公文」模板。"""
+    """内置「标准公文」模板。
+
+    v1.15：默认带封面（`cover.enabled=True`）——「一键汇编」的产物是一份要
+    交出去的汇编件，没有封面不成体式；封装名/单位/日期由向导第 2 步覆盖
+    （`compile_wizard._apply_cover_fields`），这里给的是**无输入时也不空**的
+    兜底值。
+    """
     t = DocTemplate()
     t.red_header.enabled = True
     t.red_header.org = "××单位文件"
     t.red_header.doc_number = "×政发〔2026〕1号"
+    t.cover.enabled = True
+    t.cover.title = "材料汇编"
     t.colophon.enabled = True
     t.colophon.lines = ["抄送：有关单位。", "××单位办公室  2026年8月30日印发"]
     return t
