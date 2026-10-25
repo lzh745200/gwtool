@@ -109,25 +109,103 @@ def _git_visible_files(root: Path) -> list[str]:
     return files
 
 
+def _git_cmd(root: Path) -> list[str]:
+    """git 基础命令：safe.directory（CI 容器属主不同）+ 中文路径不转义。"""
+    abs_root = str(Path(root).resolve())
+    return ["git",
+            "-c", f"safe.directory={abs_root}",
+            "-c", "safe.directory=*",
+            "-c", "core.quotepath=false"]
+
+
+def _index_blobs(root: Path) -> dict[str, str]:
+    """工作区相对路径 → 索引 blob sha（stage 0，即已跟踪文件）。
+
+    为什么要索引内容而不是磁盘字节（2026-10-25 收口）：`.gitattributes` 的
+    `text`/`eol` 会在 checkin 时把工作区 CRLF 归一化成索引里的 LF；而 API
+    直推此前读磁盘原始字节，把 CRLF blob 写进了远端，导致本地 `git status`
+    永远显示 `.bat` 被修改（内容其实相同）。以索引 blob 为准后，API 推送与
+    `git commit` 语义一致，行尾/过滤器不再反复漂移。
+    """
+    proc = subprocess.run([*_git_cmd(root), "ls-files", "-s", "-z"],
+                          cwd=str(root), capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "无法读取 git 索引（请在仓库内运行）："
+            + proc.stderr.decode("utf-8", "replace")[:200])
+    out: dict[str, str] = {}
+    for entry in proc.stdout.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition(b"\t")
+        parts = meta.split()
+        if len(parts) >= 3 and parts[2] == b"0":
+            out[path.decode("utf-8", "replace")] = parts[1].decode()
+    return out
+
+
+def _cat_blobs(root: Path, shas: list[str]) -> dict[str, bytes]:
+    """按 sha 批量取 blob 内容（已过 clean 过滤器，等价于 git commit 的入库内容）。"""
+    if not shas:
+        return {}
+    proc = subprocess.run([*_git_cmd(root), "cat-file", "--batch"],
+                          cwd=str(root),
+                          input=("\n".join(shas) + "\n").encode(),
+                          capture_output=True, timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "无法读取 git blob："
+            + proc.stderr.decode("utf-8", "replace")[:200])
+    data = proc.stdout
+    out: dict[str, bytes] = {}
+    pos = 0
+    while pos < len(data):
+        nl = data.index(b"\n", pos)
+        header = data[pos:nl].split()
+        if len(header) < 3 or header[1] != b"blob":
+            break
+        sha = header[0].decode()
+        size = int(header[2])
+        start = nl + 1
+        out[sha] = data[start:start + size]
+        pos = start + size + 1
+    return out
+
+
 def scan_local(root: Path = Path(".")) -> dict[str, bytes]:
     """收集本地待上传文件：**只含 git 可见文件**（尊重 .gitignore）。
 
+    已跟踪文件取**索引 blob**（含 clean 过滤器，行尾归一化与 `git commit` 一致）；
+    未跟踪但未被忽略的文件取磁盘字节（它们还没过 git 过滤器）。
+
     历史：① 跳过名单漂移导致 .venv64/packs 全量上传（2026-09-13）；
     ② build_new/dist_new 再犯（2026-09-22）；③ `.gitignore` 里的语料被推上
-    公开仓库（2026-10-24）。前两次靠扩充名单，第三次改为**以 git 为准**。
+    公开仓库（2026-10-24）；④ 磁盘字节绕过 `.gitattributes` 造成远端行尾
+    非规范、本地 git status 长期脏（2026-10-25）。每次都是"多一份事实源"
+    惹的祸，最终改为**完全以 git 为准**。
     """
     import fnmatch
+    tracked = _index_blobs(root)
+    contents = _cat_blobs(root, sorted(set(tracked.values())))
     out: dict[str, bytes] = {}
     for rel in _git_visible_files(root):
-        full = root / rel
-        if not full.is_file():
-            continue
         parts = Path(rel).parts
-        if any(is_skipped_dir(part) for part in parts):
+        # 目录过滤只看**目录部分**：只看最简单的 `parts` 会把 build_windows.bat /
+        # build.yml 这类文件名也当成构建目录丢掉（v1.15 收口实测：6 个构建脚本
+        # 因此长期只存在于远端，每次推送都报"本地缺失"）。
+        if any(is_skipped_dir(part) for part in parts[:-1]):
             continue
-        if any(fnmatch.fnmatch(full.name, pat) for pat in SKIP_FILE_PATTERNS):
+        if any(fnmatch.fnmatch(Path(rel).name, pat) for pat in SKIP_FILE_PATTERNS):
             continue
-        out[rel] = full.read_bytes()
+        if rel in tracked:
+            blob = contents.get(tracked[rel])
+            if blob is None:
+                continue
+            out[rel] = blob
+        else:
+            full = root / rel
+            if full.is_file():
+                out[rel] = full.read_bytes()
     return out
 
 

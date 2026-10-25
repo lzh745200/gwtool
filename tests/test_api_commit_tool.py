@@ -59,3 +59,53 @@ def test_scan_local_ignores_skipped_dirs_even_if_tracked(tmp_path):
     files = api_commit.scan_local(repo)
     assert "ok.txt" in files
     assert ".venv64/lib.txt" not in files
+
+
+def test_scan_local_keeps_build_prefixed_filenames(tmp_path):
+    """文件名以 build 开头的普通文件不能被"构建目录"过滤误伤。
+
+    2026-10-25 收口实测：过滤把文件名也交给 `is_skipped_dir`，导致
+    `scripts/build_windows.bat`、`.github/workflows/build.yml`、`build_*.py`
+    等 6 个文件被静默排除，每次推送都误报"本地缺失"。
+    """
+    repo = tmp_path / "repo3"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "build_windows.bat").write_text("echo xy", encoding="utf-8")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "build.yml").write_text("on: push\n",
+                                                             encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "init")
+
+    files = api_commit.scan_local(repo)
+    assert "scripts/build_windows.bat" in files
+    assert ".github/workflows/build.yml" in files
+
+
+def test_scan_local_reads_index_content_not_raw_disk(tmp_path):
+    """已跟踪文件取索引 blob（过 clean 过滤器），不取磁盘原始字节。
+
+    `.gitattributes` 把 .bat 工作区 CRLF 归一化成索引 LF；若读磁盘字节，
+    远端会存 CRLF blob，本地 `git status` 永远显示文件被修改。
+    """
+    repo = tmp_path / "repo4"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitattributes").write_text("*.bat text eol=crlf\n", encoding="utf-8")
+    (repo / "run.bat").write_bytes(b"echo a\r\necho b\r\n")
+    _git(repo, "add", ".gitattributes", "run.bat")
+    _git(repo, "commit", "-m", "init")
+
+    disk = (repo / "run.bat").read_bytes()
+    assert b"\r\n" in disk, "工作区应保持 CRLF（eol=crlf）"
+    blob = subprocess.run(["git", "cat-file", "blob", ":run.bat"],
+                          cwd=str(repo), capture_output=True, check=True).stdout
+    files = api_commit.scan_local(repo)
+    assert files["run.bat"] == blob, "scan_local 必须返回索引内容（LF）"
+    assert files["run.bat"] != disk
