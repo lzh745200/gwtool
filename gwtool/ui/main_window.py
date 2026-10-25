@@ -602,6 +602,10 @@ class MainWindow(QMainWindow):
         self._menu_action(m_tool, "写作提示与灵感…", self.open_writing_hints,
                           "按文种给写作提示（缺什么、怎么组织）并推荐可借鉴的句式与写法，"
                           "只作建议不改正文")
+        self._menu_action(
+            m_tool, "写作参考库…", self.open_material_pack,
+            "检索公版/开放授权语料包中的论点、论据、过渡、结尾句式与结构模板"
+            "（只读，不联网）")
         m_tool.addSeparator()
         self._menu_action(m_tool, "历史版本（快照）…", self.open_snapshots,
                           "查看并回退到某次修改前的版本（批量纠错/替换前会自动留）")
@@ -786,6 +790,21 @@ class MainWindow(QMainWindow):
         dlg = WritingHintsDialog(lambda: self.editor.editor.toPlainText(), self,
                                  topic=topic or "")
         self._exec_dialog(dlg)
+
+    def open_material_pack(self):
+        """写作参考库：检索公版/开放授权语料包（只读、离线、不写资料库）。"""
+        from .material_dialog import MaterialDialog
+
+        dlg = MaterialDialog(self, insert_cb=self._insert_material_text)
+        self._exec_dialog(dlg)
+
+    def _insert_material_text(self, text: str):
+        """把参考库选中的句子插入当前正文光标处（可撤销）。"""
+        editor = getattr(self.editor, "editor", None)
+        if editor is None:
+            raise RuntimeError("当前没有可插入的文档")
+        cur = editor.textCursor()
+        cur.insertText(text)
     def open_generate(self):
         """菜单入口：用当前参考清单派生骨架生成草稿。"""
         refs = self.reference.picks()
