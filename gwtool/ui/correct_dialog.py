@@ -181,6 +181,8 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._corrs: list[list] = []
         self._hits: list[dict] = []
         self._source = ""
+        # 撤销快照（v1.17 P0）：只保留一步；应用前压入 (blocks, title) 深拷贝。
+        self._undo_state: tuple[list[dict], str] | None = None
         self._loading_source = ""       # 后台解析中暂存的文件名（回调里落 _source）
         self._loading = False           # 程序性写输入框时抑制 textChanged 重建
         self._worker: FnWorker | None = None
@@ -234,11 +236,21 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         rv.setContentsMargins(0, 0, 0, 0)
         self.listw = QListWidget()
         rv.addWidget(self.listw, 1)
+        # 逐条理由（v1.17 P0）：用户需要知道"为什么改/改多大"，而不是只看到替换词
+        self.lbl_reason = QLabel("")
+        self.lbl_reason.setWordWrap(True)
+        self.lbl_reason.setStyleSheet(f"color:{theme.MUTED};")
+        rv.addWidget(self.lbl_reason)
         row1 = QHBoxLayout()
         self.btn_apply_one = QPushButton("应用此修正")
+        self.btn_apply_cat = QPushButton("接受此类")
+        self.btn_apply_cat.setToolTip("把当前类别里所有「错误级」命中一次性写回（可撤销）")
+        self.btn_undo = QPushButton("撤销上次")
+        self.btn_undo.setToolTip("恢复到上一次应用之前的正文（可反复应用后只退一步）")
         self.btn_apply_all = QPushButton("全部应用")
         self.btn_ignore = QPushButton("忽略此词")
-        for b in (self.btn_apply_one, self.btn_apply_all, self.btn_ignore):
+        for b in (self.btn_apply_one, self.btn_apply_cat, self.btn_undo,
+                  self.btn_apply_all, self.btn_ignore):
             row1.addWidget(b)
         rv.addLayout(row1)
         row2 = QHBoxLayout()
@@ -273,6 +285,8 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self.listw.currentRowChanged.connect(self._goto_hit)
         self.listw.itemDoubleClicked.connect(lambda _i: self.apply_selected())
         self.btn_apply_one.clicked.connect(self.apply_selected)
+        self.btn_apply_cat.clicked.connect(self.apply_category)
+        self.btn_undo.clicked.connect(self.undo_last)
         self.btn_apply_all.clicked.connect(self.apply_all_blocks)
         self.btn_ignore.clicked.connect(self.ignore_selected)
         self.btn_prev.clicked.connect(lambda: self._step(-1))
@@ -330,6 +344,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
 
     def _load_text(self, text: str, source: str) -> None:
         self._loading = True
+        self._undo_state = None      # 换文档后旧快照失效，撤销不得跨文档
         try:
             self._title = ""
             self._blocks = [{"kind": "para", "text": seg, "rows": None}
@@ -535,10 +550,12 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         has = bool(self._blocks)
         if busy:
             self.banner.clear()      # 新一轮开始：收起上一轮结论（§6.7）
-        for b in (self.btn_run, self.btn_apply_one, self.btn_apply_all,
-                  self.btn_ignore, self.btn_docx, self.btn_txt,
-                  self.btn_report):
+        for b in (self.btn_run, self.btn_apply_one, self.btn_apply_cat,
+                  self.btn_undo, self.btn_apply_all, self.btn_ignore,
+                  self.btn_docx, self.btn_txt, self.btn_report):
             b.setEnabled(has and not busy)
+        if not busy:
+            self._sync_action_buttons()
         self.btn_file.setEnabled(not busy)
         self.btn_clip.setEnabled(not busy)
         # P0-1：扫描期间输入框只读。旧结果套新文本的竞态有一半来自"扫描中
@@ -559,16 +576,30 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._hits = payload.get("hits") or []
         self.browser.setHtml(payload.get("html") or "")
         self.listw.clear()
+        sev_cn = {"error": "错误", "warning": "待确认", "suggest": "提示"}
         for idx, h in enumerate(self._hits):
             c = h["corr"]
+            sev = getattr(c, "severity", "error")
             label = h.get("label") or (
                 f"[{h['where']}·第{corrector.paragraph_no(h['text'], c.start)}段] "
                 f"{c.label}（{c.category} {c.confidence:.2f}）")
-            it = QListWidgetItem(label)
-            it.setForeground(QColor(severity_color("error") if c.confidence >= 0.8
-                                    else severity_color("warn")))
+            it = QListWidgetItem(f"【{sev_cn.get(sev, '错误')}】{label}")
+            color_key = {"error": "error", "warning": "warn"}.get(sev, "info")
+            it.setForeground(QColor(severity_color(color_key)))
             it.setData(Qt.UserRole, idx)
             self.listw.addItem(it)
+        self._sync_action_buttons()
+
+    def _sync_action_buttons(self) -> None:
+        """按当前选中项的 severity 与撤销栈状态，决定两个新按钮是否可用。"""
+        h = self._current_hit()
+        sev = getattr(h["corr"], "severity", "error") if h else ""
+        self.btn_apply_cat.setEnabled(bool(h) and sev == "error")
+        self.btn_undo.setEnabled(self._undo_state is not None)
+
+    def _push_undo(self) -> None:
+        """应用前压入一步撤销快照（块与标题整体深拷贝）。"""
+        self._undo_state = (deepcopy(self._blocks), self._title)
 
     def _hit_text(self, bi, ri, ci) -> str:
         """命中所在的原文片段。
@@ -582,7 +613,19 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
 
     def _goto_hit(self, row: int) -> None:
         if 0 <= row < len(self._hits):
-            self.browser.scrollToAnchor(self._hits[row]["anchor"])
+            h = self._hits[row]
+            c = h["corr"]
+            sev_cn = {"error": "错误（可自动写回）",
+                      "warning": "待确认（同句超出自动上限/低置信）",
+                      "suggest": "提示（请人工判断）"}.get(
+                getattr(c, "severity", "error"), "错误")
+            self.browser.scrollToAnchor(h["anchor"])
+            self.lbl_reason.setText(
+                f"级别：{sev_cn}　类别：{c.category}　置信度：{c.confidence:.2f}\n"
+                f"理由：{c.reason or '—'}")
+        else:
+            self.lbl_reason.clear()
+        self._sync_action_buttons()
 
     def _step(self, delta: int) -> None:
         n = self.listw.count()
@@ -613,10 +656,12 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
             self._discard_results()
             return
         if bi == -1:  # 标题
+            self._push_undo()
             self._title = self._title[:c.start] + c.suggestion + self._title[c.end:]
             self._sync_input_box()
             self.start_check()
             return
+        self._push_undo()
         b = self._blocks[bi]
         if b["kind"] == "table":
             b["rows"][ri][ci] = (b["rows"][ri][ci][:c.start] + c.suggestion
@@ -641,6 +686,7 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         # 两条路径复用同一个 worker 函数，保证产物一致。
         blocks_snapshot = deepcopy(self._blocks)
         title = self._title
+        self._push_undo()
         if _content_char_count(blocks_snapshot, title) < _UI_ASYNC_MIN_CHARS:
             self._adopt_applied(_apply_all_blocks_worker(blocks_snapshot, title))
             return
@@ -663,6 +709,64 @@ class AnyDocCorrectDialog(ThreadSafeDialog, QDialog):
         self._sync_input_box()
         self.start_check()
         self.lbl_stat.setText(f"整篇应用完成：修正 {result['n']} 处")
+
+    # -------------------------------------------------- 按类应用 / 撤销（P0）
+    @staticmethod
+    def _apply_category_text(text: str, category: str) -> tuple[str, int]:
+        cs = [c for c in corrector.check_text(text)
+              if c.category == category and c.severity == "error"]
+        out = text
+        for c in sorted(cs, key=lambda x: -x.start):
+            out = out[:c.start] + c.suggestion + out[c.end:]
+        return out, len(cs)
+
+    def apply_category(self) -> None:
+        """「接受此类」：把当前类别里所有错误级命中一次性写回（提示级不批量）。"""
+        h = self._current_hit()
+        if h is None:
+            self.lbl_stat.setText("请先在右侧选择一处")
+            return
+        c = h["corr"]
+        if getattr(c, "severity", "error") != "error":
+            self.lbl_stat.setText(
+                "该命中是提示级（或超出同句自动上限），请逐条确认后再应用")
+            return
+        if self._reject_if_stale():
+            return
+        category = c.category
+        self._push_undo()
+        n = 0
+        if self._title:
+            self._title, k = self._apply_category_text(self._title, category)
+            n += k
+        for b in self._blocks:
+            if b.get("kind") == "table":
+                for _ri, row in enumerate(b.get("rows") or []):
+                    for ci in range(len(row)):
+                        fixed, k = self._apply_category_text(row[ci], category)
+                        row[ci] = fixed
+                        n += k
+            else:
+                fixed, k = self._apply_category_text(
+                    b.get("text", "") or "", category)
+                b["text"] = fixed
+                n += k
+        self._sync_input_box()
+        self.start_check()
+        self.lbl_stat.setText(f"已接受「{category}」{n} 处（可撤销）")
+
+    def undo_last(self) -> None:
+        """撤销上一次应用（单步），恢复正文并重扫。"""
+        if self._undo_state is None:
+            self.lbl_stat.setText("没有可撤销的应用")
+            return
+        blocks, title = self._undo_state
+        self._undo_state = None
+        self._blocks = deepcopy(blocks)
+        self._title = title
+        self._sync_input_box()
+        self.start_check()
+        self.lbl_stat.setText("已撤销上一次应用")
 
     def _on_apply_all_done(self, result: dict, token: int,
                            fingerprint: tuple) -> None:

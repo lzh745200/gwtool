@@ -10,12 +10,12 @@
   - 无法发现"翻译层（L4/L5）一开就崩"这类整体性回归——
     因为没有任何一条门禁会把**开启增强层后的误报**纳入判定。
 
-本脚本把评测收敛为 6 个可判定项（E1–E6）。**默认不触碰真实用户数据**：
+本脚本把评测收敛为 7 个可判定项（E1–E7）。**默认不触碰真实用户数据**：
 数据目录被重定向到临时目录，只有增强包目录是**只读**指向真实位置。
 
 评测档案（--profile）与 SKIP 语义
 --------------------------------
-    base   只跑基础三层：门禁 E1/E2/E3a/E5（CI 用的就是这一档；
+    base   只跑基础三层：门禁 E1/E2/E3a/E5/E7（CI 用的就是这一档；
            不需要增强包，任何机器都能通过）
     l4     基础 + 单字精排层：门禁项之外再加 E4/E6（需已装拼写增强包）
     l5     基础 + 序列生成层：同上（需已装语法增强包）
@@ -106,6 +106,8 @@ TH_FP_PER_WAN = 0.50            # E3a 可自动替换类误报（现状 0；这�
 TH_OOV_RECALL_BASE = 0.05       # E4 词表外错字：基础三层的期望（现状 0，属已知天花板）
 TH_NEURAL_FP_PER_QIAN = 1.00    # E6 开启神经层后新增误报（处/千字）：现状 57.6，本方案核心待修项
 TH_MS_PER_QIAN_BASE = 100.0     # E5 基础三层耗时（毫秒/千字）
+TH_E7_F05 = 0.95                # E7 精标配对 F0.5（精确率加权；现状 1.0）
+TH_E7_CLEAN_FP = 0              # E7 正确形被自动改的处数（红线：必须 0）
 
 #: E3b「提示类」口径（v1.12，D2）：`corrector.ADVISORY_CATEGORIES`
 #: （数字用法 / 表达提示 / 标点规范）是"建议是提示标签、写回会把正文改成标签"的
@@ -548,6 +550,53 @@ def main() -> int:
         + (f"；漏报 {miss[:6]}" if miss else ""),
         recall >= TH_CURATED_RECALL))
     data["E1"] = {"ok": ok, "bad": bad, "recall": recall, "miss": miss}
+
+    # ---------------------------------------------------------- E7 配对精确率
+    # 规则层配对控制（v1.17 P0）：448 精标对同时构造"错形句/正确形句"——
+    # 错形句必须被 **自动层（severity=error）** 改对；正确形句里同一位置
+    # 不得有任何自动改动。它补的是 E1/E2 只有召回、没有"正确文本被误改"
+    # 这一侧的证据；口径只覆盖精标对所在词位，不宣称整体精度。
+    e7_tp = e7_fn = e7_fp = e7_clean_auto = 0
+    e7_fp_examples = []
+    for wrong, correct, _cat, _conf in corrector_data.CURATED_PAIRS:
+        if not corrector._is_valid_pair(wrong, correct):
+            continue
+        pos = f"请各单位{wrong}有关要求。"
+        pos_hits = [h for h in corrector.check_text(pos)
+                    if h.severity == "error"]
+        if any(h.wrong == wrong and h.suggestion == correct for h in pos_hits):
+            e7_tp += 1
+        else:
+            e7_fn += 1
+        neg_sent = f"请各单位{correct}有关要求。"
+        idx = neg_sent.find(correct)
+        neg_auto = [h for h in corrector.check_text(neg_sent)
+                    if h.severity == "error"]
+        e7_clean_auto += len(neg_auto)
+        bad = [h for h in neg_auto
+               if h.start < idx + len(correct) and h.end > idx]
+        if bad:
+            e7_fp += 1
+            if len(e7_fp_examples) < 6:
+                e7_fp_examples.append(
+                    f"{correct}→{[h.suggestion for h in bad]}")
+    e7_recall = e7_tp / max(1, e7_tp + e7_fn)
+    e7_precision = e7_tp / max(1, e7_tp + e7_fp)
+    e7_f05 = (1.25 * e7_precision * e7_recall
+              / (0.25 * e7_precision + e7_recall)
+              if (e7_precision + e7_recall) else 0.0)
+    e7_ok = (e7_f05 >= TH_E7_F05 and e7_fp <= TH_E7_CLEAN_FP)
+    results.append(_gated_result(
+        "E7", "精标配对精确率（F0.5）/ 正确形零自动改",
+        round(e7_f05, 4),
+        f"F0.5={e7_f05:.1%}（P={e7_precision:.1%} R={e7_recall:.1%}，"
+        f"正确形被自动改 {e7_fp} 处，同句其它自动命中 {e7_clean_auto}）"
+        + (f"；误改示例 {e7_fp_examples}" if e7_fp_examples else ""),
+        e7_ok))
+    data["E7"] = {"pairs": e7_tp + e7_fn, "tp": e7_tp, "fn": e7_fn,
+                  "fp": e7_fp, "clean_auto_hits": e7_clean_auto,
+                  "precision": e7_precision, "recall": e7_recall,
+                  "f05": e7_f05, "fp_examples": e7_fp_examples}
 
     # ---------------------------------------------------------- E2 生成对
     rnd = random.Random(args.seed)

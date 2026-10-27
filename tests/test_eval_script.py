@@ -195,7 +195,8 @@ def test_base_profile_exits_zero(base_run):
     assert "[FAIL]" not in out, f"base 档位不应出现 FAIL：\n{out}"
     assert "[PASS] E1 " in _line_of(out, "E1") and "100.0%" in _line_of(out, "E1")
     assert "[PASS] E2 " in _line_of(out, "E2")
-    assert "通过 2/2 项" in out
+    assert "[PASS] E7 " in _line_of(out, "E7")
+    assert "通过 3/3 项" in out
     assert "退出码：0" in out
 
 
@@ -242,7 +243,8 @@ def test_json_contract(base_run):
     assert sample["E3a"] == sample["E3"] == sample["E3b"]
 
     statuses = {r["key"]: r["status"] for r in payload["results"]}
-    assert statuses == {"E1": "PASS", "E2": "PASS", "E3a": "SKIP", "E3b": "SKIP",
+    assert statuses == {"E1": "PASS", "E2": "PASS", "E7": "PASS",
+                        "E3a": "SKIP", "E3b": "SKIP",
                         "E4": "SKIP", "E5": "SKIP", "E6": "SKIP"}
     for item in payload["results"]:
         assert item["passed"] == (item["status"] == "PASS")

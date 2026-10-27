@@ -68,6 +68,12 @@ class Correction:
     # 改动类型：replace（替换，默认）/ insert（增字）/ delete（删字）。
     # 默认值保证历史构造点零改动；L5 Seq2Seq 层需用它区分变长输出。
     kind: str = "replace"
+    # 三级置信门控（v1.17 P0）：
+    #   error   —— conf≥0.70、非提示类、不在受保护片段、同句前两处：可自动写回
+    #   warning —— 同句第 3 处及以后：仍列出，但需人工逐条确认
+    #   suggest —— 提示类（数字用法/机构沿革/生成层/表达提示/标点规范）或受保护片段
+    # 默认 error 保证历史构造点零改动（check_text 会统一重算）。
+    severity: str = "error"
 
     @property
     def label(self) -> str:
@@ -186,6 +192,88 @@ def invalidate_cache() -> None:
 
 
 # ------------------------------------------------------------------ 引擎
+# 受保护片段（v1.17 P0）：这些区间里的候选**不自动写回**（只降为 suggest）。
+# 判据都是"改法不唯一/原文必须保真"的位置，与词表无关，所以用区间判定而不是类别。
+_PROTECTED_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"“[^”\n]{0,200}”"),          # 中文双引号
+    re.compile(r'"[^"\n]{0,200}"'),           # 英文双引号
+    re.compile(r"「[^」\n]{0,200}」"),
+    re.compile(r"『[^』\n]{0,200}』"),
+    re.compile(r"《[^》\n]{0,100}》"),          # 书名号
+    re.compile(r"https?://[^\s，。；）)】]+"),   # URL
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),    # 邮箱
+    re.compile(r"`[^`\n]{0,200}`"),            # 行内代码
+    re.compile(                                 # 数字+单位（计量值不拆改）
+        r"\d+(?:\.\d+)?\s*(?:%|％|年|月|日|万元|亿元|万|亿|个|项|件|人|"
+        r"元|公里|平方米|吨|℃|毫米|厘米|米|千克|公斤)"),
+)
+_SENT_RX = re.compile(r"[^。！？；!?;\n]+[。！？；!?;]?")
+
+
+def _protected_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for rx in _PROTECTED_PATTERNS:
+        spans.extend((m.start(), m.end()) for m in rx.finditer(text or ""))
+    spans.sort()
+    return spans
+
+
+def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    for s, e in spans:
+        if s >= end:
+            break
+        if e > start:
+            return True
+    return False
+
+
+def _assign_severity(text: str, corrections: list[Correction]) -> list[Correction]:
+    """统一计算 severity（只改标签，不改变检出集合）。
+
+    优先级（从高到低）：
+      1) 提示类类别 → suggest（suggestion 是标签，写回会把正文改成标签）；
+      2) 受保护片段 → suggest（引文/书名/URL/代码/计量值必须保真）。
+         **标点类例外**：引号内的"..."→"……"、半角括号→全角属于纯格式归一，
+         不改变引文内容，继续自动改（v1.19 实测：一律保护会把既有标点修复关掉）；
+      3) conf < 0.60 → warning（低置信不自动改；0.60 是现有规则层的最低值：
+         "标点"里的全角括号归一为 0.60，定 0.70 会把既有标点修复误降级）；
+      4) 同一句内 error 数达 2 后 → warning（每句自动修改上限）；
+      5) 其余 → error。
+    句子按 。！？； 切分；找不到句子边界时按整段算一句。
+    """
+    if not corrections:
+        return corrections
+    spans = _protected_spans(text)
+    sent_ranges = [(m.start(), m.end()) for m in _SENT_RX.finditer(text or "")]
+    sent_starts = [s for s, _e in sent_ranges] or [0]
+
+    def _sent_index(pos: int) -> int:
+        return max(0, bisect_left(sent_starts, pos + 1) - 1)
+
+    per_sent = {}
+    for c in sorted(corrections, key=lambda x: (x.start, x.end)):
+        if c.category in ADVISORY_CATEGORIES:
+            c.severity = "suggest"
+            continue
+        if c.category != "标点" and _overlaps(c.start, c.end, spans):
+            c.severity = "suggest"
+            note = "（受保护片段，仅提示）"
+            if note not in (c.reason or ""):
+                c.reason = f"{c.reason}{note}" if c.reason else note.strip("（）")
+            continue
+        if c.confidence < 0.60:
+            c.severity = "warning"
+            continue
+        idx = _sent_index(c.start)
+        used = per_sent.get(idx, 0)
+        if used >= 2:
+            c.severity = "warning"
+        else:
+            c.severity = "error"
+            per_sent[idx] = used + 1
+    return corrections
+
+
 def check_text(text: str) -> list[Correction]:
     if not text:
         return []
@@ -197,7 +285,8 @@ def check_text(text: str) -> list[Correction]:
     found.extend(_check_grammar(text))                    # L2.5 语法与表达规则层
     found.extend(_check_repeat(text))                     # L3 重复字（同字连）
     found = _apply_neural_layer(text, _dedupe(found))     # L4 单字替换精排
-    return _apply_gec_layer(text, found)                  # L5 语法纠错
+    found = _apply_gec_layer(text, found)                 # L5 语法纠错
+    return _assign_severity(text, found)                  # 三级门控（v1.17 P0）
 
 
 _CONJ_ENUM_RX = re.compile(
@@ -940,8 +1029,18 @@ def correct_block(text: str, skip_categories: "set[str] | tuple" = ADVISORY_CATE
     """
     skip = set(skip_categories)
     if apply_low_confidence:
+        # 显式恢复生成层：只放开这一类（提示标签类仍由类别本身不在 skip 决定，
+        # 但它们 severity 恒为 suggest，下面也不会命中 error 分支）。
         skip.discard("错别字(生成)")
-    cs = [c for c in check_text(text) if c.category not in skip]
+    all_cs = check_text(text)
+    cs: list[Correction] = []
+    for c in all_cs:
+        if c.category in skip:
+            continue
+        if c.severity == "error":
+            cs.append(c)
+        elif apply_low_confidence and c.category == "错别字(生成)":
+            cs.append(c)
     out = text
     for c in sorted(cs, key=lambda c: -c.start):
         out = out[:c.start] + c.suggestion + out[c.end:]
