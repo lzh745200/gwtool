@@ -1170,10 +1170,38 @@ def _fts_count(fts_table: str, src_table: str, match: str) -> int:
     return int(row[0]) if row else 0
 
 
-def search_dictionary(query: str, limit: int = 50) -> list[SearchResult]:
-    """词典检索走 word 列 LIKE（12万词条免建 FTS，命中即时）。
+_DICT_COLS = "SELECT id,word,definition FROM dictionary"
+# 词典检索的"排序扫描上限"：命中数超过它就不再按词长全量排序。
+# 依据（12.3 万词条实测）：范围查询本身 0.09 ms，加 ORDER BY LENGTH 后 0.87 ms，
+# 而短前缀（如"安全"）能命中数千条、排序成本会随命中数线性增长；
+# 老实现的全表 LIKE 扫描 + 排序是 16~21 ms。上限内的命中才值得精确排序。
+_DICT_SORT_SCAN_CAP = 2000
 
-    优先精确/前缀命中，其次包含命中；拼音不参与（写作参考以词条为主）。
+
+def search_dictionary(query: str, limit: int = 50) -> list[SearchResult]:
+    """词典检索：精确 → 前缀 → 包含，三级降级，命中即返回。
+
+    性能要点（v1.19 实测，12.3 万词条）
+    ----------------------------------
+    `word` 上的索引是 **BINARY 排序规则**，SQLite **不会**把
+    `word LIKE '前缀%'` 转成索引范围（只有列声明 COLLATE NOCASE 时才会，
+    而 NOCASE 对中文无效）。老实现用两级 LIKE：
+
+        word LIKE 'q%'      → EXPLAIN: SCAN dictionary USING COVERING INDEX（≈34 ms）
+        word LIKE '%q%'     → EXPLAIN: SCAN dictionary USING COVERING INDEX（≈34 ms）
+
+    即每次检索都扫 12.3 万行，把默认的写作参考检索拖到 ≈85 ms。
+    现在：
+
+      · 前缀 → 范围查询 `word >= q AND word < q+\\uffff`
+        （EXPLAIN: SEARCH dictionary USING INDEX (word>? AND word<?)，0.09~0.87 ms；
+        BINARY 规则下与 `LIKE 'q%'` 等价，已有等价性测试守住）；
+      · 包含 → `instr(word, ?)`（子串语义相同，但不做 LIKE 模式匹配）；
+      · 命中数超过 _DICT_SORT_SCAN_CAP 时放弃"按词长全量排序"，
+        改为索引顺序取 limit 条 + 定向补短词，避免排序成本压过索引收益。
+
+    语义保持：精确（0.9）> 前缀（0.8）> 包含（0.7），同一条目不重复，
+    前缀已凑满 limit 时不再跑包含级（那是最贵的一级）。
     """
     q = (query or "").strip()
     if not q:
@@ -1181,24 +1209,78 @@ def search_dictionary(query: str, limit: int = 50) -> list[SearchResult]:
     conn = dbconn.get_conn()
     out: list[SearchResult] = []
     seen: set[int] = set()
-    for stage, (sql, params) in enumerate((
-        ("SELECT id,word,definition FROM dictionary WHERE word=? LIMIT ?",
-         (q, limit)),
-        ("SELECT id,word,definition FROM dictionary WHERE word LIKE ? "
-         "AND word<>? ORDER BY LENGTH(word) LIMIT ?", (q + "%", q, limit)),
-        ("SELECT id,word,definition FROM dictionary WHERE word LIKE ? "
-         "AND word<>? ORDER BY LENGTH(word) LIMIT ?", ("%" + q + "%", q, limit)),
-    )):
-        rank = (0.9, 0.8, 0.7)[stage]  # 精确 > 前缀 > 包含
-        for row in conn.execute(sql, params):
+
+    def _push(rows, rank: float) -> bool:
+        """收行；返回是否已凑满 limit。"""
+        for row in rows:
             rid = int(row["id"])
             if rid in seen:
                 continue
             seen.add(rid)
-            snip = (row["definition"] or "")[:120]
-            out.append(SearchResult("dictionary", rid, row["word"], snip, rank))
+            out.append(SearchResult("dictionary", rid, row["word"],
+                                    (row["definition"] or "")[:120], rank))
             if len(out) >= limit:
-                return out
+                return True
+        return False
+
+    _COLS = "SELECT id,word,definition FROM dictionary"
+
+    # ① 精确（唯一命中：无需排序）
+    if _push(conn.execute(f"{_COLS} WHERE word=? LIMIT ?", (q, limit)), 0.9):
+        return out
+
+    # ② 前缀：范围查询吃上 (word) 索引；BINARY 规则下等价 LIKE 'q%'
+    #
+    # 关于 ORDER BY LENGTH：短词更可能是用户要找的词，但它会让 SQLite 建临时
+    # B 树把**全部**前缀命中排一遍。短前缀（如"安全"）能命中数千条，排序成本
+    # 反超索引收益（实测 12.3 万词条：纯范围 0.09 ms，加 ORDER BY 后 0.87 ms，
+    # 而老实现全扫+排序 16~21 ms）。于是分两档：
+    #   · 命中数 ≤ _DICT_SORT_SCAN_CAP → 精确按词长排序（结果质量优先）
+    #   · 命中数过多 → 先按索引顺序取 limit 条（速度优先），再补一次
+    #     "只看很短词"的定向扫描，避免 "安全生产" 这类短词被批量相似词条挤掉。
+    upper = q + "\uffff"
+    probe = int(conn.execute(
+        "SELECT count(*) FROM (SELECT 1 FROM dictionary WHERE word>=? AND word<?"
+        " AND word<>? LIMIT ?)",
+        (q, upper, q, _DICT_SORT_SCAN_CAP + 1)).fetchone()[0])
+    if probe <= _DICT_SORT_SCAN_CAP:
+        rows = conn.execute(
+            f"{_COLS} WHERE word>=? AND word<? AND word<>?"
+            " ORDER BY LENGTH(word) LIMIT ?", (q, upper, q, limit)).fetchall()
+        if _push(rows, 0.8):
+            return out
+    else:
+        # 命中过多：索引顺序取一批
+        if _push(conn.execute(
+                f"{_COLS} WHERE word>=? AND word<? AND word<>? LIMIT ?",
+                (q, upper, q, limit)).fetchall(), 0.8):
+            return out
+        # 再定向补"短词"（长度不超过查询词+2），让真正的短词排到前面
+        short_rows = conn.execute(
+            f"{_COLS} WHERE word>=? AND word<? AND word<>? AND LENGTH(word)<=?"
+            " ORDER BY LENGTH(word) LIMIT ?",
+            (q, upper, q, len(q) + 2, limit)).fetchall()
+        _push(short_rows, 0.8)
+
+    # ③ 包含：只在必要时才跑。
+    #
+    # 用 instr() 而非 LIKE '%q%'：子串语义相同，但不做模式匹配。
+    # 先做**有界探测**取得命中规模，探测结论为 0 时不再扫第二遍；
+    # 命中过多时放弃"按词长全量排序"（排序成本会随时间超索引收益）。
+    #
+    # 曾尝试过的错误优化（勿再犯）：用"查询里每个字都能在某词条的**首字**
+    # 找到"来前置否决包含级。那是错的前提 —— (word) 索引只能证明某字出现在
+    # 别的词条的词首，证明不了它出现在目标词条的词中。反例：词典里只有
+    # "安全生产"，查询 "生产" 时 '生'、'产' 都不是任何词条的首字，前置否决会把
+    # 合法命中全部误杀。已由 test_result_correctness_kept 守住。
+    cprobe = int(conn.execute(
+        "SELECT count(*) FROM (SELECT 1 FROM dictionary WHERE instr(word,?)>0"
+        " AND word<>? LIMIT ?)", (q, q, _DICT_SORT_SCAN_CAP + 1)).fetchone()[0])
+    if cprobe:
+        order = " ORDER BY LENGTH(word)" if cprobe <= _DICT_SORT_SCAN_CAP else ""
+        _push(conn.execute(
+            f"{_COLS} WHERE instr(word,?)>0 AND word<>?{order} LIMIT ?",
+            (q, q, limit)).fetchall(), 0.7)
     return out
 
 

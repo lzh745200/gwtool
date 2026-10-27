@@ -118,6 +118,27 @@ def bench_one(n_docs: int, para_index_max: int = 0) -> dict:
         para_second_t, para_second = _timed(dao.rebuild_paragraphs)
         dao.search_paragraphs_fts("预热", 5)
         para_search_t, para_hits = _timed(dao.search_paragraphs_fts, "安全生产", 30)
+
+        # v1.19 写作参考链路：词典 / 三源参考检索 / 校对。
+        #
+        # 为什么必须并入本脚本而不是另写一个：这三项与段落检索同属"参考库加载
+        # 速度"的用户体感，必须与规模一起看趋势。v1.19 实测发现
+        # `search_dictionary` 的前缀/包含两级都是 12.3 万行的全表扫描
+        # （EXPLAIN: SCAN … COVERING INDEX），把默认参考检索拖到 ≈85 ms；
+        # 改为范围查询 + 有界包含探测后降到 ≈10 ms。没有这里的基线，
+        # 这类退化不会被任何测试发现。
+        from gwtool.core import corrector, reference
+        dao.search_dictionary("预热", 5)
+        dict_t, dict_hits = _timed(dao.search_dictionary, "安全", 50)
+        # 长查询（词典里通常无前缀命中）会一路跌到包含级 —— 这是最常见的真实输入
+        dict_long_t, dict_long_hits = _timed(
+            dao.search_dictionary, "安全生产检查", 50)
+        ref_t, ref_items = _timed(reference.lookup, "安全生产检查")
+        corrector.invalidate_cache()
+        corrector.check_text("预热")
+        corr_t, corr_hits = _timed(
+            corrector.check_text,
+            "工作布署务必落实，截止目前再接再励，请及时反应问题。")
         _flush(conn)
         db_mb = _db_mb(tmp / "bench.db")
         pages_after = _dbstat_mb(conn)
@@ -159,6 +180,14 @@ def bench_one(n_docs: int, para_index_max: int = 0) -> dict:
             "para_reason": para_counts.get("reason", ""),
             "para_search_ms": para_search_t * 1000,
             "para_hits": len(para_hits),
+            "dict_ms": dict_t * 1000,
+            "dict_hits": len(dict_hits),
+            "dict_long_ms": dict_long_t * 1000,
+            "dict_long_hits": len(dict_long_hits),
+            "ref_ms": ref_t * 1000,
+            "ref_items": len(ref_items),
+            "corr_ms": corr_t * 1000,
+            "corr_hits": len(corr_hits),
         }
     finally:
         dbconn.close_current_thread()
