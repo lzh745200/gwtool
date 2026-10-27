@@ -31,3 +31,25 @@ python -m venv .venv
 ruff check gwtool/ scripts/ tests/ main.py
 .venv/bin/python scripts/e2e_check.py    # 55 项端到端自检
 ```
+
+## 性能基线（v1.19 起）
+
+写作参考库 / 校对 / 检索的耗时由两处守门，防止退化回全表扫描：
+
+```bash
+.venv/bin/python -m pytest tests/test_perf_reference_v119.py -q   # 性能契约
+.venv/bin/python scripts/bench_scale.py --sizes 200               # 规模基线
+```
+
+| 路径 | 基线（真实 12.3 万词典） |
+|---|---:|
+| 写作参考库检索 `reference.lookup()` | **9 ms** |
+| 词典检索（短词 / 长词） | 24.5 / 8.3 ms |
+| 段落检索 | < 1 ms（DB） |
+| 校对（万字，600 处命中） | 64 ms |
+| 汇编生成 DOCX（200 篇） | 41 ms |
+
+> 关键教训：`word` 列的索引是 BINARY 规则，SQLite **不会**把
+> `LIKE '前缀%'` 转成索引范围（只有 `COLLATE NOCASE` 才行，而它对中文无效）。
+> 前缀检索必须写成 `word >= q AND word < q+\uffff` 才走索引。
+> 详见 [doc/v1.19.0修复记录.md](doc/v1.19.0修复记录.md) 第七节。

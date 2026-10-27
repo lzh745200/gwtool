@@ -85,6 +85,29 @@ def _para_mb(pages: dict[str, float]) -> float:
     return sum(mb for name, mb in pages.items() if name in _PARA_TABLES)
 
 
+def _seed_dictionary(conn) -> int:
+    """把随包 seed.db 的词典灌进临时库，返回词条数（不灌纠错对）。
+
+    只灌 dictionary：写作参考检索的耗时几乎全在词典源，纠错对只影响
+    `corrector.check_text()`，而那一步在空词库下也已经能反映热路径开销。
+    这样压测库体积与构建时间都可控，同时词典规模与真实交付一致。
+    """
+    from gwtool.paths import bundled_db_seed_path
+
+    seed = bundled_db_seed_path()
+    if not seed.exists():
+        print("  [警告] 未找到随包 seed.db，词典检索基线将失真（空表）")
+        return 0
+    cur = conn.cursor()
+    cur.execute("ATTACH DATABASE ? AS seed", (str(seed),))
+    cur.execute("INSERT OR IGNORE INTO dictionary(word,pinyin,definition,"
+                "example,source) SELECT word,pinyin,definition,example,source"
+                " FROM seed.dictionary")
+    conn.commit()
+    cur.execute("DETACH DATABASE seed")
+    return int(conn.execute("SELECT count(*) FROM dictionary").fetchone()[0])
+
+
 def bench_one(n_docs: int, para_index_max: int = 0) -> dict:
     """在独立临时库里造 n_docs 篇文档，测各环节耗时与存储占用。"""
     tmp = Path(tempfile.mkdtemp(prefix="gwtool_bench_"))
@@ -92,6 +115,10 @@ def bench_one(n_docs: int, para_index_max: int = 0) -> dict:
         paths.set_app_data_dir(tmp)
         dbconn.configure(tmp / "bench.db")
         init_schema(dbconn.get_conn())
+        # 词典必须灌成**真实规模**：写作参考检索的耗时几乎全在词典源上
+        # （12.3 万词条的前缀/包含两级）。不灌的话测出来是 0.1 ms 的空表假数据，
+        # 会把 v1.19 优化前后的差别完全掩盖掉。
+        _seed_dictionary(dbconn.get_conn())
         if para_index_max:
             dao.set_setting(dao.PARA_INDEX_MAX_DOCS_KEY, str(int(para_index_max)))
 
@@ -302,6 +329,33 @@ def main(argv: list) -> int:
     for r in skipped:
         print(f"→ {r['docs']} 篇：段落索引已跳过（{r['para_reason']}），"
               f"增量 {r['growth_pct']:.1f}%，检索走现场派生。")
+
+    # v1.19 写作参考链路：词典 / 三源参考检索 / 校对
+    print("\n写作参考链路（v1.19）基线　单位 ms，越小越好")
+    print("-" * 78)
+    print(f"{'文档数':>7} {'词典(ms)':>10} {'长词(ms)':>10} "
+          f"{'参考检索(ms)':>13} {'参考条数':>9} {'校对(ms)':>10} {'命中':>6}")
+    print("-" * 78)
+    for r in results:
+        print(f"{r['docs']:>7} {r['dict_ms']:>10.1f} {r['dict_long_ms']:>10.1f} "
+              f"{r['ref_ms']:>13.1f} {r['ref_items']:>9} "
+              f"{r['corr_ms']:>10.1f} {r['corr_hits']:>6}")
+    print("-" * 78)
+    print("口径：词典 = search_dictionary('安全',50)，含前缀级 + 包含级；")
+    print("      长词 = search_dictionary('安全生产检查',50)，真实默认输入；")
+    print("      参考检索 = reference.lookup()，三源合并（用户按回车后的等待）；")
+    print("      校对 = corrector.check_text()，约 30 字含 5 处真实错别字。")
+    worst_ref = max(results, key=lambda r: r["ref_ms"])
+    print(f"\n最长参考检索：{worst_ref['ref_ms']:.1f} ms"
+          f"（{worst_ref['docs']} 篇）")
+    if worst_ref["ref_ms"] < 40:
+        print("→ 参考检索低于 40 ms，属【即时】体感范围（人眼可感知阈值约 100 ms）；"
+              "若此值回升到 60 ms 以上，先查 search_dictionary 是否退回全表 LIKE。")
+    elif worst_ref["ref_ms"] < 100:
+        print("→ 参考检索已可感知（40~100 ms）。检查词典源是否走了范围查询。")
+    else:
+        print("→ 参考检索明显偏慢（>100 ms）。排查 search_dictionary 的"
+              "前缀/包含两级是否退化为全表扫描（EXPLAIN 看 SCAN vs SEARCH）。")
     return 0
 
 
