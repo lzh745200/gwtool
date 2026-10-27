@@ -270,7 +270,7 @@ XML 转义、条目去重、信号时序、global 声明」这类单点疏漏，
 # OpenCodeReview — GROUP 3 审查报告
 
 规则集：Favor precision over recall，仅报高置信度真实缺陷。
-审查范围：`== GROUP 3 ==` 全部 31 个文件（相对 C:/gwtool）。
+审查范围：`== GROUP 3 ==` 全部 31 个文件（相对 <仓库根>）。
 
 ## gwtool/ui/main_window.py
 - 未发现

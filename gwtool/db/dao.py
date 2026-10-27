@@ -814,16 +814,6 @@ def user_dictionary_words() -> list[str]:
     return [r["word"] for r in rows if r["word"]]
 
 
-def list_wordlist_sources() -> list:
-    """用户导入词表的登记清单（供 UI 与预检）。"""
-    try:
-        rows = dbconn.get_conn().execute(
-            "SELECT * FROM wordlist_sources ORDER BY id").fetchall()
-    except Exception:
-        return []
-    return [dict(r) for r in rows]
-
-
 def upsert_wordlist_source(source: str, role: str = "pairs", label: str = "",
                            fmt: str = "", entry_count: int = 0) -> None:
     """登记/更新一个用户导入来源（同 source 覆盖，不产生重复登记）。"""
@@ -840,17 +830,6 @@ def upsert_wordlist_source(source: str, role: str = "pairs", label: str = "",
     conn.commit()
 
 
-def set_wordlist_source_enabled(source: str, enabled: bool) -> int:
-    """按来源整体启停：同步改登记表 + 该来源的纠错对 enabled。返回受影响对数。"""
-    conn = dbconn.get_conn()
-    conn.execute("UPDATE wordlist_sources SET enabled=? WHERE source=?",
-                 (1 if enabled else 0, source))
-    cur = conn.execute("UPDATE error_pairs SET enabled=? WHERE source=?",
-                       (1 if enabled else 0, source))
-    conn.commit()
-    return int(cur.rowcount or 0)
-
-
 def delete_wordlist_source(source: str) -> dict:
     """整体移除一个用户导入来源：同时清掉它的词条、纠错对与登记。"""
     conn = dbconn.get_conn()
@@ -861,13 +840,6 @@ def delete_wordlist_source(source: str) -> dict:
     conn.execute("DELETE FROM wordlist_sources WHERE source=?", (source,))
     conn.commit()
     return {"words": int(n_words), "pairs": int(n_pairs)}
-
-
-def count_dictionary_by_source(source: str) -> int:
-    row = dbconn.get_conn().execute(
-        "SELECT count(*) AS n FROM dictionary WHERE COALESCE(source,'')=?",
-        (source,)).fetchone()
-    return int(row["n"]) if row else 0
 
 
 # ---------------------------------------------------------------- error pairs

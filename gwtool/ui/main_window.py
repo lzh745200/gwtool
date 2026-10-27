@@ -1216,6 +1216,16 @@ class MainWindow(QMainWindow):
     def open_compile_wizard(self):
         dlg = CompileWizard(self)
         self._exec_dialog(dlg)
+        # v1.18 收口：向导生成 A4 PDF 后，把成品送进编辑器的「输出预览」页。
+        # 该页与 EditorPanel.show_pdf 早就存在，但一直没人调用（审计发现
+        # "输出预览" 永远空白）；这里补上唯一缺失的接线，不改生成链路。
+        pdf = str(getattr(dlg, "last_pdf", "") or "")
+        if pdf:
+            from pathlib import Path
+
+            if Path(pdf).is_file():
+                self.editor.show_pdf(pdf)
+                self.editor.tabs.setCurrentWidget(self.editor.pdf_area)
         self._update_status()
 
     def open_template_editor(self):
@@ -1608,22 +1618,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass      # 回填失败不该影响启动（索引是派生数据，可现场派生）
 
-    def _wait_for_background_threads(self) -> list[str]:
-        """退出前等所有后台 QThread 收工；返回仍在跑的线程名（超时未退）。
-
-        实现放在模块级 ``_wait_all_threads(win)``：退出路径的关键逻辑不该是
-        实例方法——测试里用轻量替身驱动 closeEvent 时会因为替身没有这个方法
-        而直接 AttributeError，把"退出备份"这类关键行为挡在测试之外。
-
-        为什么必须等：本程序的后台 worker 大多以 self（或子控件）为 parent，
-        窗口关闭 → 解释器销毁 MainWindow → 子对象级联销毁 → 仍在运行的
-        QThread 被析构，Qt 直接 qFatal 强杀进程。实测退出码
-        -1073740791 (0xC0000409)，stderr 只有一句
-        "QThread: Destroyed while thread is still running"。
-        触发场景很日常：F7 纠错、相似查重、PDF 预览渲染还没跑完就关窗口。
-        老实现只对 TTS 一个 worker 做了 stop+wait。
-        """
-        return _wait_all_threads(self)
 
     def closeEvent(self, event):
         # 未保存修改三选：保存 / 放弃 / 取消退出

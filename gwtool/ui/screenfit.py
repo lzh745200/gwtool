@@ -57,17 +57,6 @@ def _target_screen(widget):
     return screen
 
 
-def available_rect(widget, margin: int = DEFAULT_MARGIN):
-    """控件所在屏幕的可用区域（已扣 margin）；无屏幕时返回 None。"""
-    screen = _target_screen(widget)
-    if screen is None:
-        return None
-    avail = screen.availableGeometry()
-    if margin <= 0:
-        return avail
-    return avail.adjusted(margin, margin, -margin, -margin)
-
-
 def fit_dialog_to_screen(dlg, margin: int = DEFAULT_MARGIN) -> "QSize | None":
     """把对话框夹进屏幕可用区域，返回夹取后的尺寸（失败返回 None）。
 
@@ -159,15 +148,4 @@ def install_dialog_autofit(app) -> bool:
         _FILTER = None
         return False
 
-
-def uninstall_dialog_autofit(app) -> None:
-    """卸下过滤器（测试/退出用；幂等）。"""
-    global _FILTER
-    if app is None or _FILTER is None:
-        return
-    try:
-        app.removeEventFilter(_FILTER)
-    except Exception:
-        pass
-    _FILTER = None
 

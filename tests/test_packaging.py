@@ -176,7 +176,8 @@ def test_no_hardcoded_build_machine_paths():
         except (UnicodeDecodeError, OSError):
             continue
         for n, line in enumerate(content.splitlines(), 1):
-            if re.search(r"[Cc]:\\+gwtool\b", line):
+            # 同时匹配反斜杠与正斜杠（PPT 生成脚本曾写 C:/gwtool，旧正则会漏检）
+            if re.search(r"[Cc]:[\\/]+gwtool\b", line):
                 hits.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()[:90]}")
     assert not hits, "发现硬编码构建机路径：\n" + "\n".join(hits)
 

@@ -414,8 +414,8 @@ class _BulkReplaceWorker(QThread):
                     # 空串表示一切正常，非空会被对话框列出来。
                     snap_note = ("正文已替换，但改动前的回滚快照未保存："
                                  "这篇无法用「历史版本」退回改前状态")
-                from ..core.importer import _text_to_tree
-                blocks = _text_to_tree(new_text).to_json()
+                from ..core.importer import text_to_tree
+                blocks = text_to_tree(new_text).to_json()
                 dao.update_document_content(did, d.title, new_text, blocks_json=blocks)
                 results.append((d.title, snap_note, n))
         self.done.emit(results)
@@ -1553,15 +1553,20 @@ class SecurityDialog(QDialog):
             warn(self, f"导入失败：{exc}")
             return
         mod.reset()
+        save_failed = False
         try:
             mod.set_setting(True)      # 导入成功即默认开启，用户可随时关
         except Exception as exc:
             # 不打断导入流程（包已就位），但"自动开启"没存下来要说出口：
             # 否则用户下次启动发现开关又关了，会以为导入没生效。
             log.warning("增强包导入后未能自动开启（%s）：%s", kind, exc)
+            save_failed = True
         self._refresh_pack_group(kind)
-        info(self, f"已导入{label}增强包：\n{pack.summary()}\n\n"
-                   + self._pack_post_import_hint(mod))
+        hint = self._pack_post_import_hint(mod)
+        if save_failed:
+            hint += ("\n\n注意：包已就位，但“自动开启”未能保存。"
+                     "请在上方手动勾选启用，否则重启后可能仍是关闭状态。")
+        info(self, f"已导入{label}增强包：\n{pack.summary()}\n\n" + hint)
 
     @staticmethod
     def _pack_post_import_hint(mod) -> str:
@@ -1599,13 +1604,18 @@ class SecurityDialog(QDialog):
             return
         removed = enhance_pack.remove_pack(kind)
         mod.reset()
+        close_failed = False
         try:
             mod.set_setting(False)
         except Exception as exc:
             log.warning("增强包卸载后未能关闭开关（%s）：%s", kind, exc)
+            close_failed = True
         self._refresh_pack_group(kind)
-        info(self, f"已卸载{label}增强包。" if removed
-             else f"当前没有已安装的{label}增强包。")
+        msg = (f"已卸载{label}增强包。" if removed
+               else f"当前没有已安装的{label}增强包。")
+        if close_failed:
+            msg += "\n\n注意：包已移除，但“自动关闭”未能保存，请在上方手动取消勾选。"
+        info(self, msg)
 
     def _rebuild_fts(self):
         """重建全文索引（后台线程 + 阶段进度）。

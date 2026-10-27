@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """v1.14.0 C4：E3 归因工具（scripts/e3_triage.py）+ 引号内数字用法守卫。
 
 两类改动：
@@ -256,12 +256,19 @@ class TestGeneratedLayerAdvisory:
         assert report.ADVISORY_CATEGORIES == corrector.ADVISORY_CATEGORIES
         assert "错别字(生成)" in report.ADVISORY_CATEGORIES
 
-    @pytest.mark.skip(reason="能力回归提醒（非缺陷）：若要让生成层重新自动替换，"
-                             "删掉 corrector.ADVISORY_CATEGORIES 里的 "
-                             "'错别字(生成)' 一行（或调用 correct_block("
-                             "apply_low_confidence=True)）；届时本用例的期望需反过来")
     def test_restore_path_documented(self):
-        assert "错别字(生成)" not in corrector.ADVISORY_CATEGORIES
+        """生成层恢复入口的活契约：默认提示级，apply_low_confidence=True 可显式恢复。
+
+        旧版本这里是一个无条件 skip 且断言**与当前契约相反**（长期 skip 等于
+        没测）。v1.18 收口改为真跑：默认不得自动改，显式开关必须放开，
+        这样一旦有人删掉 ADVISORY 那行，本用例会立刻红。
+        """
+        assert "错别字(生成)" in corrector.ADVISORY_CATEGORIES
+        default_fixed, _ = corrector.correct_block("不怨天、不尤人。")
+        assert "尤人" in default_fixed, "默认不得自动改生成层"
+        low_fixed, _ = corrector.correct_block("不怨天、不尤人。",
+                                               apply_low_confidence=True)
+        assert "有人" in low_fixed and "尤人" not in low_fixed
 
 
 # ============================================================ ④ 220 篇新类守卫

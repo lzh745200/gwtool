@@ -82,7 +82,7 @@ def main() -> int:
         print(f"未找到 .txt 素材: {root}")
         return 2
 
-    ok = skipped_no_title = dup = imported = 0
+    skipped_no_title = dup = imported = 0
     fail: list[str] = []
     per_cat: dict[str, int] = {}
 
@@ -121,7 +121,6 @@ def main() -> int:
         else:
             imported += 1
             per_cat[cat_name] = per_cat.get(cat_name, 0) + 1
-            ok += 1
 
     print("=" * 46)
     print(f"总计 {len(files)} 文件 | 入库 {imported} | 重复跳过 {dup} | "

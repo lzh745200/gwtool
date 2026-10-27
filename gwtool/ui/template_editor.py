@@ -112,7 +112,7 @@ class TemplateEditor(QDialog):
             self.h_bold.append(cbx)
             form.addRow(name, _pair(cb, sp))
             form.addRow("", cbx)
-        tip = QLabel("提示：TOC 目录抓取 1-3 级标题。")
+        tip = QLabel("提示：目录层级在「部件与页码」页选择，默认 2 级（材料标题 + 一、）。")
         form.addRow(tip)
         return w
 
@@ -141,6 +141,13 @@ class TemplateEditor(QDialog):
         # 目录
         self.chk_toc = QCheckBox("生成目录")
         form.addRow(self.chk_toc)
+        # v1.18：目录层级此前只能改模板 JSON，UI 提示又写"抓取 1-3 级"，
+        # 与实际默认 2 级不符；这里补控件并让提示跟随默认值。
+        self.cb_toc_level = QComboBox()
+        self.cb_toc_level.addItem("1 级（材料标题）", 1)
+        self.cb_toc_level.addItem("2 级（默认：材料标题 + 一、）", 2)
+        self.cb_toc_level.addItem("3 级（含（一）、1.）", 3)
+        form.addRow("目录层级：", self.cb_toc_level)
         # 版记
         self.chk_colophon = QCheckBox("启用版记")
         form.addRow(self.chk_colophon)
@@ -213,6 +220,8 @@ class TemplateEditor(QDialog):
         self.ed_pageno_fmt.setText(t.page_number_format)
         self.sp_pageno_size.setValue(t.page_number_size_pt)
         self.chk_toc.setChecked(t.toc_enabled)
+        idx = self.cb_toc_level.findData(int(getattr(t, "toc_max_level", 2)))
+        self.cb_toc_level.setCurrentIndex(idx if idx >= 0 else 1)
         self.chk_colophon.setChecked(t.colophon.enabled)
         self.ed_colophon.setPlainText("\n".join(t.colophon.lines))
         self.chk_wm.setChecked(bool(t.watermark_text))
@@ -249,6 +258,7 @@ class TemplateEditor(QDialog):
         t.page_number_format = self.ed_pageno_fmt.text() or "— {page} —"
         t.page_number_size_pt = self.sp_pageno_size.value()
         t.toc_enabled = self.chk_toc.isChecked()
+        t.toc_max_level = int(self.cb_toc_level.currentData() or 2)
         t.colophon.enabled = self.chk_colophon.isChecked()
         t.colophon.lines = [ln for ln in self.ed_colophon.toPlainText().splitlines() if ln.strip()]
         t.watermark_text = self.ed_wm.text().strip() if self.chk_wm.isChecked() else ""

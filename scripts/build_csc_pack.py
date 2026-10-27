@@ -24,7 +24,7 @@
 
 怎么跑（在一台有网的机器上执行一次即可，产物纯离线）
 ------------------------------------------------------
-    PYTHONPATH=C:/gwtool/.convlib python scripts/build_csc_pack.py
+    PYTHONPATH=<仓库根>/.convlib python scripts/build_csc_pack.py
 
 依赖（仅转换期需要）：torch / transformers / onnx / onnxruntime，
 全部装在 `.convlib`（`pip install --target .convlib torch transformers onnx onnxruntime tokenizers numpy`）。

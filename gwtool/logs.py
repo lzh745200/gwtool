@@ -203,14 +203,6 @@ def get_logger(name: str = "") -> logging.Logger:
         return logging.getLogger(_LOG_NAME)
 
 
-def _format_exc(exc_type, exc, tb) -> str:
-    try:
-        return "".join(traceback.format_exception(exc_type, exc, tb))
-    except Exception:
-        try:
-            return repr(exc)
-        except Exception:
-            return "<异常信息不可读>"
 
 
 def _crash_summary(exc_type, exc, tb) -> str:

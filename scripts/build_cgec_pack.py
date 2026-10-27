@@ -23,7 +23,7 @@
 
 怎么跑（有网机器一次即可，产物纯离线）
 ----------------------------------------
-    PYTHONPATH=C:/gwtool/.convlib python scripts/build_cgec_pack.py
+    PYTHONPATH=<仓库根>/.convlib python scripts/build_cgec_pack.py
 
 依赖（仅转换期）：torch / transformers / onnx / onnxruntime（在 .convlib）。
 应用运行时只要 onnxruntime + tokenizers，**不依赖 torch**。

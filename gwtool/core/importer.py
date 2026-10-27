@@ -197,6 +197,16 @@ def _text_to_tree(text: str, title_hint: str = "") -> DocTree:
     return tree
 
 
+def text_to_tree(text: str, title_hint: str = "") -> DocTree:
+    """公开入口：纯文本 → DocTree（UI 层不应 import 私有 ``_text_to_tree``）。
+
+    v1.18 收口：跨层调用私有 API 会在重构时直接断（审计发现
+    feature_dialogs 从 core.importer 导入 ``_text_to_tree``）。这里只做
+    稳定别名，不改变解析行为，其余调用方零改动。
+    """
+    return _text_to_tree(text, title_hint)
+
+
 def batch_import(paths: list[str], progress_cb=None) -> list[ImportResult]:
     """仅批量**解析**（不入库！），返回逐文件 ImportResult。
 

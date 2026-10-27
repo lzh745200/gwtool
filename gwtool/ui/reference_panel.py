@@ -292,10 +292,15 @@ class ReferencePanel(QWidget):
         `_apply_one` / `_ignore_one`（它们带着"正文已改动则重算"的守卫）。
         """
         from . import theme
-        sure = c.confidence >= 0.8
-        sev = "error" if sure else "warn"
+        # v1.18 收口：与 corrector 的 severity 单一事实源对齐，不再按 confidence
+        # 二分（否则同一条 advisory 命中在这里显示"确认错误"，在纠错对话框
+        # 却显示"提示"，两个界面口径互相矛盾）。
+        severity = getattr(c, "severity", "error")
+        sev = {"error": "error", "warning": "warn",
+               "suggest": "info"}.get(severity, "error")
         color = theme.severity_color(sev)
-        bg = theme.DANGER_BG if sure else theme.WARN_BG
+        bg = {"error": theme.DANGER_BG, "warning": theme.WARN_BG,
+              "info": theme.INFO_BG}.get(sev, theme.DANGER_BG)
         holder = QWidget()
         holder.setStyleSheet(f"background:{bg};")
         row = QHBoxLayout(holder)
@@ -360,7 +365,9 @@ class ReferencePanel(QWidget):
             ctx_a = max(0, c.start - 10)
             ctx = ("…" if ctx_a > 0 else "") + \
                 text[ctx_a:c.end + 12].replace("\n", " ")
-            tier = "确认错误" if c.confidence >= 0.8 else "疑似错误"
+            severity = getattr(c, "severity", "error")
+            tier = {"error": "错误（可自动改）", "warning": "待确认",
+                    "suggest": "提示（请人工判断）"}.get(severity, "错误（可自动改）")
             item = QListWidgetItem(f"[{c.category}] {c.wrong} → {c.suggestion}\n"
                                    f"    上下文：{ctx}…  ({c.confidence:.2f}，{tier})")
             # severity_color() 返回的是 "#b00020" 这样的**字符串**，
@@ -368,8 +375,9 @@ class ReferencePanel(QWidget):
             # 少这层 QColor 包装会抛 TypeError，异常从 _on_check_done 冒出去，
             # 结果是"建议列表 0 条 + 计数停在检查中… + 波浪线也不画"——
             # F7 文字纠错整条功能静默失效（打包版 stderr 不可见，用户只看到没反应）。
-            item.setForeground(QColor(theme.severity_color(
-                "error" if c.confidence >= 0.8 else "warn")))
+            sev_key = {"error": "error", "warning": "warn",
+                       "suggest": "info"}.get(severity, "error")
+            item.setForeground(QColor(theme.severity_color(sev_key)))
             item.setData(Qt.UserRole, i)
             item.setToolTip(c.reason)
             self.corr_list.addItem(item)

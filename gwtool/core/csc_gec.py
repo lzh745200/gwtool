@@ -105,10 +105,6 @@ _QUOTE_PAIRS = (("“", "”"), ("‘", "’"), ("《", "》"), ("〈", "〉"),
 _DELETABLE = set("的了着呢吗吧啊呀嘛哦喔哈嗯把被给让向在对")
 
 
-class GecError(Exception):
-    """L5 层不可用（依赖缺失、模型损坏等）；对外一律降级为空结果。"""
-
-
 @dataclass
 class _Engine:
     session: object
