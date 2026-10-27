@@ -103,7 +103,10 @@ def test_parse_scanned_pdf_reports_failure(tmp_path):
     doc.save(str(p))
     doc.close()
     r = parse_any(str(p))
-    assert not r.ok and "未提取到文字" in r.error
+    # 环境差异：未装 Tesseract 时报"未提取到文字"；装了但缺 chi_sim 时报
+    # "缺少中文语言包"。两种都必须如实失败，测试只断言"给出可行动原因"。
+    assert not r.ok and ("未提取到文字" in r.error
+                         or "缺少中文语言包" in r.error)
 
 
 def _import_like_worker(files):

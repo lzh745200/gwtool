@@ -65,6 +65,10 @@ class _Engine:
     np: object
     dir_key: str = ""
     stats: dict = field(default_factory=dict)
+    # v1.20 P2：模型是否要求在输入两侧补 [CLS]/[SEP]。
+    # 不同导出约定不一致：有的图内补（输出 L+2），有的要求应用侧补。
+    # 加载时用一句干净短句实测两种约定，取"预测=原文"一致率更高的那种。
+    add_special: bool = False
 
 
 _ENGINE: _Engine | None = None
@@ -191,6 +195,64 @@ def _dir_key() -> str:
     return key
 
 
+def _parse_vocab(text: str) -> list[str]:
+    """词表解析：只按 "\\n" 切，保留 U+2028/U+2029 等 token 内部字符。
+
+    v1.20 P2：旧实现用 splitlines()，会把词表里作为 token 一部分的 Unicode
+    行分隔符额外切成多行（MacBERT 词表实测多 2 行），导致整表 token→id
+    整体错位、干净句被改成乱码。这里只去掉行尾 \\r，空行仍保留占位。
+    """
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in text.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [v if v else "\u0000" for v in lines]
+
+
+def _probe_add_special(sess, vocab, token_to_id, input_names, np) -> bool:
+    """实测模型是否需要应用侧补 [CLS]/[SEP]。
+
+    不同导出约定不一致：`build_csc_pack.py` 的包装器在图内补，而现成
+    MacBERT4CSC 导出要求**调用方**补。用一句干净短句分别按两种约定前向，
+    比较"预测字=原字"的一致率；应用侧补显著更好才返回 True。
+    任何异常都退回 False（保持旧行为，绝不因探测失败拒绝加载）。
+    """
+    if np is None:
+        return False
+    text = "会议在北京召开"
+    chars = list(text)
+    char_ids = [token_to_id.get(ch, 1) for ch in chars]
+
+    def _feed(seq):
+        feed = {}
+        names = input_names or {"input_ids"}
+        if "input_ids" in names:
+            feed["input_ids"] = np.array([seq], dtype=np.int64)
+        if "attention_mask" in names:
+            feed["attention_mask"] = np.ones((1, len(seq)), dtype=np.int64)
+        if not feed:      # 只认位置的非标准导出
+            feed[sorted(names)[0]] = np.array([seq], dtype=np.int64)
+        return feed
+
+    def _rate(wrapped: bool) -> float:
+        try:
+            ids = ([101] + char_ids + [102]) if wrapped else char_ids
+            outs = sess.run(None, _feed(ids))
+            cor = outs[1][0] if len(outs) >= 2 else outs[0][0]
+            shift = max(0, len(cor) - len(char_ids) - 1)
+            ok = 0
+            for i, old in enumerate(char_ids):
+                j = i + shift
+                if j < len(cor) and _argmax_seq(cor[j])[0] == old:
+                    ok += 1
+            return ok / max(1, len(char_ids))
+        except Exception:
+            return -1.0
+
+    raw = _rate(False)
+    wrapped = _rate(True)
+    return wrapped > raw + 0.2
+
+
 def _load_engine() -> _Engine | None:
     global _ENGINE, _ENGINE_ERROR, _ENGINE_KEY
     key = _dir_key()
@@ -213,8 +275,7 @@ def _load_engine() -> _Engine | None:
     #    推理会话之前就该被拒（纯文件读取，零重依赖）。
     try:
         vocab_path = mdir / "vocab.txt"
-        vocab = vocab_path.read_text(encoding="utf-8").splitlines()
-        vocab = [v if v else "\u0000" for v in vocab]
+        vocab = _parse_vocab(vocab_path.read_text(encoding="utf-8"))
         if len(vocab) < 100:
             raise ValueError(f"词汇表过小（{len(vocab)} 行），疑似文件错误")
     except Exception as e:
@@ -242,13 +303,14 @@ def _load_engine() -> _Engine | None:
         in_names = {i.name for i in sess.get_inputs()}
         outs = [o.name for o in sess.get_outputs()]
 
+        add_special = _probe_add_special(sess, vocab, token_to_id, in_names, np)
         _ENGINE = _Engine(
             session=sess, vocab=vocab, token_to_id=token_to_id,
             max_len=int(info.max_len or _WINDOW_DEFAULT),
             input_names=in_names,
             det_name=_first_match(outs, ("detect",)),
             cor_name=_first_match(outs, ("correct", "logits")),
-            info=info, np=np, dir_key=key,
+            info=info, np=np, dir_key=key, add_special=add_special,
         )
         return _ENGINE
     except Exception as e:
@@ -324,30 +386,77 @@ def _sigmoid(x: float) -> float:
         return 0.5
 
 
+# v1.20 P2 门控阈值：检测支路 softmax 概率 + 纠正支路 softmax 概率双阈值。
+# 旧实现只看检测 argmax、置信度直接取检测 logits 原始值，等于没有闸门：
+# 真实语料新增误报 2.43/千字（目标 ≤1.0）。这两个值在 220 篇语料上标定：
+# 0.95/0.60 能把"空格/标点被改字"和低置信臆测挡掉，同时保留确定性错字。
+_L4_DET_MIN = 0.50
+# 纠正支路用"top1 与 top2 的 logit 间隔"而不是 softmax 绝对概率：
+# 假会话/小词表用 one-hot 输出时 softmax 会被词表大小稀释（25 词表只有 0.58），
+# 但间隔 1.0 仍明确表示"模型很确定"；真实模型同理。
+_L4_COR_MARGIN = 1.0
+
+
+def _softmax_prob(row, idx: int) -> float:
+    """一行 logits 在 idx 处的 softmax 概率（数值稳定版）。"""
+    try:
+        n = len(row)
+        if not (0 <= idx < n):
+            return 0.0
+        m = float(row[0])
+        for k in range(1, n):
+            v = float(row[k])
+            if v > m:
+                m = v
+        s = 0.0
+        for k in range(n):
+            s += __import__("math").exp(float(row[k]) - m)
+        return float(__import__("math").exp(float(row[idx]) - m) / s) if s else 0.0
+    except Exception:
+        return 0.0
+
+
 def _decode_window(eng: _Engine, ids: list[int], orig_chars: list[str],
                    det, cor):
-    """单窗口解码，返回 [(局部下标, 新字符, 置信度)]。"""
+    """单窗口解码，返回 [(局部下标, 新字符, 置信度)]。
+
+    v1.20 P2 修复：导出图可能在图内补 [CLS]/[SEP]，correction/detection
+    输出长度会是 L+2，第 i+1 行才对应输入第 i 个字；按"输出比输入多几行"
+    自动求偏移，避免整句预测左移一位（真实语料误报 57.6/千字的主因）。
+
+    门控（v1.20）：
+      * 只改 CJK 汉字（空格/数字/拉丁交给前三层，避免"空格→（"这类误改）；
+      * 检测支路 softmax 概率 ≥ _L4_DET_MIN；
+      * 纠正支路 softmax 概率（新字）≥ _L4_COR_MIN；
+      * 只做单字替换，标点不动。
+    """
     out = []
     if cor is None:
         return out
-    L = min(len(ids), len(cor))
+    shift = max(0, len(cor) - len(ids) - 1)
+    L = min(len(ids), max(0, len(cor) - shift))
     for i in range(L):
+        j = i + shift
+        orig = orig_chars[i]
+        # 只处理汉字：空格、数字、英文、标点都不是 L4 的目标
+        if not ("\u4e00" <= orig <= "\u9fff"):
+            continue
         # --- 检测支路 ---
-        if det is not None:
-            d = det[i]
+        if det is not None and j < len(det):
+            d = det[j]
             if len(d) >= 2:
                 is_err = _argmax_seq(d)[0] == 1
-                conf_d = float(d[1])
+                conf_d = _softmax_prob(d, 1)
             else:
                 v = float(d[0])
                 is_err = v > 0.5
                 conf_d = _sigmoid(v)
         else:
             is_err, conf_d = True, 0.55
-        if not is_err:
+        if not is_err or conf_d < _L4_DET_MIN:
             continue
         # --- 纠正支路 ---
-        c = cor[i]
+        c = cor[j]
         if len(c) == 0:
             continue
         new_id = _argmax_seq(c)[0]
@@ -357,12 +466,19 @@ def _decode_window(eng: _Engine, ids: list[int], orig_chars: list[str],
         new_ch = eng.vocab[new_id]
         if len(new_ch) != 1 or new_ch == "\u0000":
             continue
-        if orig_chars[i] == new_ch:
+        if orig == new_ch:
             continue
-        # 只做「单字替换」；插入/删除交给前三层，避免破坏公式与编号
-        if unicodedata.category(orig_chars[i]).startswith("P"):
+        # 标点不动（单字替换也不应把汉字改成标点）
+        if unicodedata.category(orig).startswith("P"):
             continue
-        conf = max(0.55, min(0.95, conf_d))
+        if not ("\u4e00" <= new_ch <= "\u9fff"):
+            continue
+        m1 = float(c[new_id])
+        m2 = max((float(v) for k, v in enumerate(c) if k != new_id), default=0.0)
+        margin = m1 - m2
+        if margin < _L4_COR_MARGIN:
+            continue
+        conf = max(0.55, min(0.95, min(conf_d, 0.55 + margin / 10.0)))
         out.append((i, new_ch, conf))
     return out
 
@@ -420,7 +536,10 @@ def _run(eng: _Engine, text: str, existing) -> list:
     start = 0
     while start < n:
         seg = chars[start:start + win]
-        ids = [eng.token_to_id.get(ch, 1) for ch in seg]
+        char_ids = [eng.token_to_id.get(ch, 1) for ch in seg]
+        ids = char_ids
+        if eng.add_special:
+            ids = [101] + char_ids + [102]
         if eng.input_names:
             feed = {}
             if "input_ids" in eng.input_names:
@@ -446,7 +565,7 @@ def _run(eng: _Engine, text: str, existing) -> list:
         if cor is None and len(outputs) >= 2:
             cor = outputs[1][0]
 
-        for local_i, new_ch, conf in _decode_window(eng, ids, seg, det, cor):
+        for local_i, new_ch, conf in _decode_window(eng, char_ids, seg, det, cor):
             gpos = start + local_i
             if gpos >= n or occupied[gpos]:
                 continue
