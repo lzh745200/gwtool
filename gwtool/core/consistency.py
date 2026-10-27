@@ -683,6 +683,81 @@ def _check_punct(text: str) -> list[Inconsistency]:
 
 
 # ============================================================ 对外入口
+_SEQ_LINE = re.compile(r"(?m)^[ \t　]*([一二三四五六七八九十]+)、")
+_DATE_RANGE = re.compile(
+    r"(\d{4})年(\d{1,2})月(?:(\d{1,2})日)?"
+    r"\s*(?:至|到|—|－|~|～|-)\s*"
+    r"(?:(\d{4})年)?(\d{1,2})月(?:(\d{1,2})日)?")
+_CN_ORD: dict[str, int] = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7,
+    "八": 8, "九": 9, "十": 10,
+}
+
+
+def _cn_ordinal(token: str) -> int | None:
+    """一..十、十一..十九、二十、二十一… → int；超范围返回 None。"""
+    if not token or token[0] not in _CN_ORD:
+        return None
+    if token == "十":
+        return 10
+    if len(token) == 1:
+        return _CN_ORD[token]
+    if token[0] == "十" and len(token) == 2:
+        return 10 + _CN_ORD.get(token[1], 0)
+    if token[0] == "二" and token[1] == "十":
+        if len(token) == 2:
+            return 20
+        if len(token) == 3:
+            return 20 + _CN_ORD.get(token[2], 0)
+    return None
+
+
+def _check_sequence(text: str) -> list[Inconsistency]:
+    """一级标题序号连续性：一、二、四（跳过三）提示。
+
+    只在**行首**认「一、」级序号；遇到序号变小视为新一组（允许重新起编），
+    只报"跳号"（差值 >1），不报重复/重启——公文里分章重新编号是常态。
+    """
+    items = []
+    for m in _SEQ_LINE.finditer(text):
+        val = _cn_ordinal(m.group(1))
+        if val is None or val > 20:
+            continue
+        items.append((m.start(), val, m.group(1)))
+    if len(items) < 3:
+        return []
+    out = []
+    for (p0, v0, t0), (p1, v1, t1) in zip(items, items[1:]):
+        if v1 <= v0:          # 新的一组，允许重编
+            continue
+        if v1 - v0 > 1:
+            out.append(_make(
+                "序号", f"序号不连续：{t0}、之后直接出现{t1}、",
+                f"一级标题应在“{t0}、”与“{t1}、”之间补齐缺失序号",
+                f"{t0}、", f"{t1}、", [p0, p1]))
+    return out[:_MAX_PER_KIND]
+
+
+def _check_date_order(text: str) -> list[Inconsistency]:
+    """日期区间倒序：起止日期前后颠倒（如 2026年10月 至 2025年3月）。"""
+    out = []
+    for m in _DATE_RANGE.finditer(text):
+        y1, mo1 = int(m.group(1)), int(m.group(2))
+        d1 = int(m.group(3)) if m.group(3) else 1
+        y2 = int(m.group(4)) if m.group(4) else y1
+        mo2 = int(m.group(5))
+        d2 = int(m.group(6)) if m.group(6) else 1
+        if not (1 <= mo1 <= 12 and 1 <= d1 <= 31
+                and 1 <= mo2 <= 12 and 1 <= d2 <= 31):
+            continue
+        if (y1, mo1, d1) > (y2, mo2, d2):
+            out.append(_make(
+                "日期区间", "日期区间起止颠倒",
+                "起始日期晚于结束日期，请核对时间顺序",
+                m.group(0), f"{y2}年{mo2}月{d2}日", [m.start()]))
+    return out[:_MAX_PER_KIND]
+
+
 def check(text: str) -> list[Inconsistency]:
     """检查一段文本（通常是一整篇公文）里的文内写法不一致。
 
@@ -712,6 +787,15 @@ def check(text: str) -> list[Inconsistency]:
             pass
         try:
             findings.extend(_check_punct(text))
+        except Exception:
+            pass
+        # v1.19 P1：补齐两类"单看合法、横向才矛盾"的检查
+        try:
+            findings.extend(_check_sequence(text))
+        except Exception:
+            pass
+        try:
+            findings.extend(_check_date_order(text))
         except Exception:
             pass
         findings.sort(key=lambda f: (f.positions[0] if f.positions else 0, f.kind))

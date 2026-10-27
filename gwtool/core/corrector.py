@@ -14,6 +14,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 
 from . import grammar_rules
+from . import grammar_v2
 from .corrector_data import (CONTEXT_RULES, CURATED_PAIRS, NEGATIVE_CONTEXTS,
                              NUMBER_RULES, ORG_RENAME_PAIRS, PUNCT_RULES)
 from ..db import dao
@@ -29,6 +30,10 @@ _REASON_LEXICON = "词库匹配"
 # 不再各自维护一份清单（两份清单手工同步必然漂移，本项目已两次踩过）。
 ADVISORY_CATEGORIES: tuple[str, ...] = (
     "数字用法",      # 阿拉伯数字年份/百分数等规范提示
+    # v1.19 P1：语法 v2 的"成分残缺/结构杂糅"改法不唯一（删哪个介词、补什么主语
+    # 都要人判断），一律只提示；搭配/关联词/语序里改法唯一的才自动写回。
+    grammar_v2.CAT_MISSING,
+    grammar_v2.CAT_STRUCT,
     grammar_rules.CAT_ADVISORY,     # 表达提示（跨词冗余）
     grammar_rules.CAT_PUNCT_PAIR,   # 标点规范（成对符号/引号形式）
     # 机构沿革（v1.10.0 D1，真实语料驱动的修正）：机构新旧对照只能**提示**，
@@ -304,27 +309,45 @@ def _is_conjunction_enumeration_fp(text: str, c: Correction) -> bool:
     说明它是"只有一个/一种/一条"的列举，`就` 属于后一分句的判断词。
     正例 `只有努力工作，就能成功` 不含数量短语，照报。
     """
-    if c.category != grammar_rules.CAT_CONJUNCTION or c.wrong != "就":
+    if c.category != grammar_rules.CAT_CONJUNCTION:
         return False
-    # 往前看 40 字（可跨逗号）：FP 的"只有一个/一种"在**前一分句**，
-    # 正则自身的 `[^，。；！？\n]` 保证不会跨句误配。
-    return bool(_CONJ_ENUM_RX.search(text[max(0, c.start - 40):c.start]))
+    # 旧层命中 wrong 就是"就"；v2 的"只有…就"整段命中（wrong 含"只有"），
+    # 两种形态都要走列举判据。
+    if c.wrong != "就" and "只有" not in c.wrong:
+        return False
+    # 往 前看 40 字（可跨逗号）：FP 的"只有一个/一种"在**前一分句**；
+    # v2 的整段命中（wrong 含"只有"）则要在命中文本内部找。
+    window = text[max(0, c.start - 40):c.start]
+    if _CONJ_ENUM_RX.search(window):
+        return True
+    if c.wrong == "就":
+        # v2 允许"只有…（最多 40 字）…就"，会把"只有一天时间，我们就要完成"
+        # 这类**两个命题、不同主语**的句子也连起来。要求"就"紧跟在逗号/冒号
+        # 之后（"只有深入调研，就能…"），否则按跨句误报丢弃（宁少报）。
+        prev = window.rstrip()[-1:]
+        if prev and prev not in "，,：:":
+            return True
+    return bool(_CONJ_ENUM_RX.search(text[c.start:c.end]))
 
 
 def _check_grammar(text: str) -> list[Correction]:
-    """L2.5 语法与表达规则层：语义冗余 / 关联词搭配 / 搭配不当 / 成对标点。
+    """L2.5 语法与表达规则层：语义冗余 / 关联词 / 搭配 / 语序 / 成分残缺 / 杂糅。
 
     与 L2 的分工：L2 处理"同一个词的两种写法看语境"，本层处理**不在词表里**的
-    多字赘余、关联词错配、动宾搭配错位、成对符号落单 —— 这三类是词表法
-    结构上够不着的区间（对应《纠错系统差距分析》的"多字少字/词序/语法"）。
+    多字赘余、关联词错配、动宾搭配错位、句式杂糅、介词滥用导致的主语残缺 ——
+    这些是词表法结构上够不着的区间（对应《纠错系统差距分析》的"多字少字/词序/语法"）。
+
+    v1.19 P1：在旧 grammar_rules（最小集）之外接入 grammar_v2（120 条，分
+    搭配 38 / 冗余 32 / 关联词 16 / 语序 14 / 结构杂糅 11 / 成分残缺 9）；
+    其中"改法不唯一"的成分残缺与部分杂糅规则只提示（advisory=True）。
 
     异常一律咽掉：规则数据损坏、正则编译失败，都只丢本层，绝不拖垮主流程。
     关联词层另有 `_is_conjunction_enumeration_fp` 收口 `只有…就` 的列举误报。
     """
     try:
+        found = grammar_rules.all_hits(text) + grammar_v2.all_hits(text)
         hits = [Correction(s, e, w, sug, cat, reason, conf)
-                for s, e, w, sug, cat, reason, conf
-                in grammar_rules.all_hits(text)]
+                for s, e, w, sug, cat, reason, conf in found]
     except Exception:
         return []
     return [c for c in hits
