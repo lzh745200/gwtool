@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -186,84 +187,103 @@ def build(req: ExportRequest, progress_cb=None) -> dict:
     seen_paths: set[str] = set()   # O(1) 重名检查：3000 篇 327ms → 2ms（原为线性扫描，占总耗时 54%）
     total = 0
     _report(f"正在打包 {len(docs)} 篇文档…")
-    with zipfile.ZipFile(req.out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for d in docs:
-            name, blob, source = _document_payload(d)
-            # 同名文档（标题重复）在包内会互相覆盖：补上 id 保证唯一
-            if name in seen_paths:
-                p = Path(name)
-                name = f"{p.parent}/{p.stem}_{d.id}{p.suffix}"
-            seen_paths.add(name)
-            zf.writestr(name, blob)
-            total += len(blob)
-            entries.append({
-                "id": int(d.id),
-                "title": d.title or "",
-                "path": name,
-                "source": source,
-                "origin_file": Path(d.file_path).name if d.file_path else "",
-                "category": cats.get(d.category_id, "") or "未分类",
-                "tags": d.tags or "",
-                "import_time": d.import_time or "",
-                "bytes": len(blob),
-                "sha256": _sha256(blob),
-            })
+    # 先写 .part 再原子改名（与 core.backup 同一约定）：进程被杀、磁盘写满、
+    # 目标文件被 Word/杀软占用时，用户选定的交付路径上**不会**留下一个看着
+    # 完整、其实缺文件的移交包 —— 而移交是责任转移，缺件往往在对方打开时
+    # 才发现，那时原件可能已被清理。
+    out = Path(str(req.out_path))
+    tmp = out.with_name(out.name + ".part")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for d in docs:
+                name, blob, source = _document_payload(d)
+                # 同名文档（标题重复）在包内会互相覆盖：补上 id 保证唯一
+                if name in seen_paths:
+                    p = Path(name)
+                    name = f"{p.parent}/{p.stem}_{d.id}{p.suffix}"
+                seen_paths.add(name)
+                zf.writestr(name, blob)
+                total += len(blob)
+                entries.append({
+                    "id": int(d.id),
+                    "title": d.title or "",
+                    "path": name,
+                    "source": source,
+                    "origin_file": Path(d.file_path).name if d.file_path else "",
+                    "category": cats.get(d.category_id, "") or "未分类",
+                    "tags": d.tags or "",
+                    "import_time": d.import_time or "",
+                    "bytes": len(blob),
+                    "sha256": _sha256(blob),
+                })
 
-        att_rows = []
-        if included:
-            _report(f"正在复制 {len(included)} 个附件…")
-        seen_arc: set[str] = set()
-        for item in included:
-            path = attachments_dir() / Path(
-                item["stored"] or item["name"]).name
+            att_rows = []
+            if included:
+                _report(f"正在复制 {len(included)} 个附件…")
+            seen_arc: set[str] = set()
+            # 目录只取一次：`attachments_dir()` 会走可写探针（实时防护下数十毫秒），
+            # 放在循环里等于按附件数重复付账
+            att_base = attachments_dir()
+            for item in included:
+                path = att_base / Path(
+                    item["stored"] or item["name"]).name
+                try:
+                    blob = path.read_bytes()
+                except OSError:
+                    item["reason"] = "读取失败"
+                    excluded.append(item)
+                    continue
+                arc, renamed = _unique_attachment_path(seen_arc, item["name"])
+                seen_arc.add(arc)
+                zf.writestr(arc, blob)
+                # 原名单独留在 manifest 里：包内路径可能带 _2 序号，而用户认得的是
+                # 原文件名（回读/核对清单时要能对上）。
+                item["origin_name"] = item["name"]
+                item["path"] = arc
+                if renamed:
+                    item["renamed"] = renamed
+                item["sha256"] = _sha256(blob)
+                total += len(blob)
+                att_rows.append(item)
+
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            manifest = {
+                "created": stamp,
+                "version": "1.0.0",
+                "note": req.note,
+                "kind": "handover",          # 与整库备份区分（backup 无此字段）
+                "scope": {
+                    "category_id": req.category_id,
+                    "tag": req.tag,
+                    "date_from": req.date_from,
+                    "date_to": req.date_to,
+                },
+                "documents": entries,
+                # 与 backup._manifest_json 的 attachments 段**同构**，
+                # 便于将来复用备份的校验/恢复逻辑
+                "attachments": {
+                    "mode": "handover" if req.include_attachments else "excluded",
+                    "limit_mb": req.limit_mb,
+                    "limit_text": ("不限制" if req.limit_mb < 0
+                                   else f"{req.limit_mb} MB"),
+                    "included": att_rows,
+                    "excluded": excluded,
+                },
+            }
+            zf.writestr(MANIFEST_NAME,
+                        json.dumps(manifest, ensure_ascii=False,
+                                   indent=1).encode("utf-8"))
+        os.replace(tmp, out)
+    finally:
+        # 成功时 tmp 已被 rename 走；失败时清掉半成品，绝不留在用户目录
+        if tmp.exists():
             try:
-                blob = path.read_bytes()
+                tmp.unlink()
             except OSError:
-                item["reason"] = "读取失败"
-                excluded.append(item)
-                continue
-            arc, renamed = _unique_attachment_path(seen_arc, item["name"])
-            seen_arc.add(arc)
-            zf.writestr(arc, blob)
-            # 原名单独留在 manifest 里：包内路径可能带 _2 序号，而用户认得的是
-            # 原文件名（回读/核对清单时要能对上）。
-            item["origin_name"] = item["name"]
-            item["path"] = arc
-            if renamed:
-                item["renamed"] = renamed
-            item["sha256"] = _sha256(blob)
-            total += len(blob)
-            att_rows.append(item)
-
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        manifest = {
-            "created": stamp,
-            "version": "1.0.0",
-            "note": req.note,
-            "kind": "handover",          # 与整库备份区分（backup 无此字段）
-            "scope": {
-                "category_id": req.category_id,
-                "tag": req.tag,
-                "date_from": req.date_from,
-                "date_to": req.date_to,
-            },
-            "documents": entries,
-            # 与 backup._manifest_json 的 attachments 段**同构**，
-            # 便于将来复用备份的校验/恢复逻辑
-            "attachments": {
-                "mode": "handover" if req.include_attachments else "excluded",
-                "limit_mb": req.limit_mb,
-                "limit_text": ("不限制" if req.limit_mb < 0
-                               else f"{req.limit_mb} MB"),
-                "included": att_rows,
-                "excluded": excluded,
-            },
-        }
-        zf.writestr(MANIFEST_NAME,
-                    json.dumps(manifest, ensure_ascii=False, indent=1).encode("utf-8"))
+                pass
 
     return {"documents": len(entries), "attachments": len(att_rows),
-            "excluded": len(excluded), "bytes": total, "path": req.out_path,
+            "excluded": len(excluded), "bytes": total, "path": str(out),
             "created": stamp}
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .. import paths
 from ..db import dao
+from .naming import fix_windows_traps
 
 # Windows 与麒麟都要能落盘的文件名字符集；顺带挡掉路径分隔符与 ".." 穿越
 _INVALID_CHARS = r'[\\/:*?"<>|\r\n\t]'
@@ -38,12 +39,20 @@ def safe_stored_name(file_name: str) -> str:
     这里手工归一分隔符取末段，再去掉残留盘符、替换非法字符、剥掉前导点
     （防 ".." 与隐藏文件），最后截断长度 —— 名字来自外部选择，
     绝不能让它决定落盘位置。
+
+    **保留设备名**必须一并处理：本函数是**外部名字的清洗闸**，
+    `backup._restore_attachments` 直接拿它清洗备份包内的条目名。`CON.txt`
+    这类名字在 Windows 上 ``open(..., "wb")`` **不报错但一个字节都没落盘**
+    （内容进设备）：恢复计数照样 +1、附件目录里却没有文件，而 ``exists()``
+    又因设备语义返回 True —— 连"缺失附件清单"都不会报出来。
+    规则与批量汇编共用 `core.naming.fix_windows_traps`，避免两份实现再次漂移。
     """
     raw = str(file_name or "").replace("\\", "/")
     name = raw.rsplit("/", 1)[-1]
     name = re.sub(r"^[A-Za-z]:", "", name)          # 残留的盘符前缀
     name = re.sub(_INVALID_CHARS, "_", name).strip()
     name = name.lstrip(".").strip()
+    name = fix_windows_traps(name)                  # 尾点/尾空格 + 保留设备名
     return (name or "附件")[:_MAX_NAME_LEN]
 
 

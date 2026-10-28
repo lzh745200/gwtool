@@ -8,11 +8,22 @@
 """
 import os
 import sys
+import uuid
 from pathlib import Path
 
 APP_DIR_NAME = "gwtool"
 _portable = False
 _override = None  # Path | None（模块级注解不用 PEP 604 语法：本模块需兼容 Python 3.9）
+
+# 已完成「可写探针」的目录（str 形式）。为什么要缓存：
+# 探针是"真写一个文件再删掉"，在装了实时防护的机器上单次~45 ms（实测：真实
+# %APPDATA% 路径 45 ms/次，临时目录 2.6 ms/次）。而 `app_data_dir()` 被
+# 附件、备份、日志、导出各条路径反复调用，且调用点常出现在**逐条目循环**里
+# （导出 300 个附件、备份 300 条附件记录）—— 不缓存时单次导出要多花几十秒，
+# 退出自动备份也会被拖住，而"退出要快"是本模块的硬约束。
+# 语义：目录可写视作**本进程内的不变量**（首次真正验证）；进程运行中途目录
+# 失效（U 盘拔出、权限被改）由后续真实写入的 OSError 报出来，不必靠探针。
+_checked_dirs: set[str] = set()
 
 
 class DataDirError(OSError):
@@ -34,17 +45,45 @@ def _ensure_dir(d: Path) -> Path:
     为什么不用 os.access：在 Windows 上对目录的写权限判断**不可靠**
     （ACL、只读属性、继承权限都可能让 access 返回 True 而实际写失败）。
     这里改为「真的写一个临时文件再删掉」——唯一能确证可写性的办法。
+
+    探针文件名**必须每次唯一**（pid + uuid），不能是固定名：`app_data_dir()`
+    被日志、备份、附件、导出各条路径反复调用，多线程与**多实例**（用户把
+    程序双击了两次）都会并发跑本函数。固定名时两个调用方会互相删对方的探针
+    —— Windows 上删除别人正打开的文件直接报 WinError 32「另一个程序正在
+    使用此文件」，被下面的异常分支翻译成「目录不可写」，于是启动时弹
+    「数据目录不可用」并拒绝启动，而目录其实完全可写。
+    实测（8 线程 × 200 次）：固定名误报 1223/1600；唯一名 0/1600。
+
+    删除探针失败**不**算目录不可写：那是杀软/索引器短暂持有句柄，与可写性
+    无关，吞掉即可（零字节残留由 `sweep` 逻辑与系统清理负责）。
+
+    同一目录在**本进程内只探一次**（`_checked_dirs`）：探针要真写盘，在实时
+    防护开启的机器上单次可达 45 ms，而调用点常在逐条目循环里（导出的附件循环、
+    备份的附件规划），不缓存会把秒级操作拖成分钟级。
     """
+    key = str(d)
+    if key in _checked_dirs:
+        # 快路径：已校验过就只 stat 一次（mkdir 单次实测 ~0.8 ms，stat ~5 µs）。
+        # 目录若在本进程运行期间被删（用户手工清理/U 盘重插），退回复检重建，
+        # 不会把"目录不存在"当成既定事实返回。
+        if d.is_dir():
+            return d
+        _checked_dirs.discard(key)
     try:
         d.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise DataDirError(d, f"无法创建目录：{exc}") from exc
-    probe = d / ".gwtool_write_test"
+    probe = d / f".gwtool_write_test_{os.getpid()}_{uuid.uuid4().hex}"
     try:
         probe.write_text("", encoding="utf-8")
-        probe.unlink()
     except OSError as exc:
         raise DataDirError(d, f"目录不可写：{exc}") from exc
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _checked_dirs.add(key)
     return d
 
 

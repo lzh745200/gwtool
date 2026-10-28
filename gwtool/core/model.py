@@ -30,8 +30,27 @@ class DocTree:
     blocks: list[Block] = field(default_factory=list)
 
     def plain_text(self) -> str:
+        """全文纯文本（标题 + 正文），**首块与标题同文时只保留一份**。
+
+        为什么必须去重：各解析器在文档没有显式标题时会把首个标题块**兼作**
+        title（DOCX：`tree.title = blocks[0].text`；TXT/MD/HTML 同理），
+        无条件拼接的话同一行会在 content_text 里出现两次。而 content_text 是
+        **字数统计（`word_count=len(content_text)`）、查重哈希、FTS 索引与
+        "导出纯文本"**的共同来源 —— 短文档的字数会接近翻倍，导出件首行重影。
+        （实测 TXT/MD/HTML 三种格式均重复一次。）
+
+        判据只看"文本是否相同"，不像 `effective_blocks` 那样要求 HEADING+L1：
+        那里是判断"渲染时会不会重复（只有一级标题会被渲染成材料标题）"，
+        这里判断的是"纯文本里是否同一行写了两遍"，与块类型无关。
+        """
         parts = [self.title] if self.title else []
-        for b in self.blocks:
+        blocks = self.blocks
+        head = (self.title or "").strip()
+        if head and blocks:
+            first = blocks[0]
+            if first.type != TABLE and (first.text or "").strip() == head:
+                blocks = blocks[1:]
+        for b in blocks:
             if b.type == TABLE and b.rows:
                 parts.extend(" | ".join(cell for cell in row) for row in b.rows)
             elif b.text:

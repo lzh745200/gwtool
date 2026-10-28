@@ -29,11 +29,17 @@ SETTING_DUE_SOON = "reminder_due_soon_days"
 
 
 def enabled() -> bool:
-    """提醒开关。默认开启（用户可在设置里关掉）。"""
+    """提醒开关。默认开启（用户可在设置里关掉）。
+
+    读取失败时返回**默认值 True**，与 `config._flag` 同一判断：设置读不出来是
+    环境问题（库被占、只读挂载），不该被解释成"用户关掉了提醒"——那会让
+    "库有点小问题"表现为"督办功能自己消失了"，而用户完全无从理解。
+    原实现返回 False，与本函数自己的文档字符串（默认开启）自相矛盾。
+    """
     try:
         return dao.get_setting(SETTING_ENABLED) != "0"
     except Exception:
-        return False
+        return True
 
 
 def set_enabled(flag: bool) -> bool:

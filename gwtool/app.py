@@ -86,9 +86,13 @@ def _follow_system_theme() -> bool:
         if not p.exists():
             return False
         conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=3)
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key='follow_system_theme'").fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key='follow_system_theme'").fetchone()
+        finally:
+            # 读失败（表不存在/句柄异常）也必须关连接：本函数在启动路径上，
+            # 漏一个句柄就会卡住后面的迁移/恢复（Windows 上文件被占用即失败）
+            conn.close()
         return row is not None and row[0] == "1"
     except Exception:
         return False
@@ -162,15 +166,21 @@ def run(import_path: str = "") -> int:
     follow = _follow_system_theme()
     if sys.platform == "win32" and not follow:
         sys.argv += ["-platform", "windows:darkmode=0"]
-    # 深色主题（UI 方案 §4.3/P2）：跟随系统且系统为深色 → 切深色调色板。
-    # set_dark 重绑 theme 模块常量，必须发生在**任何窗口创建之前**；
-    # QSS 在下方 build_qss() 时按已重绑的常量生成。
-    from .ui import theme as _theme
-    _theme.set_dark(follow and _system_prefers_dark())
     QApplication.setApplicationName(APP_NAME)
     app = QApplication.instance() or _launch_qapp(sys.argv)
     if app is None:
         return 1
+
+    # 深色主题（UI 方案 §4.3/P2）：跟随系统且系统为深色 → 切深色调色板。
+    # set_dark 重绑 theme 模块常量，必须发生在**任何窗口创建之前**（此时还
+    # 没建过任何窗口），QSS 在下方 build_qss() 时按已重绑的常量生成。
+    #
+    # 为什么放在 QApplication 之后：非 Windows 平台的「系统是否深色」只能问
+    # QGuiApplication.styleHints()，而它需要已存在应用实例；放在构造之前
+    # 永远拿到 ColorScheme.Unknown → 恒判浅色，麒麟上「跟随系统深浅色」
+    # 因此从未生效。Windows 走注册表，两个位置等价。
+    from .ui import theme as _theme
+    _theme.set_dark(follow and _system_prefers_dark())
 
     # 小屏 / 高 DPI 兜底（P1-31）：任何对话框第一次显示后夹进屏幕可用区域。
     # 装在这里而不是逐个对话框里：对话框有十几处、以后还会新增，逐点补必漏；

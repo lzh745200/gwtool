@@ -9,19 +9,9 @@ from pathlib import Path
 from . import docxgen
 from .compiler import load_trees
 from .corrector import ADVISORY_CATEGORIES
+from .naming import fix_windows_traps
 from .template import DocTemplate
 from ..db import dao
-
-
-# Windows 保留设备名：以此为主名的文件（含带扩展名的 CON.docx）根本落不到
-# 磁盘上——CON/NUL/COM1 会"写入成功"但内容进设备、文件不存在，
-# PRN/LPT1 直接抛 FileNotFoundError。批量汇编按标题命名文件，
-# 材料标题恰好是这类名字时用户会拿到"成功"却打不开的产物。
-_RESERVED_DEVICE_NAMES = frozenset(
-    ["CON", "PRN", "AUX", "NUL"]
-    + [f"COM{i}" for i in range(1, 10)]
-    + [f"LPT{i}" for i in range(1, 10)]
-)
 
 
 def safe_filename(name: str) -> str:
@@ -30,6 +20,7 @@ def safe_filename(name: str) -> str:
     只替换非法字符是不够的：Windows 还有两类"看着合法但写不进去"的名字——
     保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）和以空格或点结尾的名字。
     两类都要处理，否则批量汇编会静默产出打不开的公文。
+    具体规则与附件存储共用 `core.naming.fix_windows_traps`（单一来源）。
     """
     s = re.sub(r'[\\/:*?"<>|\n\r\t]', "_", str(name or ""))
     # Windows 不允许文件名以空格或点结尾（资源管理器会悄悄截掉，导致
@@ -37,9 +28,7 @@ def safe_filename(name: str) -> str:
     s = s.rstrip(" .").strip()[:80].strip()
     if not s:
         return "未命名"
-    if s.split(".")[0].upper() in _RESERVED_DEVICE_NAMES:
-        s = "_" + s
-    return s
+    return fix_windows_traps(s)
 
 
 def batch_compile_each(doc_ids: list[int], template: DocTemplate, out_dir: str,
