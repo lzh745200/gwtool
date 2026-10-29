@@ -27,9 +27,12 @@ STATUSES = ("拟稿", "核稿", "签发", "已印发", "已归档")
 
 # 发文字号形如「×政办发〔2026〕12号」：机关代字 + 〔年份〕 + 序号 + 号。
 # 标准写法是六角括号〔〕，但实际录入中圆括号、全角圆括号、半角/全角方括号
-# 都常见，一并认下。
-_DOC_NO_RE = re.compile(r"^\s*(?P<prefix>.+?)[〔\[［（(](?P<year>\d{4})[〕\]］）)]"
-                        r"\s*(?P<serial>\d+)\s*号\s*$")
+# 都常见，一并认下。括号口径的**唯一来源是 `dao.DOC_NO_OPEN/CLOSE`**：
+# 自动取号（`dao.max_doc_no_serial`）与查重都用同一份，否则「（2026）1号」
+# 会被取号器当成不存在，自动取号直接给出重号。
+_DOC_NO_RE = re.compile(
+    rf"^\s*(?P<prefix>.+?){dao.DOC_NO_OPEN_CLASS}(?P<year>\d{{4}})"
+    rf"{dao.DOC_NO_CLOSE_CLASS}\s*(?P<serial>\d+)\s*号\s*$")
 
 # CSV 导出的列与中文表头（顺序即列顺序）
 EXPORT_COLUMNS: tuple[tuple[str, str], ...] = (

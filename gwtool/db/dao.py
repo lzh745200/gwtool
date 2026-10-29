@@ -1565,7 +1565,14 @@ def add_dispatch_auto(d: Dispatch, prefix: str, year: str = "") -> tuple[int, st
 
 
 def _find_doc_no_locked(conn, doc_no: str, exclude_id: int = 0) -> Dispatch | None:
-    """事务内查重（复用同一个连接，避免另开连接看不到未提交状态）。"""
+    """事务内查重（复用同一个连接，避免另开连接看不到未提交状态）。
+
+    先按原字符串精确查（历史行为，命中即返回）；**新增**（exclude_id=0）时再补
+    一次归一化查重：同一「机关代字+年份+序号」即使括号写法不同（〔2026〕5号 与
+    （2026）5号）也算重号 —— 它们本来就是同一个字号。
+    编辑已有记录**只**做精确查：历史库里可能已存在归一化重复，把这条口径扩大到
+    编辑路径会让用户"改一个字都存不了"。
+    """
     text = (doc_no or "").strip()
     if not text:
         return None
@@ -1576,7 +1583,35 @@ def _find_doc_no_locked(conn, doc_no: str, exclude_id: int = 0) -> Dispatch | No
         params.append(int(exclude_id))
     sql += " ORDER BY id DESC LIMIT 1"
     row = conn.execute(sql, params).fetchone()
-    return Dispatch(**dict(row)) if row else None
+    if row:
+        return Dispatch(**dict(row))
+    if int(exclude_id or 0):
+        return None
+    want = _doc_no_key(text)
+    if want is None:
+        return None
+    rows = conn.execute(
+        "SELECT * FROM dispatch_register WHERE doc_no LIKE ? ESCAPE '\\'",
+        (f"{_like_escape(want[0])}%",)).fetchall()
+    for row in rows:
+        if _doc_no_key(row["doc_no"] or "") == want:
+            return Dispatch(**dict(row))
+    return None
+
+
+def _doc_no_key(doc_no: str) -> tuple[str, str, int] | None:
+    """发文字号的归一化键 (机关代字, 年份, 序号)；无法识别返回 None。
+
+    解析复用 `core.registry.parse_doc_no`（函数内导入：registry 在模块级
+    `from ..db import dao`，此处若模块级反向导入会成环）。两条路径共用同一个
+    解析器是刻意的 —— 括号口径各写一份正是"自动取号撞号"的成因。
+    """
+    from ..core.registry import parse_doc_no
+
+    prefix, year, serial = parse_doc_no(doc_no)
+    if not prefix or not year or not serial:
+        return None
+    return prefix, year, serial
 
 
 def delete_dispatch(dispatch_id: int) -> None:
@@ -1689,6 +1724,17 @@ def dispatch_monthly_counts(year: str) -> list[tuple[str, int]]:
             [f"{i:02d}" for i in range(1, 13)]]
 
 
+# 发文字号里"年份/序号"括号的**唯一口径**：标准写法是六角括号〔〕，但实际
+# 录入中圆括号、方括号（半角与全角）同样常见。`core.registry.parse_doc_no`
+# 与下面的取号、查重都必须用这一份 —— 两边漂移过一次：解析器认四种括号、
+# 取号器只认〔〕，台账里「（2026）1号」不被计入已用序号，自动取号直接给出
+# 「〔2026〕1号」与它撞号（2026-10-29 实测复现）。
+DOC_NO_OPEN = "〔[［（("
+DOC_NO_CLOSE = "〕]］）)"
+DOC_NO_OPEN_CLASS = r"[〔\[［（(]"
+DOC_NO_CLOSE_CLASS = r"[〕\]］）)]"
+
+
 def max_doc_no_serial(prefix: str, year: str) -> int:
     """取某机关代字某年度已用的最大发文序号，无记录返回 0。
 
@@ -1702,14 +1748,20 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
     两者不一致；现按文档承诺改为真取最大。
 
     prefix/year 都是输入框来源：LIKE 用 ESCAPE 转义（`%`/`_` 不再是通配符），
-    再用 `前缀+〕` 精确校验行首，防止「×政办发」把「×政办发函」的号算进来。
+    再用「前缀 + 左括号」精确校验行首，防止「×政办发」把「×政办发函」的号算进来。
+
+    括号口径见 `DOC_NO_OPEN/CLOSE`：SQL 只按前缀粗筛，年份与序号在 Python 侧
+    用与 `parse_doc_no` **同一套**括号判定。早期 SQL 里写死「〔年份〕」，导致
+    圆括号/方括号录入的历史文号整条漏掉，自动取号撞号。
     """
     conn = dbconn.get_conn()
+    pfx = (prefix or "").strip()
     rows = conn.execute(
         "SELECT doc_no FROM dispatch_register WHERE doc_no LIKE ? ESCAPE '\\'",
-        (f"{_like_escape(prefix)}%〔{_like_escape(str(year))}〕%",)).fetchall()
+        (f"{_like_escape(pfx)}%",)).fetchall()
     head = re.compile(
-        rf"^\s*{re.escape((prefix or '').strip())}〔\s*{re.escape(str(year))}\s*〕")
+        rf"^\s*{re.escape(pfx)}{DOC_NO_OPEN_CLASS}\s*{re.escape(str(year))}"
+        rf"\s*{DOC_NO_CLOSE_CLASS}")
     best = 0
     for r in rows:
         text = r["doc_no"] or ""
@@ -1718,7 +1770,7 @@ def max_doc_no_serial(prefix: str, year: str) -> int:
         # 逐段取号：号段里混进异常长数字（误粘贴/脏数据）时只跳过该段，
         # 否则它会把"已用最大序号"顶成天文数字，自动取号随即给出 10^30 量级的号。
         # 注：这里不能用 try/int 兜底 —— `\d+` 捕获的一定是纯数字，int() 永不抛。
-        for tok in re.findall(r"〕\s*(\d+)\s*号", text):
+        for tok in re.findall(rf"{DOC_NO_CLOSE_CLASS}\s*(\d+)\s*号", text):
             if len(tok) > 9:
                 continue
             best = max(best, int(tok))

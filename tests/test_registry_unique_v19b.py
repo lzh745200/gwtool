@@ -198,6 +198,51 @@ class TestMaxSerialHardening:
         assert dao.max_doc_no_serial("×政办发", "2026") == 12
 
 
+# ============================================================ 括号口径统一（v1.20.2）
+class TestDocNoBracketConsistency:
+    """发文字号的括号口径必须与 `registry.parse_doc_no` 一致。
+
+    缺陷（2026-10-29 实测）：解析器认四种括号，而 `max_doc_no_serial` 的 SQL 与
+    行首校验写死六角括号〔〕。台账里用圆括号/方括号录入的历史文号整条漏掉，
+    自动取号给出已用过的序号 —— 台账出现重号（公文编号唯一性是硬要求）。
+    """
+
+    VARIANTS = ("×政办发（2026）1号", "×政办发［2026］2号", "×政办发(2026)3号")
+
+    def test_non_hex_brackets_count_as_used(self, tmp_db):
+        for no in self.VARIANTS:
+            dao.add_dispatch(_disp(doc_no=no))
+        assert dao.max_doc_no_serial("×政办发", "2026") == 3
+
+    def test_auto_numbering_does_not_collide(self, tmp_db):
+        for no in self.VARIANTS:
+            dao.add_dispatch(_disp(doc_no=no))
+        _did, doc_no = dao.add_dispatch_auto(_disp(title="新件"), "×政办发", "2026")
+        assert doc_no == "×政办发〔2026〕4号"
+        serials = [registry.parse_doc_no(d.doc_no)[2] for d in dao.list_dispatch()]
+        assert len(serials) == len(set(serials)), "同机关同年度出现重号"
+
+    def test_year_filter_still_exact(self, tmp_db):
+        """换了年度不算同年已用序号 —— 否则每年都会从上一年的号往后接。"""
+        dao.add_dispatch(_disp(doc_no="×政办发（2025）99号"))
+        assert dao.max_doc_no_serial("×政办发", "2026") == 0
+
+    def test_duplicate_check_is_bracket_insensitive_on_insert(self, tmp_db):
+        """手打不同括号写法的同一字号，新增时应判重（归一化比较）。"""
+        dao.add_dispatch_unique(_disp(doc_no="×政办发〔2026〕5号", title="原件"))
+        with pytest.raises(dao.DuplicateDocNoError) as ei:
+            dao.add_dispatch_unique(_disp(doc_no="×政办发（2026）5号",
+                                          title="手打同号"))
+        assert ei.value.existing is not None
+        assert ei.value.existing.title == "原件"
+
+    def test_different_prefix_still_allowed(self, tmp_db):
+        """不同机关代字的同序号不是重号 —— 归一化不能把代字也吞掉。"""
+        dao.add_dispatch_unique(_disp(doc_no="×政办发（2026）5号", title="甲"))
+        dao.add_dispatch_unique(_disp(doc_no="×政发（2026）5号", title="乙"))
+        assert dao.count_dispatch() == 2
+
+
 # ============================================================ P1-35 段落索引预算
 class TestParagraphIndexBudget:
     def test_default_is_unlimited(self, tmp_db):

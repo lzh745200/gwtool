@@ -36,6 +36,12 @@ _CHAIN = [  # 层级顺序
 
 _CN_ORD = "一二三四五六七八九十"
 
+# 法定文种（与 core.registry.doc_types 同源，此处只用于从标题行认文种）
+_DOC_KINDS = ("请示", "报告", "通知", "函", "批复", "通报", "指示", "纪要")
+# 认文种时最多向下看几个非空行：标题通常在版头（发文机关标志）与发文字号之后，
+# 但也不该扫到正文里的「现将有关事项通知如下」。
+_KIND_SCAN_LINES = 4
+
 # ---- 引文规范（引用**其他**公文时的写法）----
 # 注意与既有的「发文字号」检查区分：那一条查的是**本文自己**的字号用不用
 # 六角括号；本条查的是**引用他人公文**时的写法。两者规则对象不同，不可混淆。
@@ -137,13 +143,32 @@ def _cn_to_int(s: str) -> int:
     return total + cur
 
 
+def _guess_kind(lines: list[str]) -> tuple[str, int]:
+    """从开头几个非空行里认文种，返回 (文种, 所在行下标)；认不出返回 ("", -1)。
+
+    为什么不能只看首行：真实材料常常**整篇红头**粘进来，首行是版头
+    （“××市人民政府办公室文件”）或发文字号，标题在第 3~5 行。只认首行会取不到
+    文种，于是结束语、主送机关、文种混用、篇幅这几项**整组静默跳过** ——
+    实测同一份缺主送、缺结束语的通知：不带版头报 2 条，带版头报 0 条，
+    用户看到的是"体检通过"。
+    """
+    scanned = 0
+    for idx, ln in enumerate(lines):
+        if not ln:
+            continue
+        for kind in _DOC_KINDS:
+            if kind in ln:
+                return kind, idx
+        scanned += 1
+        if scanned >= _KIND_SCAN_LINES:
+            break
+    return "", -1
+
+
 def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
     out: list[Finding] = []
     lines = [ln.strip() for ln in text.split("\n")]
-    title = next((ln for ln in lines if ln), "")
-    kind = kind_hint or next(
-        (k for k in ("请示", "报告", "通知", "函", "批复", "通报", "指示", "纪要")
-         if k in title), "")
+    kind, kind_at = (kind_hint, -1) if kind_hint else _guess_kind(lines)
 
     # ---- 标题编号链条 ----
     counters = [0, 0, 0, 0]
@@ -228,10 +253,14 @@ def inspect_text(text: str, kind_hint: str = "") -> list[Finding]:
         out.append(Finding("info", "请示规则", "请示应一文一事，请核对是否合并多事项"))
 
     # ---- 主送机关 ----
+    # 扫描窗口从"文种所在行"起算（版头、发文字号在前时标题不在首行）：
+    # 旧实现固定看开头 7 行，规范的红头文件主送机关落在第 8 行，会被漏出窗口。
+    # 文种来自调用方（kind_hint）时没有标题行信息，仍按开头 7 行看。
     if kind in ("通知", "通报", "请示", "报告", "函", "批复", "指示"):
+        start = kind_at if kind_at >= 0 else 0
+        window = lines[start:start + 7]
         has_recipient = any(
-            ln.endswith(("：", ":")) and len(ln) <= 40 and i <= 6
-            for i, ln in enumerate(lines[:8]))
+            ln.endswith(("：", ":")) and len(ln) <= 40 for ln in window)
         if not has_recipient:
             out.append(Finding("warn", "主送机关",
                                f"「{kind}」应顶格标注主送机关（如“各科室：”）"))
