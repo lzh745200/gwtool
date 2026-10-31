@@ -37,17 +37,24 @@ def _wipe_bundled_tree() -> None:
     避免下一次 setup 撞 `FileExistsError` 把 4 个用例一起打成 ERROR。
     """
     root = Path(sys.executable).resolve().parent / "tesseract"
+    # 关键安全护栏（v1.21）：在某些发行版上 `sys.executable` 就是 /usr/bin，
+    # 而 /usr/bin/tesseract 是**系统真实可执行文件**。绝不能对它做 rmtree /
+    # rename —— 否则一次测试就会把系统 Tesseract 删掉（CI 已实际踩中，
+    # 表现为后续打包步骤 `cp /usr/bin/tesseract` 找不到文件）。
+    if root.exists() and not root.is_dir():
+        return
     for _ in range(10):
         shutil.rmtree(root, ignore_errors=True)
         if not root.exists():
             return
         time.sleep(0.3)
-    try:
-        stale = root.with_name(f"tesseract_stale_{os.getpid()}")
-        os.replace(root, stale)
-        shutil.rmtree(stale, ignore_errors=True)
-    except OSError:
-        pass
+    if root.is_dir():
+        try:
+            stale = root.with_name(f"tesseract_stale_{os.getpid()}")
+            os.replace(root, stale)
+            shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def _real_tess() -> str:
@@ -116,6 +123,10 @@ def bundled_tree(clean_settings):
 
     exe_dir = Path(sys.executable).resolve().parent
     root = exe_dir / "tesseract"
+    # 解释器旁若是系统真实 tesseract 文件（如 /usr/bin/tesseract），只读跳过，
+    # 绝不构造/删除/改名 —— 这条护栏防止测试破坏系统环境（v1.21 教训）。
+    if root.exists() and not root.is_dir():
+        pytest.skip("解释器旁是系统 tesseract 文件，跳过捆绑目录构造")
     exe_link = root / "tesseract.exe"
     td_dir = root / "tessdata"
     chi_link = td_dir / "chi_sim.traineddata"
