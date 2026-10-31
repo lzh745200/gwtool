@@ -73,22 +73,45 @@ def _linux_preflight(dist: Path) -> None:
     if IS_WIN:
         return
     print("\n-- Linux 兼容性（libstdc++ / ABI）--")
-    lib_dirs = sorted(Path("/usr/lib").glob("*-linux-gnu"))
     copied = []
+
+    def _find_lib(name: str) -> Path | None:
+        """在常见库目录 + ldconfig 缓存里找库（/lib、/usr/lib、gcc 目录）。"""
+        candidates = []
+        for base in (Path("/lib"), Path("/usr/lib")):
+            candidates += sorted(base.glob("*-linux-gnu"))
+            candidates += sorted(base.glob("gcc/*/*"))
+            candidates.append(base)
+        candidates.append(Path("/usr/lib64"))
+        for d in candidates:
+            p = d / name
+            if p.exists():
+                return p
+        try:
+            out = subprocess.run(["ldconfig", "-p"], capture_output=True,
+                                 text=True, timeout=30).stdout
+            for line in out.splitlines():
+                if name + " " in line or line.strip().endswith(name):
+                    part = line.split("=>")[-1].strip()
+                    if part and Path(part).exists():
+                        return Path(part)
+        except Exception:
+            pass
+        return None
+
     for name in ("libstdc++.so.6", "libgcc_s.so.1"):
-        dst = dist / name
-        if dst.exists():
+        # PyInstaller 可能已把它放进 _internal/：只要有就算随包
+        if any(p.name == name for p in dist.rglob(name)):
             copied.append(name)
             continue
-        for d in lib_dirs:
-            src = d / name
-            if src.exists():
-                try:
-                    shutil.copy2(src, dst, follow_symlinks=True)
-                    copied.append(name)
-                except OSError as exc:
-                    print(f"  复制 {name} 失败：{exc}")
-                break
+        src = _find_lib(name)
+        if src is None:
+            continue
+        try:
+            shutil.copy2(src, dist / name, follow_symlinks=True)
+            copied.append(name)
+        except OSError as exc:
+            print(f"  复制 {name} 失败：{exc}")
     check("随包 C++ 运行时（libstdc++/libgcc_s）", len(copied) == 2,
           "、".join(copied) or "未找到，麒麟上可能 GLIBCXX not found")
 
