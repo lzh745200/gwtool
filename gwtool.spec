@@ -36,6 +36,9 @@ hiddenimports = [
 ]
 if sys.platform.startswith('win'):
     hiddenimports.append('win32timezone')   # pywin32 动态导入
+# v1.21：这两个模块在函数体内延迟导入（ime 在 run() 里、material_import 在
+# 对话框里），显式声明避免打包版漏收导致"输入法/素材导入"在用户机上才失效。
+hiddenimports += ['gwtool.ui.ime', 'gwtool.core.material_import']
 
 # ---- 可选推理栈（L4 神经精排 / L5 语法纠错）的显式收集 ----
 # 背景：core/csc_neural.py 与 core/csc_gec.py 里的 import 全部写在**函数体内**
@@ -153,7 +156,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # Linux 一律禁用 UPX：ELF 共享库被压缩后，麒麟上会出现"加载即闪退"，
+    # 而 Windows 侧 UPX 有 upx_exclude 护栏（DLL 名单）可继续用。
+    upx=not sys.platform.startswith('linux'),
     console=False,          # --windowed
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -166,7 +171,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=not sys.platform.startswith('linux'),
     # UPX 压缩下列 DLL 有已知风险（加载失败 / 杀软误报 / ONNX 运行期崩溃）。
     # 此前这里是空列表 = 完全交给 UPX 自行判断，等于没有护栏：一旦构建机上
     # 装了 UPX，Qt/ONNX 的 DLL 就会被压，问题只在用户机器上暴露。

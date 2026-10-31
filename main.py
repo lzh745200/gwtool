@@ -13,6 +13,7 @@
   python main.py --runtime-report    # 打印运行环境能力（不启动 GUI，供打包冒烟校验）
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,10 @@ def _parse_args() -> argparse.Namespace:
     # 成功不代表冻结后的 exe 也带进去了）。不启动 GUI，直接打印后退出。
     ap.add_argument("--runtime-report", action="store_true",
                     help="打印运行环境能力后退出（打包冒烟校验用）")
+    # v1.21：麒麟现场诊断入口。桌面双击闪退时看不到任何输出，用户可执行
+    # `gwtool.sh --startup-report` 把 glibc/Qt 插件/输入法/缺库情况一次打出来。
+    ap.add_argument("--startup-report", action="store_true",
+                    help="打印启动诊断（glibc/Qt插件/输入法/缺库）后退出")
     args, _rest = ap.parse_known_args()
     return args
 
@@ -46,6 +51,100 @@ _args = _parse_args()
 if _args.portable or (getattr(sys, "frozen", False)
                       and (Path(sys.executable).parent / "Data").exists()):
     paths.set_portable(True)
+
+
+# ---------------------------------------------------------------- 启动诊断
+def _install_early_log() -> None:
+    """在**导入 PySide6 之前**装好崩溃日志。
+
+    Qt 的动态库加载失败（GLIBC/GLIBCXX not found、libqxcb 缺库）通常发生在
+    `import PySide6` 阶段，异常还没进 logs.install()。桌面双击看不到 stderr，
+    用户只看到"闪退"。这里用 faulthandler + excepthook 把启动期异常写进
+    ~/gwtool_启动诊断.log；随后 logs.install() 会接管常规日志。
+    """
+    import datetime
+    import faulthandler
+    import platform
+    import traceback
+
+    try:
+        log = open(Path.home() / "gwtool_启动诊断.log", "a", encoding="utf-8")
+    except OSError:
+        return
+    try:
+        log.write("\n" + "=" * 60 + "\n")
+        log.write(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] 启动\n")
+        log.write(f"platform={platform.platform()} machine={platform.machine()} "
+                  f"python={platform.python_version()} frozen={bool(getattr(sys, 'frozen', False))}\n")
+        log.flush()
+        faulthandler.enable(log, all_threads=True)
+    except Exception:
+        pass
+
+    def _hook(exc_type, exc, tb):
+        try:
+            log.write("".join(traceback.format_exception(exc_type, exc, tb)))
+            log.flush()
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+
+
+def _startup_report() -> int:
+    """麒麟现场诊断：glibc、Qt 插件、输入法、缺库一次打全（不启动 GUI）。"""
+    import platform
+
+    print("=" * 60)
+    print("公文汇编助手 · 启动诊断")
+    print("=" * 60)
+    print(f"platform : {platform.platform()}")
+    print(f"machine  : {platform.machine()}")
+    print(f"libc     : {platform.libc_ver()}")
+    print(f"python   : {platform.python_version()}  frozen={bool(getattr(sys, 'frozen', False))}")
+    print(f"exe      : {sys.executable}")
+    for key in ("XDG_SESSION_TYPE", "QT_QPA_PLATFORM", "QT_IM_MODULE",
+                "GTK_IM_MODULE", "XMODIFIERS", "QT_PLUGIN_PATH"):
+        print(f"env.{key:16s}= {os.environ.get(key, '')}")
+    try:
+        import PySide6
+        from PySide6.QtCore import qVersion
+        print(f"PySide6  : {PySide6.__version__}  Qt {qVersion()}")
+    except Exception as exc:
+        print(f"PySide6  : 导入失败 -> {type(exc).__name__}: {exc}")
+        print("  这通常是 glibc/GLIBCXX 版本不匹配或缺少 Qt 运行库。")
+        print("  查看本文件顶部与 ~/gwtool_启动诊断.log 的完整错误。")
+    try:
+        from gwtool.ui import ime
+        print("-" * 60)
+        print(ime.diagnostics_text(ime.configure()))
+    except Exception as exc:
+        print(f"输入法诊断失败：{exc}")
+    # 缺库：优先检查包内 libqxcb.so 与主程序
+    if sys.platform == "linux":
+        import subprocess
+        targets = [sys.executable]
+        base = Path(sys.executable).resolve().parent
+        targets += [str(p) for p in base.rglob("libqxcb.so")][:1]
+        print("-" * 60)
+        for t in targets:
+            try:
+                out = subprocess.run(["ldd", t], capture_output=True, text=True,
+                                     timeout=10).stdout
+                missing = [ln.strip() for ln in out.splitlines()
+                           if "not found" in ln]
+                if missing:
+                    print(f"缺库（{t}）：")
+                    for m in missing:
+                        print("  " + m)
+            except Exception:
+                pass
+    print("=" * 60)
+    return 0
+
+
+_install_early_log()
 
 
 def _handle_context_menu() -> "int | None":
@@ -137,6 +236,9 @@ def _runtime_report() -> int:
 
 if _args.runtime_report:
     sys.exit(_runtime_report())
+
+if _args.startup_report:
+    sys.exit(_startup_report())
 
 from gwtool.app import run
 

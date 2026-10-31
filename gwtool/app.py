@@ -162,6 +162,16 @@ def run(import_path: str = "") -> int:
     # 最先装配诊断日志：此后所有异常（含 QApplication 构造失败）都能落盘
     logs.install()
 
+    # v1.21 麒麟输入法：Qt6 必须显式选择 platforminputcontext 插件（fcitx5/ibus）。
+    # 必须在 QApplication 之前设置 QT_IM_MODULE / QT_PLUGIN_PATH。
+    ime_info = {}
+    try:
+        from .ui import ime
+        ime_info = ime.configure()
+        logs.get_logger("app").info("输入法环境：\n%s", ime.diagnostics_text(ime_info))
+    except Exception:
+        logs.get_logger("app").exception("输入法环境探测失败（不影响启动）")
+
     # 高分屏适配：默认强制浅色；设置「跟随系统深浅色」后交由系统决定
     follow = _follow_system_theme()
     if sys.platform == "win32" and not follow:
@@ -170,6 +180,33 @@ def run(import_path: str = "") -> int:
     app = QApplication.instance() or _launch_qapp(sys.argv)
     if app is None:
         return 1
+
+    # 输入法探测到 fcitx/ibus 但插件缺失时，给一次可操作的提示（只提示一次，
+    # 免得每次启动都弹）。这不是致命错误，不能阻断启动。
+    try:
+        warnings = list((ime_info or {}).get("warnings") or [])
+        if warnings and sys.platform == "linux":
+            from PySide6.QtWidgets import QMessageBox
+            detail = "\n".join(warnings)
+            box = QMessageBox(
+                QMessageBox.Warning, "输入法可能不可用",
+                "检测到系统使用了中文输入法，但程序没有找到对应的 Qt6 插件，"
+                "可能出现无法切换/输入中文。\n\n"
+                f"{detail}\n\n"
+                "修复（麒麟/Debian 系）：\n"
+                "  sudo apt install fcitx5-frontend-qt6   # fcitx5\n"
+                "  sudo apt install ibus                  # 或 ibus\n"
+                "安装后重启本程序。\n"
+                "详细诊断：终端执行 gwtool.sh --startup-report")
+            box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            # 必须由 app 持有引用：局部变量随作用域回收会把对话框一起销毁。
+            app._ime_warning_box = box
+            box.show()
+            box.raise_()
+        elif warnings:
+            logs.get_logger("app").warning("输入法提示：%s", warnings)
+    except Exception:
+        pass
 
     # 深色主题（UI 方案 §4.3/P2）：跟随系统且系统为深色 → 切深色调色板。
     # set_dark 重绑 theme 模块常量，必须发生在**任何窗口创建之前**（此时还

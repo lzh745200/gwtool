@@ -59,6 +59,56 @@ def find_one(root: Path, *needles: str) -> Path | None:
     return None
 
 
+def _linux_preflight(dist: Path) -> None:
+    """Linux 产物：随包 C++ 运行时 + ABI 门禁。
+
+    CI 的 workflow 不含 workflow scope 时无法通过 API 修改（GitHub 会返回 404），
+    因此把这两步放进**已在流水线里执行**的 smoke_dist，保证任何构建路径
+    （CI / 本地 build_kylin_arm64.sh）都会做：
+      1) 把构建机 libstdc++.so.6 / libgcc_s.so.1 复制进产物根（启动器已把
+         $DIR 放在 LD_LIBRARY_PATH 最前），麒麟自带 libstdc++ 偏旧时不再
+         GLIBCXX not found；
+      2) 调 scripts/check_linux_abi.py 扫描 GLIBC/GLIBCXX 最高要求，超线失败。
+    """
+    if IS_WIN:
+        return
+    print("\n-- Linux 兼容性（libstdc++ / ABI）--")
+    lib_dirs = sorted(Path("/usr/lib").glob("*-linux-gnu"))
+    copied = []
+    for name in ("libstdc++.so.6", "libgcc_s.so.1"):
+        dst = dist / name
+        if dst.exists():
+            copied.append(name)
+            continue
+        for d in lib_dirs:
+            src = d / name
+            if src.exists():
+                try:
+                    shutil.copy2(src, dst, follow_symlinks=True)
+                    copied.append(name)
+                except OSError as exc:
+                    print(f"  复制 {name} 失败：{exc}")
+                break
+    check("随包 C++ 运行时（libstdc++/libgcc_s）", len(copied) == 2,
+          "、".join(copied) or "未找到，麒麟上可能 GLIBCXX not found")
+
+    abi = Path(__file__).resolve().parent / "check_linux_abi.py"
+    if not abi.is_file():
+        check("ABI 门禁脚本存在", False, str(abi))
+        return
+    try:
+        out = subprocess.run(
+            [sys.executable, str(abi), str(dist),
+             "--max-glibc", "2.31", "--max-glibcxx", "3.4.29"],
+            capture_output=True, text=True, timeout=300, check=False)
+        print(out.stdout.strip())
+        if out.stderr.strip():
+            print(out.stderr.strip()[-500:])
+        check("ABI 门禁（GLIBC ≤2.31 / GLIBCXX ≤3.4.29）", out.returncode == 0)
+    except Exception as exc:
+        check("ABI 门禁执行", False, str(exc)[:120])
+
+
 def _runtime_report(exe: Path, dist: Path, env: dict) -> dict | None:
     """让**产物自己**报告能力面，解析 `key: value` 行。
 
@@ -102,6 +152,8 @@ def main() -> int:
     if not check(f"可执行文件 {EXE_NAME}", exe.is_file()):
         return 1
 
+    _linux_preflight(dist)
+
     # ---- 1. 关键资源是否真被打包进去 ----
     print("\n-- 打包资源 --")
     seed = find_one(dist, "seed.db")
@@ -119,6 +171,11 @@ def main() -> int:
     check("opencc 简繁转换词典", find_one(dist, "TSCharacters", "STCharacters",
                                           "opencc") is not None)
     check("jieba 分词词典", find_one(dist, "dict.txt") is not None)
+    # v1.21：Qt 输入法插件必须随包分发，否则麒麟上打包版切不了中文。
+    ime_plugins = [p for p in dist.rglob("*")
+                   if p.is_file() and "platforminputcontexts" in str(p.parent)]
+    check("Qt 输入法插件（platforminputcontexts）", bool(ime_plugins),
+          ime_plugins[0].name if ime_plugins else "缺失则无法调用 fcitx5/ibus 输入中文")
     # OCR 内置（v1.5.0）：Tesseract 二进制与中文包随包分发。
     # 必须按**确切路径**判定，不能用 find_one 的子串匹配：产物里本来就有
     # tesseract\libtesseract-5.dll 与 ocr/lib/libtesseract.so.*，

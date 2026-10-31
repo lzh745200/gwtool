@@ -31,13 +31,23 @@ def _wipe_bundled_tree() -> None:
 
     任何上一轮测试崩溃都可能留下半截树；捆绑场景一律先自愈清理，
     不对环境做"应该没有"的假设。
+
+    v1.21：tesseract 子进程偶尔在退出后短暂锁住 exe，rmtree 会失败；
+    除了重试，还在最后把残留目录**改名**（改名不受文件锁影响）再删，
+    避免下一次 setup 撞 `FileExistsError` 把 4 个用例一起打成 ERROR。
     """
     root = Path(sys.executable).resolve().parent / "tesseract"
-    for _ in range(5):
+    for _ in range(10):
         shutil.rmtree(root, ignore_errors=True)
         if not root.exists():
             return
-        time.sleep(0.5)
+        time.sleep(0.3)
+    try:
+        stale = root.with_name(f"tesseract_stale_{os.getpid()}")
+        os.replace(root, stale)
+        shutil.rmtree(stale, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _real_tess() -> str:
@@ -111,24 +121,32 @@ def bundled_tree(clean_settings):
     chi_link = td_dir / "chi_sim.traineddata"
     _wipe_bundled_tree()          # 自愈：清掉任何残留，保证从零构造
 
-    root.mkdir(parents=True)
-    td_dir.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
+    td_dir.mkdir(parents=True, exist_ok=True)
     try:
         # exe 运行需要同目录 DLL：全部硬链接（零拷贝），树内 exe 才能真实执行
         src_dir = Path(tess).parent
         for dll in src_dir.glob("*.dll"):
-            os.link(dll, root / dll.name)
-        os.link(tess, exe_link)
-        os.link(chi, chi_link)
+            dst = root / dll.name
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+            # Windows 上残留文件可能被未退出的 tesseract 子进程锁住：
+            # 删不掉就当作"已就位"跳过，否则硬链接会 FileExistsError。
+            if not dst.exists():
+                os.link(dll, dst)
+        for src, dst in ((tess, exe_link), (chi, chi_link)):
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+            if not dst.exists():
+                os.link(src, dst)
         yield {"root": root, "exe": exe_link, "tessdata": td_dir}
     finally:
         # Windows：刚退出的子进程可能短暂锁住 exe，重试清理直至消失
-        for _ in range(5):
-            shutil.rmtree(root, ignore_errors=True)
-            if not root.exists():
-                break
-            import time
-            time.sleep(0.5)
+        _wipe_bundled_tree()
 
 
 # ---------------------------------------------------------- 捆绑探测

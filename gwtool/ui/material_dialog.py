@@ -1,20 +1,48 @@
 # -*- coding: utf-8 -*-
-"""写作参考库对话框：检索公版/开放授权语料包中的句子与模板。
+"""写作参考库对话框：检索语料包 + 导入本机任意文档/文字。
 
-只读检索：默认扫描 Downloads 下的「写作语料库_公版_*」目录或 zip；
-用户可手动选择其它包。选中结果可复制或插入当前正文。
+默认扫描：① 数据目录里的「我的素材」（v1.21 起支持任意文档导入）；
+② Downloads 下的「写作语料库_公版_*」目录或 zip。选中结果可复制或插入正文。
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QSplitter, QTextBrowser,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMessageBox, QPushButton,
+                               QSplitter, QTextBrowser, QTextEdit, QVBoxLayout,
+                               QWidget)
 
+from ..core import material_import
 from ..core.material_pack import MaterialPack, MaterialPackError, find_default_packs
+from .workers import FnWorker
+
+
+class _PasteDialog(QDialog):
+    """粘贴任意文字入库（标题可空，空则取首行）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("粘贴文字作为参考素材")
+        self.resize(720, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("标题（可空，默认取首行）："))
+        self.ed_title = QLineEdit()
+        lay.addWidget(self.ed_title)
+        lay.addWidget(QLabel("正文（任意文字，按句入库）："))
+        self.ed_text = QTextEdit()
+        self.ed_text.setPlaceholderText("把通知、总结、讲话稿或任意素材文字粘贴到这里…")
+        lay.addWidget(self.ed_text, 1)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        lay.addWidget(box)
+
+    def values(self) -> tuple[str, str]:
+        return self.ed_title.text().strip(), self.ed_text.toPlainText()
 
 
 class MaterialDialog(QDialog):
@@ -39,6 +67,13 @@ class MaterialDialog(QDialog):
         self.cmb_pack.setEditable(True)
         self.cmb_pack.setMinimumWidth(520)
         row1.addWidget(self.cmb_pack, 1)
+        btn_import = QPushButton("导入素材…")
+        btn_import.setToolTip("导入任意文档（docx/doc/wps/txt/rtf/pdf/md/html）或文本")
+        btn_import.clicked.connect(self._import_files)
+        row1.addWidget(btn_import)
+        btn_paste = QPushButton("粘贴文字…")
+        btn_paste.clicked.connect(self._paste_text)
+        row1.addWidget(btn_paste)
         btn_browse = QPushButton("浏览…")
         btn_browse.clicked.connect(self._browse)
         row1.addWidget(btn_browse)
@@ -46,6 +81,7 @@ class MaterialDialog(QDialog):
         btn_load.clicked.connect(self._load_selected)
         row1.addWidget(btn_load)
         root.addLayout(row1)
+        self.setAcceptDrops(True)
 
         self.lbl_stats = QLabel("未加载语料包")
         self.lbl_stats.setStyleSheet("color:#666")
@@ -96,17 +132,123 @@ class MaterialDialog(QDialog):
         root.addWidget(split, 1)
 
     # ------------------------------------------------------------ 加载
-    def _autoload(self) -> None:
-        packs = find_default_packs()
+    def _packs_all(self) -> list[Path]:
+        """自建素材包（优先） + Downloads 公版包。"""
+        packs: list[Path] = []
+        user = material_import.user_pack_dir()
+        try:
+            if (user / "index.json").is_file():
+                data = json.loads((user / "index.json").read_text(encoding="utf-8"))
+                if isinstance(data, list) and data:
+                    packs.append(user)
+        except (OSError, ValueError):
+            pass
+        packs.extend(find_default_packs())
+        return packs
+
+    def _refresh_packs(self, select: str | None = None) -> None:
+        packs = self._packs_all()
+        self.cmb_pack.clear()
         for p in packs:
             self.cmb_pack.addItem(str(p))
-        if packs:
+        if select:
+            self.cmb_pack.setCurrentText(select)
+        elif packs:
             self.cmb_pack.setCurrentIndex(0)
-            self._load_selected()
-        else:
+        if not packs:
             self.cmb_pack.addItem("")
             self.lbl_stats.setText(
-                "未发现默认语料包：请把「写作语料库_公版_*.zip」放到 Downloads，或点“浏览…”")
+                "还没有可用的参考素材。点「导入素材…」可把任意文档/文字导入；"
+                "也可把「写作语料库_公版_*.zip」放到 Downloads。")
+
+    def _autoload(self) -> None:
+        self._refresh_packs()
+        if (self.cmb_pack.currentText() or "").strip():
+            self._load_selected()
+
+    # ------------------------------------------------------------ 导入素材
+    _EXTS = (".docx", ".doc", ".wps", ".txt", ".rtf", ".pdf", ".md", ".html",
+             ".htm", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+
+    def _import_files(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "导入参考素材（可多选；也可拖入文件夹）", str(Path.home()),
+            "文档/文本/图片 (*.docx *.doc *.wps *.txt *.rtf *.pdf *.md *.html "
+            "*.htm *.png *.jpg *.jpeg *.bmp *.tif *.tiff);;所有文件 (*)")
+        if files:
+            self._start_import(files)
+
+    @classmethod
+    def _expand_inputs(cls, files: list[str]) -> list[str]:
+        """把目录展开成受支持文件；单目录最多 2000 个，避免误拖整个磁盘。"""
+        out: list[str] = []
+        for f in files:
+            p = Path(f)
+            if p.is_dir():
+                for sub in sorted(p.rglob("*")):
+                    if (sub.is_file()
+                            and (sub.suffix.lower() in cls._EXTS
+                                 or not sub.suffix)):
+                        out.append(str(sub))
+                        if len(out) >= 2000:
+                            return out
+            elif p.is_file():
+                out.append(str(p))
+        return out
+
+    def _start_import(self, files: list[str]) -> None:
+        files = self._expand_inputs(files)
+        if not files:
+            QMessageBox.information(self, "导入素材", "没有找到可导入的文件。")
+            return
+        material_import.ensure_pack()
+        self.lbl_stats.setText(f"正在导入 {len(files)} 个文件…")
+        worker = FnWorker(material_import.import_paths, files, parent=self)
+        worker.ok.connect(self._on_imported)
+        worker.failed.connect(self._on_import_failed)
+        self._import_worker = worker       # 持有引用，防线程对象提前回收
+        worker.start()
+
+    def _on_imported(self, summary) -> None:
+        self._refresh_packs(select=str(material_import.user_pack_dir()))
+        self._load_selected()
+        text = summary.text()
+        if summary.failed and not summary.imported:
+            QMessageBox.warning(self, "导入素材", text)
+        else:
+            QMessageBox.information(self, "导入素材", text)
+
+    def _on_import_failed(self, msg: str) -> None:
+        self.lbl_stats.setText("导入失败")
+        # 日志隐私门禁：f-string 不直接写进提示调用，先落变量
+        message = f"导入失败：{msg}"
+        QMessageBox.warning(self, "导入素材", message)
+
+    def _paste_text(self) -> None:
+        dlg = _PasteDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        title, text = dlg.values()
+        summary = material_import.import_text(title, text)
+        self._refresh_packs(select=str(material_import.user_pack_dir()))
+        self._load_selected()
+        if summary.failed and not summary.imported:
+            QMessageBox.warning(self, "粘贴文字", summary.text())
+        else:
+            QMessageBox.information(self, "粘贴文字", summary.text())
+
+    # ------------------------------------------------------------ 拖拽导入
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        files = [u.toLocalFile() for u in event.mimeData().urls()
+                 if u.isLocalFile()]
+        files = [f for f in files if Path(f).is_file()]
+        if files:
+            self._start_import(files)
+            event.acceptProposedAction()
 
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

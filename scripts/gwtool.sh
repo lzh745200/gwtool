@@ -13,6 +13,37 @@ LOG="$HOME/gwtool_启动诊断.log"
 
 say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$LOG" 2>/dev/null || true; }
 
+# ---- 会话环境落盘：闪退时这是唯一能还原现场的信息 ----
+{
+  printf '\n[%s] 启动\n' "$(date '+%F %T')"
+  printf 'arch=%s kernel=%s\n' "$(uname -m)" "$(uname -r)"
+  command -v ldd >/dev/null 2>&1 && ldd --version 2>/dev/null | head -1
+  printf 'session=%s desktop=%s\n' "${XDG_SESSION_TYPE:-}" "${XDG_CURRENT_DESKTOP:-}"
+  printf 'XMODIFIERS=%s GTK_IM_MODULE=%s QT_IM_MODULE=%s\n' \
+    "${XMODIFIERS:-}" "${GTK_IM_MODULE:-}" "${QT_IM_MODULE:-}"
+} >> "$LOG" 2>/dev/null || true
+
+# ---- v1.21 输入法：Qt6 需要显式选择 fcitx5/ibus 插件 ----
+# 不覆盖用户显式设置；只在未设置时按会话推断。插件是否存在由程序内
+# gwtool/ui/ime.py 再核一遍（找不到会弹可操作提示）。
+if [ -z "${QT_IM_MODULE:-}" ]; then
+  case "${XMODIFIERS:-}${GTK_IM_MODULE:-}" in
+    *fcitx*) export QT_IM_MODULE=fcitx ;;
+    *ibus*)  export QT_IM_MODULE=ibus ;;
+  esac
+fi
+# 系统安装的 fcitx5-qt6/ibus 插件在发行版 Qt6 目录里；PyInstaller 默认只把
+# QT_PLUGIN_PATH 指向包内，追加系统目录才能被 Qt 找到。
+for d in /usr/lib/aarch64-linux-gnu/qt6/plugins /usr/lib/x86_64-linux-gnu/qt6/plugins \
+         /usr/lib/qt6/plugins /usr/lib64/qt6/plugins; do
+  [ -d "$d" ] || continue
+  case ":${QT_PLUGIN_PATH:-}:" in
+    *":$d:"*) ;;
+    *) QT_PLUGIN_PATH="${QT_PLUGIN_PATH:+$QT_PLUGIN_PATH:}$d" ;;
+  esac
+done
+[ -n "${QT_PLUGIN_PATH:-}" ] && export QT_PLUGIN_PATH
+
 # 注意：参数里若带 \n，必须用 printf 转义，不能交给 echo。
 # bash 内置 echo 默认**不解释** \n，会把 "\n" 原样打成反斜杠+n —— 而这些提示
 # 恰好都在"启动失败"路径上（架构不匹配、缺库），用户看到的将是一行乱码般的
@@ -77,6 +108,10 @@ if [ -n "$MISSING" ]; then
 （sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-xinerama0 libxkbcommon-x11-0 libgl1 libegl1 等）"
 fi
 
+# ---- 运行库路径：包内优先（含随包分发的 libstdc++/libgcc_s）----
+# 麒麟 V10 的 libstdc++ 可能低于 Qt6 要求；包里带一份放在 $DIR，靠这里优先加载。
+export LD_LIBRARY_PATH="$DIR:$DIR/_internal:${LD_LIBRARY_PATH:-}"
+
 # ---- OCR（内置 Tesseract）：预置路径，无内置时自动回退系统安装 ----
 if [ -d "$DIR/ocr/bin" ]; then
     export PATH="$DIR/ocr/bin:$PATH"
@@ -84,13 +119,53 @@ if [ -d "$DIR/ocr/bin" ]; then
     export TESSDATA_PREFIX="$DIR/ocr/tessdata"
 fi
 
-# ---- 启动主程序；失败时保留诊断日志 ----
-"$EXE" "$@"
-rc=$?
+# ---- 启动主程序；stderr/stdout 同时落盘（桌面双击时这是唯一证据）----
+if command -v tee >/dev/null 2>&1; then
+  set -o pipefail
+  "$EXE" "$@" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+else
+  "$EXE" "$@" >> "$LOG" 2>&1
+  rc=$?
+fi
+
 if [ "$rc" -ne 0 ]; then
-  say "程序异常退出（退出码 $rc）"
-  say "若上方出现 Could not load the Qt platform plugin (xcb)，请按上面的命令补装运行库后重试。"
-  popup "程序异常退出（退出码 $rc）。
+  TAIL="$(tail -n 80 "$LOG" 2>/dev/null || true)"
+  MSG="程序异常退出（退出码 $rc）。"
+  case "$TAIL" in
+    *GLIBCXX_*|*"GLIBCXX_"*)
+      MSG="$MSG
+
+系统 C++ 运行库（libstdc++）版本低于程序要求（GLIBCXX 不匹配）。
+本机：$(ldd --version 2>/dev/null | head -1)
+修复：sudo apt install -y libstdc++6；若仍报错，说明系统过旧，请联系维护者获取
+与麒麟 V10 匹配的安装包。
+";;
+    *GLIBC_2.*|*"GLIBC_2."*)
+      MSG="$MSG
+
+系统 glibc 版本低于程序要求（GLIBC 不匹配）。
+本机：$(ldd --version 2>/dev/null | head -1)
+修复：升级系统或使用与麒麟 V10 匹配的安装包。
+";;
+    *"Could not load the Qt platform plugin"*|*"no Qt platform plugin"*)
+      MSG="$MSG
+
+Qt 图形平台插件加载失败，通常是缺少 xcb 运行库。
+修复：sudo apt install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0 \\
+  libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0 \\
+  libgl1 libegl1
+";;
+    *inputcontext*|*InputContext*|*"input method"*)
+      MSG="$MSG
+
+输入法插件加载失败，可能出现无法输入中文。
+修复：sudo apt install -y fcitx5-frontend-qt6（或 ibus）
+";;
+  esac
+  say "$MSG"
+  say "详细信息：$LOG"
+  popup "$MSG
 详细信息：$LOG"
 fi
 exit "$rc"
