@@ -405,7 +405,7 @@ $ .\.venv\Scripts\python.exe scripts\eval_corrector.py
 逐行两次 check_text → ['显式 → 显示', '显式 → 显示']
 ```
 同一份 `v1.8.0增强与修复记录.md`：整篇低置信 5 处 / 逐行 7 处（差异 2 个错形：
-`显式`、`则正则`）；`深审报告_v1.8.md`：整篇 7 处 / 逐行 28 处（差异 10 个错形）。
+`显式`、`则正则`）；`doc/archive/深审报告_v1.8.md`：整篇 7 处 / 逐行 28 处（差异 10 个错形）。
 
 而 UI 两个入口恰好用了不同粒度：
 - 参考面板 = **整篇**（`reference_panel.py:255` 取 `editor_getter()` 全文）；

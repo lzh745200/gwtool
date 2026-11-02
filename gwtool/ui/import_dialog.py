@@ -305,5 +305,9 @@ class ImportDialog(ThreadSafeDialog, QDialog):
                 for name, why in failures:
                     fh.write(f"{name}\t{why}\n")
             info(self, f"完整失败清单已保存：\n{out}")
-        except Exception:
-            pass  # 清单落盘失败不影响导入结果展示
+        except Exception as exc:
+            # 不打断导入流程，但必须留痕：静默失败会让用户以为清单"没有生成"，
+            # 而实际是目录不可写/被占用 —— 现场只有日志能查。
+            from .. import logs
+            logs.get_logger("ui.import").warning(
+                "导入失败清单落盘失败：%s", exc)

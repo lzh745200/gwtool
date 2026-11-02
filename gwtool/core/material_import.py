@@ -123,9 +123,8 @@ def _paragraphs(tree) -> list[str]:
     return out
 
 
-def _read_text_fallback(path: Path) -> str:
-    """解析器不认识的扩展名/解析失败：按纯文本多编码兜底。"""
-    raw = path.read_bytes()
+def _decode_any(raw: bytes) -> str:
+    """多编码兜底解码（UTF-8/GB18030/UTF-16/Big5，最后替换式 UTF-8）。"""
     for enc in ("utf-8-sig", "utf-8", "gb18030", "utf-16", "big5"):
         try:
             return raw.decode(enc)
@@ -134,15 +133,48 @@ def _read_text_fallback(path: Path) -> str:
     return raw.decode("utf-8", "replace")
 
 
+def _binary_reason(raw: bytes) -> str:
+    """这段字节"根本不是文本"时返回给用户的原因，看着像文本则返回空串。
+
+    为什么必须先挡：兜底解码会把**任意字节**按 GB18030 解成字符，于是一张 PNG
+    变成一万字、一半是替换符的"素材"进了库（实测 10247 字里 5120 个 U+FFFD），
+    界面还显示"已导入"，而这些乱码还会被切成句子进仿写库，污染写作参考。
+    判据用两条硬信号，不靠扩展名白名单（用户改扩展名是常事）：
+      · 前 4 KB 含空字节 —— 正常文本几乎不会出现 NUL；
+      · 解码后不可读字符（替换符或除制表/换行外的 C0 控制符）占比 > 10%。
+    """
+    if b"\x00" in raw[:4096]:
+        return "疑似二进制文件（含空字节），不是文本类素材"
+    sample = _decode_any(raw)[:4000]
+    if sample:
+        bad = sum(1 for ch in sample
+                  if ch == "\ufffd" or (ord(ch) < 32 and ch not in "\t\n\r"))
+        if bad / len(sample) > 0.10:
+            return "疑似二进制文件（大量不可读字符），不是文本类素材"
+    return ""
+
+
 def _load_index(pack: Path) -> list[dict]:
+    """读索引：文件不存在返回空表，**解析失败则报错，绝不当作空表**。
+
+    旧实现把"解析失败"和"没有索引"一样返回空表，于是下一次导入会以一条新记录
+    覆盖整个 index.json —— 用户此前导入的素材凭空从列表里消失（语料文件还在
+    磁盘上，但不再被引用，等于静默丢库）。
+    """
     p = pack / "index.json"
     if not p.is_file():
         return []
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (OSError, ValueError):
-        return []
+    except (OSError, ValueError) as exc:
+        raise MaterialImportError(
+            f"素材索引无法读取（{p}）：{exc}。"
+            "为避免覆盖原有记录，本次导入已中止；"
+            "可先备份该文件，确认无误后删除它再重新导入。") from exc
+    if not isinstance(data, list):
+        raise MaterialImportError(
+            f"素材索引格式异常（{p}：顶层应为数组），本次导入已中止以免覆盖。")
+    return data
 
 
 def _write_json(path: Path, data) -> None:
@@ -223,8 +255,14 @@ def import_paths(paths_in: list[str | Path], pack_dir: Path | None = None,
                     text = res.tree.plain_text()
                     title = (res.tree.title or path.stem).strip()
                 else:
-                    # 任意文本兜底：解析器不认识/坏了，也允许进库
-                    text = _read_text_fallback(path)
+                    # 任意文本兜底：解析器不认识/坏了，也允许进库。
+                    # 但先挡二进制——否则图片/压缩包会被解成乱码当素材收下。
+                    raw = path.read_bytes()
+                    why = _binary_reason(raw)
+                    if why:
+                        summary.failed.append((path.name, why))
+                        continue
+                    text = _decode_any(raw)
                     title = path.stem
                     if not text.strip():
                         summary.failed.append((path.name, res.error or "无文字"))
@@ -259,7 +297,7 @@ def import_text(title: str, text: str,
 
 
 def remove_doc(doc_id: str, pack_dir: Path | None = None) -> bool:
-    """从自建包删除一篇（对话框里可扩展；先提供核心 API）。"""
+    """从自建包删除一篇（对话框「删除此素材」用；返回是否真的删掉）。"""
     pack = ensure_pack(pack_dir)
     with _LOCK:
         index = _load_index(pack)

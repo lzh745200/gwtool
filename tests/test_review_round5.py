@@ -18,7 +18,7 @@
    而"简称与全称并存"最常见的出现场景恰恰是被「与/和/及」连在一起，
    模块 docstring 的招牌用例实测漏报。修复：确定性前导连接字修剪。
 
-误报澄清（勿重复投入，见 open-code-review审查报告.md 第五轮）：
+误报澄清（勿重复投入，见 doc/archive/open-code-review审查报告.md 第五轮）：
    - `style_profile.verdict` 对未知文种抛 KeyError 是 docstring 明写的
      fail-fast 设计（UI 按约束提供选项），不是缺陷；
    - `toolbox.amount_to_cn` 抛 ValueError 有 UI 层 try/except 兜底

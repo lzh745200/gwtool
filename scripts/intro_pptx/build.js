@@ -81,10 +81,10 @@ const BGWHITE = "FFFFFF";
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("GWTOOL · 单机离线版 v1.21.0", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
+  s.addText("GWTOOL · 单机离线版 v1.21.1", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
   s.addText("公文汇编助手", { x: M, y: 2.15, w: 9.2, h: 1.25, fontSize: 60, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("面向党政机关、企事业单位的单机智能公文汇编与写作辅助工具", { x: 0.53, y: 3.5, w: 8.6, h: 0.5, fontSize: 17, color: DMUTED, fontFace: FONT, margin: 0 });
-  const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GJB 5100A 军队公文格式", "1745 项自动化测试"];
+  const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GJB 5100A 军队公文格式", "2993 项自动化测试"];
   chips.forEach((t, i) => {
     const cx = M + (i % 2) * 4.55, cy = 4.35 + Math.floor(i / 2) * 0.68;
     s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: cx, y: cy, w: 4.3, h: 0.52, rectRadius: 0.08, fill: { color: DCARD }, line: { color: DLINE, width: 1 } });
@@ -111,7 +111,7 @@ const BGWHITE = "FFFFFF";
     ["04", "智能写作辅助", "12 种军队文种骨架 · 文秘工具箱 · 写作参考 · 三级纠错"],
     ["05", "一键汇编与成品输出", "三步向导 · 国标模板 · Word 引擎 · 两遍渲染 · A3 小册子"],
     ["06", "质检、对比与安全", "格式体检 · 文档对比查重 · 历史快照 · 加密备份"],
-    ["07", "交付、质量与生态", "双平台 · 打包矩阵 · CI/CD · 1745 项测试与性能验收"],
+    ["07", "交付、质量与生态", "双平台 · 打包矩阵 · CI/CD · 2993 项测试与性能验收"],
   ];
   let y = 1.78;
   items.forEach(([n, t, d]) => {
@@ -176,7 +176,7 @@ divider(3, "01", "认识公文汇编助手", "它是什么、为谁解决什么�
     ["123393", "词典词条（条）", "开源 CC-CEDICT，随包分发"],
     ["12", "军队公文文种", "对应《军队机关公文处理工作条例》第八条"],
     ["8+4", "可导入格式", "文档 8 种 + 图片 4 类（内置 OCR）"],
-    ["1745", "自动化测试用例", "pytest 全量回归 + 性能验收"],
+    ["2993", "自动化测试用例", "pytest 全量回归 + 性能验收"],
     ["<10s", "50 个文件导入", "后台线程批量解析入库"],
     ["<1s", "全文检索响应", "FTS5 + jieba，119.8 万字公版语料"],
     ["0", "网络请求", "全离线设计，打包排除网络组件"],
@@ -993,7 +993,7 @@ divider(31, "06", "质检、对比与安全", "交出去之前，再把它从头
 divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全、发得出", [
   "Windows x64 + 麒麟 V10 ARM64 双平台交付",
   "2 个离线安装包自动构建，GitHub Actions 全自动发布",
-  "1745 项测试 + 50 步端到端自检",
+  "2993 项测试 + 55 步端到端自检",
 ]);
 
 /* ================= S37 双平台 ================= */
@@ -1067,7 +1067,7 @@ divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全
     { text: "push v* 标签\n或手动触发\n\nbuild.yml\nGitHub Actions", options: { fontSize: 12.5, color: DTEXT } },
   ], { x: 0.72, y: 2.15, w: 2.1, h: 3.5, fontFace: FONT, margin: 0, lineSpacingMultiple: 1.3 });
   const jobs = [
-    ["Job 1 · windows-latest", ["ruff 静态检查（gwtool/scripts/tests）", "pytest 全量 约 2900 用例 + 55 步端到端自检", "PyInstaller 按 spec 打包 + Tesseract/中文包内置", "smoke_dist 冒烟校验 → ISCC 安装包（版本号取自代码）"]],
+    ["Job 1 · windows-latest", ["ruff 静态检查（gwtool/scripts/tests）", "pytest 全量约 3000 用例 + 55 步端到端自检", "PyInstaller 按 spec 打包 + Tesseract/中文包内置", "smoke_dist 冒烟校验 → ISCC 安装包（版本号取自代码）"]],
     ["Job 2 · ubuntu-24.04-arm", ["原生 ARM64 runner（非交叉编译）", "Debian 11 容器（glibc 2.31 对齐麒麟 V10）", "同一 spec 打包 + OCR 集成 + 运行库自检", "smoke_dist 冒烟校验 → dpkg-deb 组装 .deb"]],
     ["Job 3 · release", ["依赖前两个 Job 全绿（含打包与冒烟）", "推 v* 标签触发 / 手动 workflow_dispatch", "gh release create 自动建发布", "附 2 个安装包 + 自动 Release Notes"]],
   ];
@@ -1084,15 +1084,15 @@ divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全
 /* ================= S40 质量保障 ================= */
 {
   const s = p.addSlide();
-  header(s, "07 交付、质量与生态", "质量保障：1745 项测试，性能指标写进断言", 40);
+  header(s, "07 交付、质量与生态", "质量保障：2993 项测试，性能指标写进断言", 40);
   // 手绘条形图
   s.addText("测试分布（pytest，按文件 · 前 9）", { x: M, y: 1.9, w: 5, h: 0.38, fontSize: 13.5, bold: true, color: INK, fontFace: FONT, margin: 0 });
   const bars = [
-    ["test_corrector_l5", 46], ["test_features", 24], ["test_attachments", 20],
-    ["test_corrector_l4", 19], ["test_correction_highlighter", 19], ["test_backup_limits", 19],
-    ["test_stage3_extras", 19], ["test_batch_correct", 17], ["test_registry", 17],
+    ["grammar_rules", 88], ["consistency", 86], ["real_corpus_fixes_v110d", 86],
+    ["theme_contrast_v19", 85], ["deep_review_regression", 80], ["genre_v19b", 72],
+    ["compile_norm_v115", 65], ["v170_batch_b", 64], ["receive", 59],
   ];
-  const maxV = 46, bx0 = 3.15, bw2 = 3.55;
+  const maxV = 88, bx0 = 3.15, bw2 = 3.55;
   let by = 2.42;
   bars.forEach(([t, v], i) => {
     s.addText(t, { x: M, y: by, w: 2.6, h: 0.34, valign: "middle", align: "right", fontSize: 11, color: MUTED, fontFace: FONT, margin: 0 });
@@ -1100,7 +1100,7 @@ divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全
     s.addText(String(v), { x: bx0 + bw2 * v / maxV + 0.08, y: by, w: 0.6, h: 0.34, valign: "middle", fontSize: 11.5, bold: true, color: PRIMARY, fontFace: FONT, margin: 0 });
     by += 0.44;
   });
-  s.addText("合计 1745 用例 · 78 个测试文件 · ruff 门槛 E9+F+FA100/FA102+B+PLW2901（拦“忘导入即崩溃”“py39 注解崩”“未用符号回归”）", { x: M, y: 6.5, w: 7, h: 0.4, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
+  s.addText("合计 2993 用例 · 135 个测试文件 · ruff 门槛 E9+F+FA100/FA102+B+PLW2901（拦“忘导入即崩溃”“py39 注解崩”“未用符号回归”）", { x: M, y: 6.5, w: 7, h: 0.4, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
   // 右侧性能验收
   s.addShape(p.shapes.ROUNDED_RECTANGLE, { x: 7.6, y: 1.9, w: 5.23, h: 4.95, rectRadius: 0.08, fill: { color: DARK }, line: { type: "none" } });
   s.addText("性能验收（写进测试的硬指标）", { x: 7.88, y: 2.08, w: 4.7, h: 0.4, fontSize: 13.5, bold: true, color: "F2D8A0", fontFace: FONT, margin: 0 });
@@ -1292,6 +1292,7 @@ divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全
     rowItem(s, M, y, W - 2 * M, k, v, { leadSize: 14, descSize: 12, h: 0.75 });
     y += 0.85;
   });
+  s.addText("v1.21 起：可直接导入任意文档/文字（本机「我的素材」，逐句标注、可检索、可在界面删除）", { x: M, y: 6.3, w: W - 2 * M, h: 0.35, fontSize: 11.5, color: MUTED, fontFace: FONT, margin: 0 });
 }
 
 /* ================= S40g v1.17 校对可信度 ================= */
@@ -1321,13 +1322,13 @@ divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("公文汇编助手 · 单机离线版 v1.21.0", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
+  s.addText("公文汇编助手 · 单机离线版 v1.21.1", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
   s.addText("完全离线 · 数据自主 · 开箱即用", { x: M, y: 2.3, w: 11.5, h: 1.0, fontSize: 42, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("不联网、不上传、不留痕 —— 一台电脑，就是一座公文资料馆。", { x: 0.53, y: 3.45, w: 10, h: 0.5, fontSize: 16, color: DMUTED, fontFace: FONT, margin: 0 });
   const docs = [
-    ["README.md", "功能总览 · 快速开始 · 打包发布 · 验收对照"],
-    ["项目文件结构说明.md", "写给新手的逐文件导读与“改 X 去哪”速查表"],
-    ["open-code-review审查报告.md", "全项目代码审查：范围、逐条真伪甄别、修复与验证"],
+    ["doc/README.md", "功能总览 · 快速开始 · 打包发布 · 验收对照"],
+    ["doc/项目文件结构说明.md", "写给新手的逐文件导读与“改 X 去哪”速查表"],
+    ["doc/v1.21.1修复记录.md", "本版修复与验收证据；v1.6–v1.9 方案/审查报告见 doc/archive/"],
   ];
   docs.forEach(([t, d], i) => {
     const x = M + i * 4.2;

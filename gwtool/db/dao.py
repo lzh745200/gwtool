@@ -1170,7 +1170,6 @@ def _fts_count(fts_table: str, src_table: str, match: str) -> int:
     return int(row[0]) if row else 0
 
 
-_DICT_COLS = "SELECT id,word,definition FROM dictionary"
 # 词典检索的"排序扫描上限"：命中数超过它就不再按词长全量排序。
 # 依据（12.3 万词条实测）：范围查询本身 0.09 ms，加 ORDER BY LENGTH 后 0.87 ms，
 # 而短前缀（如"安全"）能命中数千条、排序成本会随命中数线性增长；

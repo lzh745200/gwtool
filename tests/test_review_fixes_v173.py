@@ -2,7 +2,7 @@
 """OpenCodeReview 全量审查（v1.7.3 基线）修复项的回归护栏。
 
 覆盖 5 项 P1 与关键 P2 的可测行为；无 LLM 依赖、全部离线可跑。
-对应报告：doc/OpenCodeReview全量审查报告_v1.7.3.md §三/§四。
+对应报告：doc/archive/OpenCodeReview全量审查报告_v1.7.3.md §三/§四。
 """
 from __future__ import annotations
 

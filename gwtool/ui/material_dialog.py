@@ -120,6 +120,11 @@ class MaterialDialog(QDialog):
         btn_copy = QPushButton("复制选中")
         btn_copy.clicked.connect(self._copy)
         btns.addWidget(btn_copy)
+        self.btn_delete = QPushButton("删除此素材")
+        self.btn_delete.setToolTip("仅对「我的素材」里自己导入的篇目可用")
+        self.btn_delete.clicked.connect(self._delete_current)
+        self.btn_delete.setEnabled(False)
+        btns.addWidget(self.btn_delete)
         self.btn_insert = QPushButton("插入到正文")
         self.btn_insert.clicked.connect(self._insert)
         self.btn_insert.setEnabled(self._insert_cb is not None)
@@ -270,6 +275,7 @@ class MaterialDialog(QDialog):
         if self._pack is not None:
             self._pack.close()
         self._pack = pack
+        self.btn_delete.setEnabled(False)
         st = pack.stats()
         self.lbl_stats.setText(
             f"已加载：文档 {st['docs']} 篇 / 汉字 {st['han_chars']:,} / "
@@ -315,6 +321,7 @@ class MaterialDialog(QDialog):
     # ------------------------------------------------------------ 预览/动作
     def _preview(self, row: int) -> None:
         if row < 0:
+            self.btn_delete.setEnabled(False)
             return
         item = self.lst.item(row)
         kind, idx = item.data(Qt.UserRole)
@@ -334,6 +341,67 @@ class MaterialDialog(QDialog):
                 f"<b>角色：</b>{h.role or '篇目命中'}　"
                 f"<b>规则：</b>{h.rule}　<b>置信度：</b>{h.conf:.2f}</p>"
                 f"<p style='font-size:16px'>{h.sentence}</p>")
+        self.btn_delete.setEnabled(self._can_delete(kind, idx))
+
+    def _is_user_pack(self) -> bool:
+        """当前加载的是「我的素材」自建包（唯一可写的包）时才允许删除。"""
+        if self._pack is None:
+            return False
+        try:
+            return (Path(self._pack.path).resolve()
+                    == material_import.user_pack_dir().resolve())
+        except OSError:
+            return False
+
+    def _can_delete(self, kind: str, idx: int) -> bool:
+        if kind != "hit" or not self._is_user_pack():
+            return False
+        try:
+            return bool(self._hits[idx].doc_id)
+        except (IndexError, AttributeError):
+            return False
+
+    def _delete_current(self) -> None:
+        row = self.lst.currentRow()
+        if row < 0:
+            return
+        kind, idx = self.lst.item(row).data(Qt.UserRole)
+        if not self._can_delete(kind, idx):
+            return
+        hit = self._hits[idx]
+        name = hit.title or hit.doc_id
+        # 日志/提示隐私门禁：不把 f-string 直接写进调用
+        message = f"确定从「我的素材」删除《{name}》？删除后不可恢复。"
+        answer = QMessageBox.question(self, "删除参考素材", message)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not material_import.remove_doc(hit.doc_id):
+            QMessageBox.warning(self, "删除参考素材",
+                                "没找到该篇素材，可能已被删除。")
+        self._reload_after_delete()
+
+    def _reload_after_delete(self) -> None:
+        """删除后重载「我的素材」；删空时收起列表（空包不能重新打开）。"""
+        remaining = 0
+        try:
+            raw = json.loads(
+                (material_import.user_pack_dir() / "index.json")
+                .read_text(encoding="utf-8"))
+            remaining = len(raw) if isinstance(raw, list) else 0
+        except (OSError, ValueError):
+            remaining = 0
+        if remaining == 0:
+            if self._pack is not None:
+                self._pack.close()
+            self._pack = None
+            self._hits, self._templates = [], []
+            self.lst.clear()
+            self.preview.clear()
+            self.lbl_stats.setText("「我的素材」里已经没有素材了，可继续导入。")
+            self.btn_delete.setEnabled(False)
+            return
+        self._load_selected()
+        self._do_search()
 
     def _current_text(self) -> str:
         row = self.lst.currentRow()

@@ -88,7 +88,6 @@ CXC_EXCLUDED = frozenset("的")
 #    一个 token，这也是"每一批/每一场"的合法重叠。
 # ④ 固定搭配白名单：真实语料复核确认的文学/政治固定说法（`对标对表`、`权权交易`）。
 #    数量刻意极少 —— 白名单是最后一道兜底，不是主要判据。
-_TOKEN_GUARD_DOC = """①② 见 _inside_longer_token / _is_exact_token 的 docstring。"""
 _QUANTIFIERS = frozenset(
     "批场簇群排串堆片段条块张户家位名个次遍回阵番层重步项件起波轮代辈支队组级档期届页行列"
     # v1.14.0 C4（200 篇真实语料）：公文里"一+量词+XX"的量词远不止上面这些 ——
