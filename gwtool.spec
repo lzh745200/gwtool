@@ -5,11 +5,32 @@
 此前构建参数散落在 build_windows.bat 与 CI 两个 job 中且已漂移，现收敛于此文件。
 """
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
 
 datas = [('gwtool/resources/data/seed.db', 'gwtool/resources/data')]
 datas += collect_data_files('opencc')
+
+# 输入法插件目录必须显式收集。PyInstaller 的 PySide6 hook 各版本对
+# `platforminputcontexts/` 的处理不一致（实测 Windows 产物里只剩
+# qtvirtualkeyboardplugin），而麒麟上缺了 `libcomposeplatforminputcontextplugin.so`
+# 就意味着 QT_IM_MODULE 的任何降级都落空 —— 表现为"窗口能开、一个中文都打不出来"。
+# 只收集这一个子目录（几 MB），不碰其它 Qt 部件；两种 wheel 布局都探一遍
+# （Windows 是 PySide6/plugins/…，Linux 是 PySide6/Qt/plugins/…）。
+try:
+    import PySide6
+
+    _ps_root = Path(PySide6.__file__).resolve().parent
+    for _sub in (_ps_root / "Qt" / "plugins" / "platforminputcontexts",
+                 _ps_root / "plugins" / "platforminputcontexts"):
+        if _sub.is_dir() and any(_sub.iterdir()):
+            datas.append((str(_sub),
+                          "PySide6/" + _sub.relative_to(_ps_root).as_posix()))
+            break
+except Exception:
+    pass  # 收集失败不阻断打包；启动期 ime.py 仍会做运行时降级
+
 # 第三方来源与许可声明（third_party/）：MIT 要求"在软件的所有副本或实质性
 # 部分中保留版权与许可声明"，PolyForm Noncommercial 要求附许可全文。
 # 随产物一起分发，用户才能看到"这些派生数据仅限非商业用途"这个使用边界；

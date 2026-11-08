@@ -1,13 +1,13 @@
 # 公文汇编助手（单机离线版）
 
 面向党政机关、企事业单位的**单机版智能公文汇编与写作辅助工具**。完全离线运行，
-支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.21.1**。
+支持 **Windows 10/11 (x64)** 与 **麒麟 V10 (ARM64)**。当前版本 **v1.21.2**。
 
 > 📖 **产品文档统一维护在 [doc/](doc/)**，本文件只做入口指引（避免同一份内容两处维护、两处漂移）。
 >
 > - 功能总览 / 快速开始 / 打包发布 / 数据目录 / 验收对照：**[doc/README.md](doc/README.md)**
 > - 逐文件讲解"我想改 X 该去哪个文件"：**[doc/项目文件结构说明.md](doc/项目文件结构说明.md)**
-> - 本版改了什么：**[doc/v1.21.1修复记录.md](doc/v1.21.1修复记录.md)**（麒麟三问题收口与素材导入健壮性修复；v1.21.0 的可诊断化/输入法/任意素材导入见 **[doc/v1.21.0修复记录.md](doc/v1.21.0修复记录.md)**）
+> - 本版改了什么：**[doc/v1.21.2修复记录.md](doc/v1.21.2修复记录.md)**（麒麟 Qt6 输入法：插件校验 + XIM 兜底 + 打包收口；v1.21.1 的三问题收口见 **[doc/v1.21.1修复记录.md](doc/v1.21.1修复记录.md)**）
 > - 历史方案与审查报告（v1.6–v1.9，已归档、不再更新）：**[doc/archive/](doc/archive/)**
 
 核心解决五大痛点：材料收集散乱、格式调整繁琐、错别字难查、写作无参考、发文无台账。
@@ -26,7 +26,7 @@ python -m venv .venv
 ## 质量门禁（提交前必须全绿）
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # 2053 passed / 13 skipped
+.venv/bin/python -m pytest tests/ -q     # 2994 passed / 5 skipped
 ruff check gwtool/ scripts/ tests/ main.py
 .venv/bin/python scripts/e2e_check.py    # 55 项端到端自检
 ```

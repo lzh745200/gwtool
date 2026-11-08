@@ -181,30 +181,33 @@ def run(import_path: str = "") -> int:
     if app is None:
         return 1
 
-    # 输入法探测到 fcitx/ibus 但插件缺失时，给一次可操作的提示（只提示一次，
-    # 免得每次启动都弹）。这不是致命错误，不能阻断启动。
+    # 输入法**确实不可用**时才弹可操作提示（只提示一次）：
+    # XIM 兜底能用中文但也会产生 warning，那种情况只写日志，不能天天弹窗打扰。
     try:
         warnings = list((ime_info or {}).get("warnings") or [])
-        if warnings and sys.platform == "linux":
-            from PySide6.QtWidgets import QMessageBox
-            detail = "\n".join(warnings)
-            box = QMessageBox(
-                QMessageBox.Warning, "输入法可能不可用",
-                "检测到系统使用了中文输入法，但程序没有找到对应的 Qt6 插件，"
-                "可能出现无法切换/输入中文。\n\n"
-                f"{detail}\n\n"
-                "修复（麒麟/Debian 系）：\n"
-                "  sudo apt install fcitx5-frontend-qt6   # fcitx5\n"
-                "  sudo apt install ibus                  # 或 ibus\n"
-                "安装后重启本程序。\n"
-                "详细诊断：终端执行 gwtool.sh --startup-report")
-            box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-            # 必须由 app 持有引用：局部变量随作用域回收会把对话框一起销毁。
-            app._ime_warning_box = box
-            box.show()
-            box.raise_()
+        usable = bool((ime_info or {}).get("usable", False))
+        if warnings and not usable:
+            logs.get_logger("app").warning("输入法不可用：%s", warnings)
+            if sys.platform == "linux":
+                from PySide6.QtWidgets import QMessageBox
+                detail = "\n".join(warnings)
+                box = QMessageBox(
+                    QMessageBox.Warning, "输入法可能不可用",
+                    "检测到系统使用了中文输入法，但程序没有找到对应的 Qt6 插件，"
+                    "可能出现无法切换/输入中文。\n\n"
+                    f"{detail}\n\n"
+                    "修复（麒麟/Debian 系）：\n"
+                    "  sudo apt install fcitx5-frontend-qt6   # fcitx5\n"
+                    "  sudo apt install ibus                  # 或 ibus\n"
+                    "安装后重启本程序。\n"
+                    "详细诊断：终端执行 gwtool.sh --startup-report")
+                box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+                # 必须由 app 持有引用：局部变量随作用域回收会把对话框一起销毁。
+                app._ime_warning_box = box
+                box.show()
+                box.raise_()
         elif warnings:
-            logs.get_logger("app").warning("输入法提示：%s", warnings)
+            logs.get_logger("app").info("输入法提示（已可用）：%s", warnings)
     except Exception:
         pass
 
