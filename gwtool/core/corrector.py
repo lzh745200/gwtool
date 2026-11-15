@@ -671,7 +671,14 @@ def _suppress_inside_common_words(
                 # 四字及以上不受影响（成语错形不可能由正常词跨接产生），
                 # 故只对两字条目收紧，避免误伤长对召回。
                 if not (s in boundaries and e in boundaries):
-                    continue
+                    # v1.21.3：2 字精标对被 jieba 切开时不再**一律**丢弃。
+                    # 原规则是为拦"前词尾 + 后词首"的跨词相接（按装+机容量、
+                    # 按排+放标准），但一刀切也把真错别字一起杀了：已径报备、
+                    # 原困分析、安照要求 —— 这些后面接的字并不能与错形末字成词。
+                    # 新判据只放行"末字与后一字不成词"的精标对，跨词相接仍拦。
+                    if not (hit in _CURATED_WRONG and
+                            not _joins_neighbor_word(text, s, e)):
+                        continue
             elif boundaries and s not in boundaries and e not in boundaries:
                 continue  # 两端均在词内部 -> 误报
         out.append(Correction(s, e, hit, correct, cat, "词库匹配", conf))
@@ -724,6 +731,28 @@ _DOC_REPEAT_MIN = 2
 # `布署` 原始命中同样不会被误伤，语义稳定、不依赖调用方传的 conf。
 _CURATED_WRONG: frozenset[str] = frozenset(
     w for w, _c, _cat, conf in CURATED_PAIRS if conf > 0)
+
+
+def _joins_neighbor_word(text: str, start: int, end: int) -> bool:
+    """命中是否与**左右相邻字**构成词 —— "跨词相接"的判据（两侧都查）。
+
+    用于 2 字精标对被分词切开时的复核。两个真实形态：
+      · 后接：`按装` + `机容量`（装+机=装机）→ 前一词的尾 + 后一词的首；
+      · 前接：`各位` + `莅临` 里的 `位临`（各+位=各位）——只查后一字会漏，
+        实测 E7 因此把 `各位莅临` 判成误改（把正确的"莅临"改成"莅临"）。
+    两侧任一成词即视为跨词相接，不报；两侧都不成词才认为是真笔误。
+    """
+    last = text[end - 1]
+    if end < len(text):
+        nxt = text[end]
+        if "\u4e00" <= nxt <= "\u9fff" and jieba_freq(last + nxt) > 0:
+            return True
+    first = text[start]
+    if start >= 1:
+        prev = text[start - 1]
+        if "\u4e00" <= prev <= "\u9fff" and jieba_freq(prev + first) > 0:
+            return True
+    return False
 
 
 def _is_common_char_sequence(hit: str) -> bool:
