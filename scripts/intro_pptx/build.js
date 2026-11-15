@@ -81,7 +81,7 @@ const BGWHITE = "FFFFFF";
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("GWTOOL · 单机离线版 v1.21.3", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
+  s.addText("GWTOOL · 单机离线版 v1.21.4", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 13, bold: true, color: ACCENT, charSpacing: 3, fontFace: FONT, margin: 0 });
   s.addText("公文汇编助手", { x: M, y: 2.15, w: 9.2, h: 1.25, fontSize: 60, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("面向党政机关、企事业单位的单机智能公文汇编与写作辅助工具", { x: 0.53, y: 3.5, w: 8.6, h: 0.5, fontSize: 17, color: DMUTED, fontFace: FONT, margin: 0 });
   const chips = ["完全离线 · 零网络请求", "Windows x64 + 麒麟 ARM64", "GJB 5100A 军队公文格式", "2999 项自动化测试"];
@@ -1322,13 +1322,13 @@ divider(36, "07", "交付、质量与生态", "装得上、跑得动、测得全
   const s = p.addSlide();
   s.background = { color: DARK };
   seal(s, M, 0.55, 0.44, "文");
-  s.addText("公文汇编助手 · 单机离线版 v1.21.3", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
+  s.addText("公文汇编助手 · 单机离线版 v1.21.4", { x: 1.08, y: 0.55, w: 7, h: 0.44, valign: "middle", fontSize: 12, color: DMUTED, fontFace: FONT, margin: 0 });
   s.addText("完全离线 · 数据自主 · 开箱即用", { x: M, y: 2.3, w: 11.5, h: 1.0, fontSize: 42, bold: true, color: "FFFFFF", fontFace: FONT, margin: 0 });
   s.addText("不联网、不上传、不留痕 —— 一台电脑，就是一座公文资料馆。", { x: 0.53, y: 3.45, w: 10, h: 0.5, fontSize: 16, color: DMUTED, fontFace: FONT, margin: 0 });
   const docs = [
     ["doc/README.md", "功能总览 · 快速开始 · 打包发布 · 验收对照"],
     ["doc/项目文件结构说明.md", "写给新手的逐文件导读与“改 X 去哪”速查表"],
-    ["doc/v1.21.3修复记录.md", "本版修复与验收证据；麒麟输入法现场排查见 doc/麒麟输入法排查与修复.md"],
+    ["doc/v1.21.4修复记录.md", "本版修复与验收证据；麒麟输入法现场排查见 doc/麒麟输入法排查与修复.md"],
   ];
   docs.forEach(([t, d], i) => {
     const x = M + i * 4.2;
